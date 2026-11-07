@@ -8,6 +8,8 @@
 
 ## 1. 出口压缩
 
+新增 `__biliHome()`：按 `HOME` → `USERPROFILE` → `os.homedir()` 解析家目录，三个平台一致。
+
 新增 `__biliUpstreamEncoding()`：先读 `~/.local/state/billion-context/upstream-encoding`（内容 `gzip` / `br`，其他值当关闭），读不到再读 `~/.config/billion-context/billion-context.json` 的 `upstream.encoding`；按文件 mtime 缓存。
 
 压缩发生在转发之前，入口是 `fetchWithTimeout`：
@@ -61,7 +63,7 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 - `encoding`：`gzip` / `br` / `none`
 - `dir`：本次指令原文；空串表示没有指令
 
-每次压缩另写一行 `~/.local/state/billion-context/upstream-encode.log`：
+每次压缩另写一行 `~/.local/state/billion-context/upstream-encode.log`（Windows 上是 `%USERPROFILE%\.local\state\billion-context\upstream-encode.log`）：
 
 ```
 2026-11-08T17:41:48.332Z encoded 481153 -> 142851 (br) rid=e79ee3c7-…

@@ -19,15 +19,24 @@ DSH 的「模型请求加速」插件和 bili 都在做同一件事——把请�
 
 细节和代码位置见 [PATCHES.md](./PATCHES.md)。
 
+## 平台
+
+macOS、Linux、Windows 都可用，补丁和脚本里没有平台专属命令：
+
+- 家目录按 `HOME` → `USERPROFILE` → `os.homedir()` 的顺序解析，所以 `~/.local/state/billion-context/upstream-encoding` 在 Windows 上落在 `%USERPROFILE%\.local\state\billion-context\upstream-encoding`（正斜杠路径 Node 也认）
+- 需要换位置时设 `BILI_UPSTREAM_ENCODING_FILE`
+- 安装与重启脚本是 Node 写的（`scripts/*.mjs`），不依赖 shell、`lsof` 或 `nohup`
+- 默认安装位置：macOS/Linux `~/.dsh/profiles/desktop/node_modules/billion-context`，Windows `%USERPROFILE%\.dsh\profiles\desktop\node_modules\billion-context`（同一个 `os.homedir()` 表达式，可用参数或 `BILI_PKG` 覆盖）
+
 ## 安装
 
 ```sh
-./scripts/install.sh                 # 默认写进 ~/.dsh/profiles/desktop/node_modules/billion-context
-./scripts/install.sh /path/to/billion-context   # 或指定安装位置
-./scripts/restart-bili.sh            # 重启后生效
+node scripts/install.mjs                    # 默认位置
+node scripts/install.mjs /path/to/billion-context
+node scripts/restart.mjs                    # 重启后生效
 ```
 
-install.sh 会先把现有的 `dist/index.js` 备份成 `dist/index.js.bak-<时间戳>`，再覆盖。
+`install.mjs` 会先把现有的 `dist/index.js` 备份成 `dist/index.js.bak-<时间戳>`，再覆盖；`restart.mjs` 通过 `/__bili/shutdown` + 健康检查完成重启，若没有守护进程会自动拉起一个。
 
 ## 验证
 
@@ -36,7 +45,7 @@ curl -s http://127.0.0.1:18787/__bili/health
 curl -s "http://127.0.0.1:18787/__bili/encode-stats?rid=<某个 rid>" | head -c 400
 ```
 
-记录里 `dir` 为空串表示这条请求没有带指令、走的是 bili 自己的全局设置；`encoding` 是 `none` 表示这条没有压缩。
+（Windows 上没有 curl 时，浏览器打开同样地址即可。）记录里 `dir` 为空串表示这条请求没有带指令、走的是 bili 自己的全局设置；`encoding` 是 `none` 表示这条没有压缩。
 
 ## 开关
 
