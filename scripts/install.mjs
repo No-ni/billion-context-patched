@@ -340,8 +340,12 @@ const acceleratorSpec = linkSpec(acceleratorPath);
 // off or removed — which is the whole point of keeping the switching in here.
 const changes = [];
 const bundles = [];
-for (const name of bundleOwner.bundles) if (!bundles.includes(name)) bundles.push(name);
-if (!bundles.includes(WRAPPER)) bundles.push(WRAPPER);
+for (const name of bundleOwner.bundles) if (!bundles.includes(name) && name !== WRAPPER) bundles.push(name);
+// Last on purpose: entry configuration is composed in list order, so the rows this
+// package ships can only reach the upstream entries once those entries exist. With
+// the wrapper anywhere earlier the rows find nothing, print "entry not found", and
+// the two upstream packages start alongside it.
+bundles.push(WRAPPER);
 if (JSON.stringify(bundles) !== JSON.stringify(bundleOwner.bundles)) {
   bundleOwner.bundles = bundles;
   changes.push("bundles -> " + bundles.join(", "));
@@ -494,6 +498,6 @@ if (!dryRun && layerSource.includes(MARKER)) {
 }
 
 say("");
-say("done. Restart DSH, then check Settings > Plugins: one card, " + WRAPPER + ".");
+say("done. Restart DSH. Settings > Plugins lists installed packages; only " + WRAPPER + " runs.");
 say("Switch it off, or remove it, and billion-context plus the accelerator start again by themselves.");
 say("Both settings pages (billion-context and 模型请求加速) stay where they are.");
