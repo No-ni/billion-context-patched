@@ -102,6 +102,9 @@ const isNewer = (installed, published) => {
   return false;
 };
 
+/** The profile this package is installed into: <profile>/plugins/bili-context-patch. */
+const PROFILE_ROOT = dirname(dirname(PACKAGE_ROOT));
+
 /** This install's manifest: its version, and where the checkout that built it lives. */
 const readLocalManifest = async () => {
   try {
@@ -139,7 +142,9 @@ const updateFromRepo = async (repo) => {
   if (!pulled.ok) return { ok: false, output: pulled.output };
   // The installer is plain Node: run it with this process's own binary, which is
   // Electron here, in its Node role.
-  const installed = await run(process.execPath, [join(repo, "scripts", "install.mjs")], {
+  // The installer is told which profile to write, so an install in a profile other
+  // than the default one still updates itself instead of the default profile.
+  const installed = await run(process.execPath, [join(repo, "scripts", "install.mjs"), join(PROFILE_ROOT, "node_modules", "billion-context")], {
     cwd: repo,
     timeout: INSTALL_TIMEOUT_MS,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
