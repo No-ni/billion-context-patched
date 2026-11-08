@@ -78,25 +78,25 @@ dsh plugin --profile desktop remove bili-context-patch
 
 `plugins/bili-context-patch`、`plugins/model-request-accelerator` 与 `node_modules/billion-context` 会留在磁盘上，但不再被任何组合层挂载，不启动、不占资源。要彻底清掉，删掉这两个目录并在 profile 的 `dependencies` 里移除对应条目即可。
 
-### 原版插件由这个包自己关掉
+### 原版怎么被关掉
 
-如果机器上装着 `billion-context` 或 `dsh-plugin-model-request-accelerator`，它们不该和合并插件同时跑。这件事由**包自己**负责，用户的配置里不落任何东西：
+安装时脚本把 `billion-context` 和 `dsh-plugin-model-request-accelerator` 从 `dsh.profile.bundles` 里移出去，只留 `bili-context-patch`。插件页的开关就是这张清单的投影，所以那两张卡片显示为关闭，网页也只下发一个客户端包。
 
-1. 包里的 `dsh.bundle.patch.yml` 末尾带着 `disabled: true` 的条目行（只为实际装了的包生成，没装的不写）；
-2. 这一层只有在包被列进 `dsh.profile.bundles` 时才生效——**关掉或卸载这个包，层就没了，两个原版自己回来**；
-3. 宿主半侧在挂载自己的子插件之前还会检查一遍条目树，把仍然开着的原版条目关掉。检查必须在挂载之前：两边注册同一批服务和 HTTP 路由，晚一步关会让已经注册的接口跟着一起消失（实测接口会 404）。
+包在两个地方兜底：
 
-三种状态都上机跑过：
+1. `dsh.bundle.patch.yml` 里只有一条 insert：`bili-context-patch` 自己。原版没有条目，不会被创建；
+2. 宿主半侧挂载子插件**之前**扫一遍条目树，把仍然开着的原版条目关掉。顺序不能反：两边注册同一套服务和 HTTP 路由，晚一步关会把已经注册的接口一起带走（实测 `/api/model-request-accelerator/version` 会 404）。
 
-| 状态 | 网页下发的客户端包 | 加速器接口 |
-|---|---|---|
-| 合并插件在前（正常安装顺序） | 只有 `bili-context-patch` | `2.3.0` |
-| 合并插件排在两个原版之后（靠自检兜） | 只有 `bili-context-patch` | `2.3.0` |
-| 合并插件被关掉或卸载 | `billion-context` 与 `dsh-plugin-model-request-accelerator` 各一份 | `2.3.0` |
+想换回原版：先关掉 `bili-context-patch`，再去插件页打开要用的那张卡片，它就会作为独立插件跑起来。**别两边同时开**——同一批服务和路由被注册两遍，接口会互相顶掉。
+
+| 状态 | 插件页 | 网页下发的客户端包 | 加速器接口 |
+|---|---|---|---|
+| 正常安装后 | 我们开、两张原版关 | 只有 `bili-context-patch` | `2.3.0` |
+| 关掉我们、打开某个原版 | 只有那张原版开 | 那张原版 | `2.3.0` |
 
 ### 用插件管理器增删别的插件之后
 
-插件管理器在包操作后会重算 `dsh.profile.bundles`，把声明了 bundle patch 的依赖重新列进去。合并插件本来就在清单里，这一步不会改变它的行为；如果原版因为这次回写又回到清单里，包自带的条目行和自检会把它们重新关掉，不需要额外操作。
+插件管理器在包操作后会重算 `dsh.profile.bundles`，把声明了 bundle patch 的依赖重新写回去。真发生的话，原版卡片会重新亮起来——重跑一次 `node scripts/install.mjs` 就能把清单恢复成"只留合并插件"；即使不重跑，宿主半侧的自检也会在启动时把它们关掉，功能不会重复。
 
 ## 验证
 

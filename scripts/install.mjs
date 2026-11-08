@@ -239,12 +239,7 @@ const installedDep = (name) =>
   Object.prototype.hasOwnProperty.call(earlyManifest.dependencies ?? {}, name) &&
   existsSync(join(profile, "node_modules", name));
 
-const shutRows = [];
-if (installedDep(UPSTREAM)) {
-  shutRows.push("- id: bili-native", "  disabled: true");
-  shutRows.push("- id: bili-compaction-gate", "  disabled: true");
-}
-if (installedDep(ACCELERATOR)) shutRows.push("- id: model-request-accelerator", "  disabled: true");
+void installedDep;
 
 const layerSource = readFileSync(bundleLayerPath, "utf8");
 const layerHead = layerSource.includes(MARKER)
@@ -265,14 +260,7 @@ const wrapperLayer =
   "    - id: " + WRAPPER + "\n" +
   "      name: " + WRAPPER + "\n" +
   stripInserts(layerHead).replace(/\s+$/, "") +
-  "\n" +
-  // The two upstream packages stay installed and listed if the user has them;
-  // what changes is that their entries are switched off while this layer is
-  // applied. The switching lives here, inside the package that ships the layer,
-  // and nowhere in the user's own configuration: remove this package (or switch
-  // it off in the plugin page) and the layer stops being applied, so both
-  // packages start again on their own.
-  (shutRows.length > 0 ? shutRows.join("\n") + "\n" : "");
+  "\n";
 
 const wrapperManifestPath = join(here, "..", "package", "package.json");
 const wrapperManifest = JSON.parse(readFileSync(wrapperManifestPath, "utf8"));
@@ -340,11 +328,16 @@ const acceleratorSpec = linkSpec(acceleratorPath);
 // off or removed — which is the whole point of keeping the switching in here.
 const changes = [];
 const bundles = [];
-for (const name of bundleOwner.bundles) if (!bundles.includes(name) && name !== WRAPPER) bundles.push(name);
-// Last on purpose: entry configuration is composed in list order, so the rows this
-// package ships can only reach the upstream entries once those entries exist. With
-// the wrapper anywhere earlier the rows find nothing, print "entry not found", and
-// the two upstream packages start alongside it.
+const suppressed = new Set([UPSTREAM, ACCELERATOR]);
+for (const name of bundleOwner.bundles) {
+  if (!bundles.includes(name) && name !== WRAPPER && !suppressed.has(name)) bundles.push(name);
+}
+// The upstream packages come out of the list: entries are what the plugin page
+// switches and what actually runs, so leaving them in means two live cards that
+// only look switched off. They stay INSTALLED (the wrapper imports them by name)
+// and they stay marked disabled in dependencies, which is the state the profile
+// reconciler preserves. Turning either card on puts it back in this list and it
+// runs on its own - the wrapper is not needed for that, and it does not fight it.
 bundles.push(WRAPPER);
 if (JSON.stringify(bundles) !== JSON.stringify(bundleOwner.bundles)) {
   bundleOwner.bundles = bundles;
@@ -499,5 +492,6 @@ if (!dryRun && layerSource.includes(MARKER)) {
 
 say("");
 say("done. Restart DSH. Settings > Plugins lists installed packages; only " + WRAPPER + " runs.");
-say("Switch it off, or remove it, and billion-context plus the accelerator start again by themselves.");
+say("The two upstream cards now show as off. To go back to a standalone plugin, switch " + WRAPPER);
+say("off and turn that card on - but never run both at once: the same services and HTTP routes.");
 say("Both settings pages (billion-context and 模型请求加速) stay where they are.");
