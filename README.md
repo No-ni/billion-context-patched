@@ -24,11 +24,12 @@ DSH 的「模型请求加速」插件和 bili 都在做同一件事——把请�
 
 ## 一体化是怎么做的
 
-DSH 的插件列表一条 Loader 条目一张卡，浏览器半侧也是按条目发一个客户端 bundle——所以「两张卡」是结构性的，改文案没用。做法是加一层很薄的包装包：
+「设置 → 插件」是**一个组合包一张卡**（列表按 `dsh.profile.bundles` 里的 bundle 生成，卡片下列出它 insert 或改写的行）。所以只要 bili 与加速器各自还是清单里的一项，就必然是两张卡——改标题只能改字面。做法是加一层很薄的包装包，让清单里只剩它一项：
 
-- **主机半侧**（`package/lib/index.js`）：一个条目里 `ctx.plugin()` 依次挂载 `billion-context`、`billion-context/dsh-compaction-gate` 和加速器，配置转发给加速器（渠道开关就落在它身上）；
-- **浏览器半侧**：安装时把两个包各自的客户端 bundle 的工厂体切出来，合进一个 `id: "bili-context-patch"` 的工厂，两个 half 依次 apply 到同一处，设置页和耗时面板照旧；
-- **组合层**：`billion-context` 原来的 `dsh.bundle.patch.yml` 被复制进包装包，只删掉那两条 `insert`（那两个插件改由代码挂载），压缩闸门、`compaction-basic`、预设注入与重试策略都保留。
+- **主机半侧**（`package/lib/index.js`）：一个条目里 `ctx.plugin()` 依次挂载 `billion-context`、`billion-context/dsh-compaction-gate` 和加速器。它还 `export const Config = accelerator.Config`——设置服务以**条目 id** 作命名空间键，且只投影声明了 `Config` 的条目；不导出这个 schema，`模型请求加速` 那一页就没有表单可读；
+- **配置怎么传下去**：条目收到的 config 里，`.volatile()` 字段是设置服务原地维护的活访问器（改开关不重启进程，只原地换值）。所以子插件以 `{ ...accelerator, Config: undefined }` 挂载：Cordis 对没有 schema 的运行时原样透传 config，访问器不会被二次解析冻成快照，渠道开关因此即时生效；
+- **浏览器半侧**：安装时把两个包客户端 bundle 的工厂体切出来，合进一个 `id: "bili-context-patch"` 的工厂，两个 half 依次 apply 到同一处。加速器客户端里 `const NS = "model-request-accelerator"` 这个字面量会被改写成 `"bili-context-patch"`（它按命名空间找设置文档），包装清单同时补上 `dsh.client.inject` 的两条依赖，让两个 half 用到的客户端模块先到；
+- **组合层**：`billion-context` 原来的 `dsh.bundle.patch.yml` 被复制进包装包，只删掉那两条 `insert`（那两个插件改由代码挂载），压缩闸门、`compaction-basic`、预设注入与重试策略都保留；开头换成一条 `insert` 指向包装包自己——被列进 `dsh.profile.bundles` 的包只提供 patch 层，不会自己变成 Loader 条目。
 
 于是：
 
@@ -64,7 +65,8 @@ node scripts/restart.mjs                       # 重启 bili 代理，让新的 
 3. 生成 `<profile>/plugins/bili-context-patch`：manifest、主机入口、合并后的 `lib/client.js`、以及从 bili 复制并删掉 insert 的 `dsh.bundle.patch.yml`；
 4. 把它链进 `node_modules`（加速器同样）；
 5. 改 profile 的 `package.json`：把 `billion-context` 换成 `bili-context-patch`，两个包都写成 `link:` 依赖；
-6. 把 profile 的 `cordis.patch.yml` 里那条按 id 定位的渠道配置改指向 `bili-context-patch`。
+6. 把 profile 的 `cordis.patch.yml` 里那条按 id 定位的渠道配置改指向 `bili-context-patch`（只改带 `config:` 的那一行，不碰别的行）；
+7. 把 `bili-native`、`bili-compaction-gate`、`model-request-accelerator` 三行钉成 `disabled: true`，并保证 `bili-context-patch` 自己那行是 `disabled: false`。原因见下一节。
 
 装完重启 DSH 生效。`restart.mjs` 只重启 bili 代理，用来加载新的 `dist/index.js`。
 
@@ -75,6 +77,16 @@ dsh plugin --profile desktop remove bili-context-patch
 ```
 
 `plugins/bili-context-patch`、`plugins/model-request-accelerator` 与 `node_modules/billion-context` 会留在磁盘上，但不再被任何组合层挂载，不启动、不占资源。要彻底清掉，删掉这两个目录并在 profile 的 `dependencies` 里移除对应条目即可。
+
+### 用插件管理器增删别的插件之后
+
+DSH 的插件管理器在一次包操作后会重新计算 `dsh.profile.bundles`：**任何声明了 bundle patch 的依赖都会被重新列进去**（源码里就是 `for (const dependency of after.dependencies) if (dependency.bundle && !disabled.has(...)) bundles.push(...)`）。bili 和加速器都以依赖身份留着（包装包要按包名 import 它们），所以你在插件页增删别的插件之后，它们可能又出现在清单里，变成多出来的卡片。
+
+安装脚本因此把它们的条目在 profile 补丁层里钉死为 `disabled: true`：profile 补丁是最后应用的一层，晚于所有 bundle 层，所以即使清单被写回，那两个条目也不会再挂载一次。卡片可能短暂出现，**再跑一次 `node scripts/install.mjs` 就清掉**（它会把清单里的这两项重新移除）。
+
+### 不要用插件页的开关关掉它
+
+`bili-context-patch` 这一个条目同时挂着压缩闸门（`biliBasicCompactionPolicy`）。bili 上游注释 #3662 明确写着闸门必须常开：agent preset 都在等这个服务，关掉它，新建会话会一直等下去。要停用，请从 `dsh.profile.bundles` 移除 `bili-context-patch`（或用 `dsh plugin remove`），不要点卡片上的开关。
 
 ## 验证
 

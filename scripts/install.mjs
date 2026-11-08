@@ -185,9 +185,28 @@ const acceleratorClientBody = extractFactory(
   readFileSync(join(acceleratorPath, "lib", "client.js"), "utf8"),
   ACCELERATOR,
 );
+// The settings page looks its namespace up by the entry id it was keyed under.
+// Fresh installs keyed the accelerator's own entry `model-request-accelerator`;
+// this entry is `bili-context-patch`, so the page's constant has to follow or it
+// finds no document and renders read-only. Rewriting the one literal in the
+// generated bundle keeps the accelerator's repository untouched.
+const NS_LITERAL = 'const NS = "model-request-accelerator";';
+const NS_REWRITTEN = 'const NS = "' + WRAPPER + '";';
+const occurrences = acceleratorClientBody.split(NS_LITERAL).length - 1;
+if (occurrences !== 1) {
+  fail(
+    ACCELERATOR +
+      ": expected exactly one '" +
+      NS_LITERAL +
+      "' in the client bundle, found " +
+      occurrences +
+      " — the settings page would look under the wrong namespace",
+  );
+}
+
 const mergedClient = template
   .replace("/*__BILI_FACTORY__*/", () => biliClientBody)
-  .replace("/*__ACCELERATOR_FACTORY__*/", () => acceleratorClientBody);
+  .replace("/*__ACCELERATOR_FACTORY__*/", () => acceleratorClientBody.replace(NS_LITERAL, NS_REWRITTEN));
 
 // ── 4. the wrapper's bundle layer ───────────────────────────────────────────
 // billion-context's own layer supplies the compaction gate wiring that the host
@@ -331,21 +350,125 @@ if (changes.length > 0 && !dryRun) {
 // The profile patch targets the accelerator entry by id. The entry is gone, so
 // the same config block has to address the wrapper instead, otherwise the
 // provider toggles silently fall back to defaults.
-if (existsSync(patchPath)) {
-  const patch = readFileSync(patchPath, "utf8");
-  const nextPatch = patch
-    .replace(/^(- id: )model-request-accelerator$/m, "$1" + WRAPPER)
-    .replace(/^(\s+name: )dsh-plugin-model-request-accelerator$/m, "$1" + WRAPPER);
-  if (nextPatch !== patch) {
+// The rewrite itself happens in step 8, so the file is read and written once.
+const patchBefore = existsSync(patchPath) ? readFileSync(patchPath, "utf8") : null;
+
+// ── 8. keep the two upstream entries shut ───────────────────────────────────
+// DSH's plugin manager reconciles bundles after every package operation:
+//   for (const dependency of after.dependencies)
+//     if (dependency.bundle && !disabled.has(dependency.name) && !bundles.includes(dependency.name))
+//       bundles.push(dependency.name);
+// Both upstream packages stay as dependencies — that is what puts them on the
+// module path the wrapper imports from — and both declare a bundle patch, so a
+// plain "add/remove another plugin" in the UI silently puts them back into
+// dsh.profile.bundles. Their rows would then mount a second billion-context and
+// a second accelerator: three cards again, and two plugins serving one service.
+//
+// The profile patch is the last layer applied, after every bundle layer, so a
+// disabled row here wins no matter what the manager writes into the bundle
+// list. Idempotent: rows are rewritten in place, never duplicated.
+const pinned = ["bili-native", "bili-compaction-gate", "model-request-accelerator"];
+
+/** Split a patch file into id blocks and raw lines, so a rewrite can address whole rows. */
+const splitPatch = (text) => {
+  const blocks = [];
+  let current = null;
+  for (const line of text.replace(/\s+$/, "").split("\n")) {
+    const match = /^- id: (\S+)\s*$/.exec(line);
+    if (match !== null) {
+      current = { id: match[1], header: line, body: [] };
+      blocks.push(current);
+      continue;
+    }
+    if (current !== null && /^\s+\S/.test(line)) {
+      current.body.push(line);
+      continue;
+    }
+    current = null;
+    blocks.push({ raw: line });
+  }
+  return blocks;
+};
+
+const joinPatch = (blocks) =>
+  blocks
+    .map((block) => (block.raw !== undefined ? block.raw : [block.header, ...block.body].join("\n")))
+    .join("\n") + "\n";
+
+/** A row that carries nothing but `disabled:` — ours to rewrite, nobody else's. */
+const onlyDisabled = (body) => body.every((line) => /^\s+disabled:/.test(line));
+
+const rewritePatch = (text, wrapperId, pinnedIds) => {
+  const notes = [];
+  let blocks = splitPatch(text);
+
+  // (a) Retarget the channel switches. Only the row that carries `config:` — a
+  //     blind "first row with this id" would also rename the pin below, and that
+  //     rename is what once left the wrapper itself switched off.
+  blocks = blocks.map((block) => {
+    if (block.id !== "model-request-accelerator") return block;
+    if (!block.body.some((line) => /^\s+config:/.test(line))) return block;
+    notes.push("channel switches -> " + wrapperId);
+    return {
+      id: wrapperId,
+      header: "- id: " + wrapperId,
+      body: block.body.map((line) =>
+        line.replace(/^(\s+name: )dsh-plugin-model-request-accelerator\s*$/, "$1" + wrapperId),
+      ),
+    };
+  });
+
+  // (b) The wrapper's own row has to stay enabled: switching it off takes the
+  //     compaction gate with it, and the agent presets then wait forever for a
+  //     service nothing provides (#3662). A stray `disabled: true` here is always
+  //     damage, never intent, so it is repaired rather than respected.
+  let keptWrapperRow = false;
+  blocks = blocks.filter((block) => {
+    if (block.id !== wrapperId || !onlyDisabled(block.body)) return true;
+    if (keptWrapperRow) {
+      notes.push("dropped a duplicate " + wrapperId + " row");
+      return false;
+    }
+    keptWrapperRow = true;
+    if (!block.body.join(" ").includes("false")) notes.push("re-enabled the " + wrapperId + " row");
+    block.body = ["  disabled: false"];
+    return true;
+  });
+
+  // (c) Both upstream entries stay shut. DSH's plugin manager re-lists every
+  //     dependency that declares a bundle patch, so these rows can come back
+  //     without anyone asking; the profile layer is applied last, which is what
+  //     makes a pin here final.
+  const present = new Set(blocks.map((block) => block.id).filter(Boolean));
+  for (const id of pinnedIds) {
+    if (!present.has(id)) {
+      blocks.push({ id, header: "- id: " + id, body: ["  disabled: true"] });
+      notes.push(id + " pinned disabled");
+      continue;
+    }
+    for (const block of blocks) {
+      if (block.id !== id || !onlyDisabled(block.body)) continue;
+      if (block.body.length === 1 && block.body[0].trim() === "disabled: true") continue;
+      block.body = ["  disabled: true"];
+      notes.push(id + " pinned disabled");
+    }
+  }
+
+  return { text: joinPatch(blocks), notes };
+};
+
+if (patchBefore !== null) {
+  const rewritten = rewritePatch(patchBefore, WRAPPER, pinned);
+  if (rewritten.text !== patchBefore) {
     if (dryRun) {
-      say("would retarget the channel switches in " + patchPath + " to " + WRAPPER);
+      say("would rewrite " + patchPath + ": " + rewritten.notes.join("; "));
     } else {
       const patchBackup = backupOf(patchPath);
-      writeFileSync(patchPath, nextPatch);
-      say("channel switches retargeted to " + WRAPPER + " (backup " + patchBackup + ")");
+      writeFileSync(patchPath, rewritten.text);
+      say("profile patch: " + rewritten.notes.join("; ") + " (backup " + patchBackup + ")");
     }
   } else {
-    say("channel switches: already on " + WRAPPER);
+    say("profile patch: already wired");
   }
 }
 

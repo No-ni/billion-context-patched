@@ -1,7 +1,6 @@
 {
   "name": "bili-context-patch",
   "version": "0.0.0",
-  "private": true,
   "type": "module",
   "description": "billion-context patched build, with dsh-plugin-model-request-accelerator mounted inside it",
   "main": "lib/index.js",
@@ -19,11 +18,11 @@
       "patch": "./dsh.bundle.patch.yml"
     },
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
     }
-  },
-  "dependencies": {
-    "billion-context": "*",
-    "dsh-plugin-model-request-accelerator": "*"
   }
 }
