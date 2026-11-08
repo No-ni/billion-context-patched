@@ -78,22 +78,27 @@ dsh plugin --profile desktop remove bili-context-patch
 
 `plugins/bili-context-patch`、`plugins/model-request-accelerator` 与 `node_modules/billion-context` 会留在磁盘上，但不再被任何组合层挂载，不启动、不占资源。要彻底清掉，删掉这两个目录并在 profile 的 `dependencies` 里移除对应条目即可。
 
-### 只留一张卡，靠的是清单，不是禁用
+### 开关联动：合并插件开着，两个原版就是关的
 
-插件页的卡片列表与浏览器侧的客户端模块图都直接读 `dsh.profile.bundles`：清单里有几项就有几张卡、几个客户端包。运行时把条目 `disabled` 掉也改不了这一点（试过，无效）。所以合并的做法只是**让上游两项不在清单里**，而不是把它们禁用。
+`dsh.profile.bundles` 里一直留着 `billion-context` 和 `dsh-plugin-model-request-accelerator` 这两项，但 profile 补丁把它们的条目绑到了合并插件自己的开关上：
 
-配套的取舍写在这里：这个仓库**不会在任何地方写 `disabled: true`**。上一版曾在 profile 补丁里钉住上游三行，问题是当合并插件自己没跑起来时，那三行仍然是关的——用户就一样都用不上了。现在清单里没有它们、也没有任何禁用状态残留，于是：
+```yaml
+- id: bili-native
+  disabled: !!js '!!(ctx.fiber.entry.subtree.store["bili-context-patch"]?.disabled === false)'
+```
 
-- 合并插件正常 → 只有一张卡，两个功能都在；
-- 合并插件坏了 → 不会连累任何东西，去插件页把 `billion-context` 和 `dsh-plugin-model-request-accelerator` 加回来就能立刻恢复原来的两插件形态（它们的包一直都在磁盘上）。
+`bili-compaction-gate` 与 `model-request-accelerator` 两行同理。`!!js` 表达式在每次判定条目状态时求值，于是一个文件同时回答了两种状态：
+
+- 合并插件**开着** → 三行都判为禁用，只有合并条目在跑：插件页一张卡，网页只加载一个客户端包；
+- 合并插件**关掉** → 表达式为假，bili 与加速器自动挂载回来，就是原来的两插件形态，连压缩闸门也由 bili 自己那份提供。
+
+两个方向都在真机上跑过：开着时网页里只有 `bili-context-patch`，关掉后 `billion-context` 与 `dsh-plugin-model-request-accelerator` 各出现一次，加速器接口在两种状态下都返回 `2.3.0`。
+
+表达式求值失败（比如 DSH 内部结构变了）只会在日志里留一条 `disabled expression failed`，并按禁用处理——最坏情况仍然只剩合并插件这一条，不会出现两个 bili 同时跑。
 
 ### 用插件管理器增删别的插件之后
 
-DSH 的插件管理器在一次包操作后会重新计算 `dsh.profile.bundles`：**任何声明了 bundle patch 的依赖都会被重新列进去**（源码里就是 `for (const dependency of after.dependencies) if (dependency.bundle && !disabled.has(...)) bundles.push(...)`）。bili 与加速器都以依赖身份留着（包装包要按包名 import 它们），所以你在插件页增删别的插件之后，它们可能又出现在清单里——那时会多出卡片，而且 bili 会被挂载两次。**发现卡片变多就再跑一次 `node scripts/install.mjs`**，它会把清单里的这两项重新移除。
-
-### 不要用插件页的开关关掉它
-
-`bili-context-patch` 这一个条目同时挂着压缩闸门（`biliBasicCompactionPolicy`）。bili 上游注释 #3662 明确写着闸门必须常开：agent preset 都在等这个服务，关掉它，新建会话会一直等下去。要停用，请从 `dsh.profile.bundles` 移除 `bili-context-patch`（或用 `dsh plugin remove`），不要点卡片上的开关。
+插件管理器在包操作后会重算 `dsh.profile.bundles`，把声明了 bundle patch 的依赖重新列进去。这两项本来就在清单里，所以那次回写不再有副作用；如果它把顺序或重复项改乱了，重跑一次 `node scripts/install.mjs` 归一即可。
 
 ## 验证
 

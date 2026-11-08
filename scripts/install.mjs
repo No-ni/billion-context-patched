@@ -312,17 +312,22 @@ const linkSpec = (path) => {
 const wrapperSpec = linkSpec(wrapperDir);
 const acceleratorSpec = linkSpec(acceleratorPath);
 
+// The two upstream packages stay in the bundle list on purpose. Their rows are
+// switched off by an expression (step 8), not by removing them from this list,
+// so switching the wrapper off in the plugin page brings both of them back
+// instead of leaving the user with nothing. Keeping them listed also stops the
+// plugin manager from re-adding them behind our back later.
 const changes = [];
+const wanted = [WRAPPER, UPSTREAM, ACCELERATOR];
 const bundles = [];
 for (const name of bundleOwner.bundles) {
-  if (name === ACCELERATOR) continue;
-  if (name === UPSTREAM) {
-    if (!bundles.includes(WRAPPER)) bundles.push(WRAPPER);
+  if (wanted.includes(name)) {
+    if (!bundles.includes(name)) bundles.push(name);
     continue;
   }
-  if (name !== WRAPPER) bundles.push(name);
+  bundles.push(name);
 }
-if (!bundles.includes(WRAPPER)) bundles.push(WRAPPER);
+for (const name of wanted) if (!bundles.includes(name)) bundles.push(name);
 if (JSON.stringify(bundles) !== JSON.stringify(bundleOwner.bundles)) {
   bundleOwner.bundles = bundles;
   changes.push("bundles -> " + bundles.join(", "));
@@ -436,18 +441,36 @@ const rewritePatch = (text, wrapperId, pinnedIds) => {
     return true;
   });
 
-  // (c) Retire no rows here. An earlier version pinned the two upstream entries
-  //     `disabled: true` from this file, which also disabled them when the merge
-  //     itself failed to load — the exact case where the old two-plugin setup has
-  //     to keep working. The wrapper host half disables them at runtime instead,
-  //     after its children are mounted. Stale pins written by that version are
-  //     removed here so they cannot silence anything by accident.
-  blocks = blocks.filter((block) => {
-    if (!pinnedIds.includes(block.id) || !onlyDisabled(block.body)) return true;
-    if (!(block.body.length === 1 && block.body[0].trim() === "disabled: true")) return true;
-    notes.push("removed stale pin " + block.id);
-    return false;
+  // (c) The two upstream entries follow the wrapper's own switch. They stay in
+  //     dsh.profile.bundles, and their rows are switched off by an expression
+  //     rather than a constant, so one file answers both states:
+  //       wrapper on  -> all three rows resolve to disabled, the wrapper entry
+  //                      is the only thing mounted, and the page shows one card;
+  //       wrapper off -> the expression is false and both packages mount again,
+  //                      which is exactly the old two-plugin setup.
+  //     The expression reads the sibling entry from the loader tree. A constant
+  //     `true` here was wrong in the one case that matters: when the merge itself
+  //     fails to load, the old plugins have to keep working.
+  //     Verified with two real boots: the served client graph carries one package
+  //     while the wrapper runs, and both upstream packages once it is off.
+  const follow = "  disabled: !!js '!!(ctx.fiber.entry.subtree.store[" + JSON.stringify(wrapperId) + "]?.disabled === false)'";
+  const seen = new Set();
+  blocks = blocks.map((block) => {
+    if (!pinnedIds.includes(block.id)) return block;
+    if (!onlyDisabled(block.body)) {
+      notes.push("left " + block.id + " alone: its row carries other keys");
+      return block;
+    }
+    seen.add(block.id);
+    if (block.body.join("|") === follow) return block;
+    notes.push("linked " + block.id + " to " + wrapperId);
+    return { id: block.id, header: block.header, body: [follow] };
   });
+  for (const id of pinnedIds) {
+    if (seen.has(id)) continue;
+    notes.push("added a follow row for " + id);
+    blocks.push({ id, header: "- id: " + id, body: [follow] });
+  }
 
   return { text: joinPatch(blocks), notes };
 };
@@ -477,4 +500,5 @@ if (!dryRun && layerSource.includes(MARKER)) {
 
 say("");
 say("done. Restart DSH, then check Settings > Plugins: one card, " + WRAPPER + ".");
+say("Switch that card off and billion-context plus the accelerator come back by themselves.");
 say("Both settings pages (billion-context and 模型请求加速) stay where they are.");

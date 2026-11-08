@@ -87,9 +87,14 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 
 1. `dsh.profile.bundles`：`billion-context` 换成 `bili-context-patch`，并移除 `dsh-plugin-model-request-accelerator`；`dependencies` 里两个包各写一条 `link:`（依赖必须留着，包装包要按包名 import 它们）。
 2. `cordis.patch.yml` 里按 id 定位的渠道配置改成 `- id: bili-context-patch`——只改**带 `config:`** 的那一行。早先的实现按"第一行同 id"改名，会连下面第 3 条的钉子一起改名，结果把包装包自己写成 `disabled: true`。
-3. **不写任何禁用行**：`bili-context-patch` 自己那行必须是 `disabled: false`（同一 id 出现多行时只留一行），并删掉旧版本写过的 `- id: bili-native / bili-compaction-gate / model-request-accelerator` + `disabled: true` 的钉子。
+3. **上游条目的开关跟着合并条目走**：`bili-context-patch` 自己那行保持 `disabled: false`（同一 id 出现多行时只留一行），另外三行写成表达式而不是常量：
 
-    为什么反过来做：卡片列表与客户端模块图都读 `dsh.profile.bundles`（有几项几张卡），运行时的 `disabled` 改不了这一点；而静态禁用又会在合并插件加载失败时把用户一起锁死在"什么都没有"的状态。所以这里只让上游不在清单里，不留任何禁用痕迹——坏了就能立刻把原版加回来。
+    ```yaml
+    - id: bili-native
+      disabled: !!js '!!(ctx.fiber.entry.subtree.store["bili-context-patch"]?.disabled === false)'
+    ```
+
+    为什么不是常量 `true`：常量在合并插件加载失败时会把用户锁死在"什么都没有"的状态，而那正是最需要老插件继续工作的时刻。表达式在每次判定条目状态时求值，所以合并插件开着时上游三项是关的（插件页一张卡、网页一个客户端包），合并插件被关掉时它们自动回来（原来的两插件形态）。两个方向都做过真机启动验证。
 
 **效果**：装一次两个功能都在、插件列表只有一张 `bili-context-patch`；从 `dsh.profile.bundles` 移除它，一切随之停止。两个上游包一个字节都没被改写，升级任一包后重跑 `install.mjs` 即可重新生成包装包。
 
