@@ -231,6 +231,21 @@ const stripInserts = (text) => {
   return kept.join("\n");
 };
 
+// Two upstream packages may or may not be installed here. Rows are written only
+// for the ones that are: a row naming a package nobody installed does nothing
+// but print "patch: entry ... not found" on every start.
+const earlyManifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+const installedDep = (name) =>
+  Object.prototype.hasOwnProperty.call(earlyManifest.dependencies ?? {}, name) &&
+  existsSync(join(profile, "node_modules", name));
+
+const shutRows = [];
+if (installedDep(UPSTREAM)) {
+  shutRows.push("- id: bili-native", "  disabled: true");
+  shutRows.push("- id: bili-compaction-gate", "  disabled: true");
+}
+if (installedDep(ACCELERATOR)) shutRows.push("- id: model-request-accelerator", "  disabled: true");
+
 const layerSource = readFileSync(bundleLayerPath, "utf8");
 const layerHead = layerSource.includes(MARKER)
   ? layerSource.slice(0, layerSource.indexOf(MARKER))
@@ -250,7 +265,14 @@ const wrapperLayer =
   "    - id: " + WRAPPER + "\n" +
   "      name: " + WRAPPER + "\n" +
   stripInserts(layerHead).replace(/\s+$/, "") +
-  "\n";
+  "\n" +
+  // The two upstream packages stay installed and listed if the user has them;
+  // what changes is that their entries are switched off while this layer is
+  // applied. The switching lives here, inside the package that ships the layer,
+  // and nowhere in the user's own configuration: remove this package (or switch
+  // it off in the plugin page) and the layer stops being applied, so both
+  // packages start again on their own.
+  (shutRows.length > 0 ? shutRows.join("\n") + "\n" : "");
 
 const wrapperManifestPath = join(here, "..", "package", "package.json");
 const wrapperManifest = JSON.parse(readFileSync(wrapperManifestPath, "utf8"));
@@ -312,22 +334,14 @@ const linkSpec = (path) => {
 const wrapperSpec = linkSpec(wrapperDir);
 const acceleratorSpec = linkSpec(acceleratorPath);
 
-// The two upstream packages stay in the bundle list on purpose. Their rows are
-// switched off by an expression (step 8), not by removing them from this list,
-// so switching the wrapper off in the plugin page brings both of them back
-// instead of leaving the user with nothing. Keeping them listed also stops the
-// plugin manager from re-adding them behind our back later.
+// Nothing else in the list is touched. Upstream packages, if the user happens to
+// have them, stay exactly where they are: step 4's layer is what keeps their
+// entries off, and that layer stops applying the moment this package is switched
+// off or removed — which is the whole point of keeping the switching in here.
 const changes = [];
-const wanted = [WRAPPER, UPSTREAM, ACCELERATOR];
 const bundles = [];
-for (const name of bundleOwner.bundles) {
-  if (wanted.includes(name)) {
-    if (!bundles.includes(name)) bundles.push(name);
-    continue;
-  }
-  bundles.push(name);
-}
-for (const name of wanted) if (!bundles.includes(name)) bundles.push(name);
+for (const name of bundleOwner.bundles) if (!bundles.includes(name)) bundles.push(name);
+if (!bundles.includes(WRAPPER)) bundles.push(WRAPPER);
 if (JSON.stringify(bundles) !== JSON.stringify(bundleOwner.bundles)) {
   bundleOwner.bundles = bundles;
   changes.push("bundles -> " + bundles.join(", "));
@@ -358,21 +372,17 @@ if (changes.length > 0 && !dryRun) {
 // The rewrite itself happens in step 8, so the file is read and written once.
 const patchBefore = existsSync(patchPath) ? readFileSync(patchPath, "utf8") : null;
 
-// ── 8. keep the two upstream entries shut ───────────────────────────────────
-// DSH's plugin manager reconciles bundles after every package operation:
-//   for (const dependency of after.dependencies)
-//     if (dependency.bundle && !disabled.has(dependency.name) && !bundles.includes(dependency.name))
-//       bundles.push(dependency.name);
-// Both upstream packages stay as dependencies — that is what puts them on the
-// module path the wrapper imports from — and both declare a bundle patch, so a
-// plain "add/remove another plugin" in the UI silently puts them back into
-// dsh.profile.bundles. Their rows would then mount a second billion-context and
-// a second accelerator: three cards again, and two plugins serving one service.
+// ── 8. the profile patch: switches, and one leftover to clear ───────────────
+// Two jobs, both idempotent.
 //
-// The profile patch is the last layer applied, after every bundle layer, so a
-// disabled row here wins no matter what the manager writes into the bundle
-// list. Idempotent: rows are rewritten in place, never duplicated.
-/** Rows the wrapper replaces; only stale pins of these are cleaned up here. */
+// The channel switches of the accelerator are addressed by id, and the id is now
+// the wrapper's, so that row has to be retargeted or the provider toggles fall
+// back to their defaults.
+//
+// The other job is cleanup. The previous version wrote one "follow" row per
+// upstream entry into this file — user configuration that the user never asked
+// for and that could not survive being switched off. Those rows are removed;
+// the switching is now generated into the wrapper's own bundle layer instead.
 const pinned = ["bili-native", "bili-compaction-gate", "model-request-accelerator"];
 
 /** Split a patch file into id blocks and raw lines, so a rewrite can address whole rows. */
@@ -404,7 +414,7 @@ const joinPatch = (blocks) =>
 /** A row that carries nothing but `disabled:` — ours to rewrite, nobody else's. */
 const onlyDisabled = (body) => body.every((line) => /^\s+disabled:/.test(line));
 
-const rewritePatch = (text, wrapperId, pinnedIds) => {
+const rewritePatch = (text, wrapperId) => {
   const notes = [];
   let blocks = splitPatch(text);
 
@@ -441,42 +451,27 @@ const rewritePatch = (text, wrapperId, pinnedIds) => {
     return true;
   });
 
-  // (c) The two upstream entries follow the wrapper's own switch. They stay in
-  //     dsh.profile.bundles, and their rows are switched off by an expression
-  //     rather than a constant, so one file answers both states:
-  //       wrapper on  -> all three rows resolve to disabled, the wrapper entry
-  //                      is the only thing mounted, and the page shows one card;
-  //       wrapper off -> the expression is false and both packages mount again,
-  //                      which is exactly the old two-plugin setup.
-  //     The expression reads the sibling entry from the loader tree. A constant
-  //     `true` here was wrong in the one case that matters: when the merge itself
-  //     fails to load, the old plugins have to keep working.
-  //     Verified with two real boots: the served client graph carries one package
-  //     while the wrapper runs, and both upstream packages once it is off.
-  const follow = "  disabled: !!js '!!(ctx.fiber.entry.subtree.store[" + JSON.stringify(wrapperId) + "]?.disabled === false)'";
-  const seen = new Set();
-  blocks = blocks.map((block) => {
-    if (!pinnedIds.includes(block.id)) return block;
-    if (!onlyDisabled(block.body)) {
-      notes.push("left " + block.id + " alone: its row carries other keys");
-      return block;
-    }
-    seen.add(block.id);
-    if (block.body.join("|") === follow) return block;
-    notes.push("linked " + block.id + " to " + wrapperId);
-    return { id: block.id, header: block.header, body: [follow] };
+  // (c) The previous version kept the two upstream packages in the bundle list
+  //     and switched their rows off through a `!!js` expression that read the
+  //     wrapper's sibling entry. That expression is order-sensitive: switching the
+  //     wrapper back on in the plugin page appends it after them, they get built
+  //     first, do not see it yet, and stay on — three copies at once. The rows are
+  //     removed here; the switching now lives in the wrapper's own bundle layer
+  //     (step 4), which is applied only while the wrapper is listed, and the host
+  //     half adds a runtime check for the ordering case (package/lib/index.js).
+  blocks = blocks.filter((block) => {
+    if (!pinned.includes(block.id)) return true;
+    if (block.body.some((line) => !/^\s+disabled:/.test(line))) return true;
+    if (!block.body.join(" ").includes("!!js")) return true;
+    notes.push("dropped the leftover follow row for " + block.id);
+    return false;
   });
-  for (const id of pinnedIds) {
-    if (seen.has(id)) continue;
-    notes.push("added a follow row for " + id);
-    blocks.push({ id, header: "- id: " + id, body: [follow] });
-  }
 
   return { text: joinPatch(blocks), notes };
 };
 
 if (patchBefore !== null) {
-  const rewritten = rewritePatch(patchBefore, WRAPPER, pinned);
+  const rewritten = rewritePatch(patchBefore, WRAPPER);
   if (rewritten.text !== patchBefore) {
     if (dryRun) {
       say("would rewrite " + patchPath + ": " + rewritten.notes.join("; "));
@@ -500,5 +495,5 @@ if (!dryRun && layerSource.includes(MARKER)) {
 
 say("");
 say("done. Restart DSH, then check Settings > Plugins: one card, " + WRAPPER + ".");
-say("Switch that card off and billion-context plus the accelerator come back by themselves.");
+say("Switch it off, or remove it, and billion-context plus the accelerator start again by themselves.");
 say("Both settings pages (billion-context and 模型请求加速) stay where they are.");

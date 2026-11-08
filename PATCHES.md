@@ -83,18 +83,27 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 - `package/lib/client.template.js`（浏览器半侧）——安装时把两个包客户端 bundle 的工厂体（`window.__ModuleLoader__.load({id, factory})` 里面的那段）切出来，合进同一个 `id: "bili-context-patch"` 的工厂，两个 half 依次 apply、`inject` 取并集。加速器客户端 `lib/client.js:23` 的 `const NS = "model-request-accelerator"` 会被改写成 `"bili-context-patch"`（它按命名空间找文档、注册分区），原文必须恰好出现一次，否则脚本报错退出；包装清单补上 `dsh.client.inject: ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-ui-settings"]`，客户端模块按它决定到达顺序；
 - 组合层——复制 bili 的 `dsh.bundle.patch.yml`，删掉开头那条 `- insert:`（`bili-native` 与 `bili-compaction-gate` 改由代码挂载），换成本包装包自己的一条 `insert`（被列进 `dsh.profile.bundles` 的包只提供 patch 层，不会自己变成 Loader 条目），`compaction-basic.auto:false`、四个 preset 的 `inject: [biliBasicCompactionPolicy]`、`llm-deepseek(-account)` 的 retryPolicy 全部保留。
 
-**profile 侧的三处改写**（都由脚本完成、幂等、带 `.bak-<时间戳>` 备份）：
+**上游两个包怎么被压住**——全部在包装包自己的组合层里，用户配置里不落任何东西：
 
-1. `dsh.profile.bundles`：`billion-context` 换成 `bili-context-patch`，并移除 `dsh-plugin-model-request-accelerator`；`dependencies` 里两个包各写一条 `link:`（依赖必须留着，包装包要按包名 import 它们）。
-2. `cordis.patch.yml` 里按 id 定位的渠道配置改成 `- id: bili-context-patch`——只改**带 `config:`** 的那一行。早先的实现按"第一行同 id"改名，会连下面第 3 条的钉子一起改名，结果把包装包自己写成 `disabled: true`。
-3. **上游条目的开关跟着合并条目走**：`bili-context-patch` 自己那行保持 `disabled: false`（同一 id 出现多行时只留一行），另外三行写成表达式而不是常量：
+```yaml
+# <profile>/plugins/bili-context-patch/dsh.bundle.patch.yml 末尾
+- id: bili-native
+  disabled: true
+- id: bili-compaction-gate
+  disabled: true
+- id: model-request-accelerator
+  disabled: true
+```
 
-    ```yaml
-    - id: bili-native
-      disabled: !!js '!!(ctx.fiber.entry.subtree.store["bili-context-patch"]?.disabled === false)'
-    ```
+1. 这些行由 `install.mjs` 生成，**只为这台机器上实际装了的包写**；没装的包不写行，免得每次启动打印 `patch: entry ... not found`。
+2. 这一层只在包装包被列进 `dsh.profile.bundles` 时生效。关掉或卸载包装包，层不再参与合成，两个上游包自动回来——不需要清理任何状态。
+3. 行只能改到**已经存在**的条目，而条目按 `dsh.profile.bundles` 的顺序创建。为了防止"包装包排在原版前面"这种顺序，`package/lib/index.js` 在挂载自己的子插件**之前**遍历 `ctx.get("loader").store.include.subtree.store`，把还开着的上游条目用 `entry.update({ ...entry.options, disabled: true })` 关掉。顺序必须在挂载之前：两边注册同一批服务和 HTTP 路由，晚一步关会把已注册的接口一起带走——实测 `/api/model-request-accelerator/version` 会 404。
 
-    为什么不是常量 `true`：常量在合并插件加载失败时会把用户锁死在"什么都没有"的状态，而那正是最需要老插件继续工作的时刻。表达式在每次判定条目状态时求值，所以合并插件开着时上游三项是关的（插件页一张卡、网页一个客户端包），合并插件被关掉时它们自动回来（原来的两插件形态）。两个方向都做过真机启动验证。
+**profile 侧的改写**（由脚本完成、幂等、带 `.bak-<时间戳>` 备份）：
+
+1. `dsh.profile.bundles`：只保证 `bili-context-patch` 在清单里，其余项一律不增不删不改序；`dependencies` 里两个包各写一条 `link:`（依赖必须留着，包装包要按包名 import 它们）。
+2. `cordis.patch.yml` 里按 id 定位的渠道配置改成 `- id: bili-context-patch`——只改**带 `config:`** 的那一行。早先的实现按"第一行同 id"改名，会连别行的钉子一起改名，结果把包装包自己写成 `disabled: true`。
+3. 清掉上一版写进 profile 的 `!!js` 跟随行（三个 id）。那套做法依赖条目创建顺序，开关把包装包挪到末尾后就失效，三个插件会同时跑；现在改由第 2 条的组合层 + 运行时自检负责。
 
 **效果**：装一次两个功能都在、插件列表只有一张 `bili-context-patch`；从 `dsh.profile.bundles` 移除它，一切随之停止。两个上游包一个字节都没被改写，升级任一包后重跑 `install.mjs` 即可重新生成包装包。
 

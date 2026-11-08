@@ -78,27 +78,25 @@ dsh plugin --profile desktop remove bili-context-patch
 
 `plugins/bili-context-patch`、`plugins/model-request-accelerator` 与 `node_modules/billion-context` 会留在磁盘上，但不再被任何组合层挂载，不启动、不占资源。要彻底清掉，删掉这两个目录并在 profile 的 `dependencies` 里移除对应条目即可。
 
-### 开关联动：合并插件开着，两个原版就是关的
+### 原版插件由这个包自己关掉
 
-`dsh.profile.bundles` 里一直留着 `billion-context` 和 `dsh-plugin-model-request-accelerator` 这两项，但 profile 补丁把它们的条目绑到了合并插件自己的开关上：
+如果机器上装着 `billion-context` 或 `dsh-plugin-model-request-accelerator`，它们不该和合并插件同时跑。这件事由**包自己**负责，用户的配置里不落任何东西：
 
-```yaml
-- id: bili-native
-  disabled: !!js '!!(ctx.fiber.entry.subtree.store["bili-context-patch"]?.disabled === false)'
-```
+1. 包里的 `dsh.bundle.patch.yml` 末尾带着 `disabled: true` 的条目行（只为实际装了的包生成，没装的不写）；
+2. 这一层只有在包被列进 `dsh.profile.bundles` 时才生效——**关掉或卸载这个包，层就没了，两个原版自己回来**；
+3. 宿主半侧在挂载自己的子插件之前还会检查一遍条目树，把仍然开着的原版条目关掉。检查必须在挂载之前：两边注册同一批服务和 HTTP 路由，晚一步关会让已经注册的接口跟着一起消失（实测接口会 404）。
 
-`bili-compaction-gate` 与 `model-request-accelerator` 两行同理。`!!js` 表达式在每次判定条目状态时求值，于是一个文件同时回答了两种状态：
+三种状态都上机跑过：
 
-- 合并插件**开着** → 三行都判为禁用，只有合并条目在跑：插件页一张卡，网页只加载一个客户端包；
-- 合并插件**关掉** → 表达式为假，bili 与加速器自动挂载回来，就是原来的两插件形态，连压缩闸门也由 bili 自己那份提供。
-
-两个方向都在真机上跑过：开着时网页里只有 `bili-context-patch`，关掉后 `billion-context` 与 `dsh-plugin-model-request-accelerator` 各出现一次，加速器接口在两种状态下都返回 `2.3.0`。
-
-表达式求值失败（比如 DSH 内部结构变了）只会在日志里留一条 `disabled expression failed`，并按禁用处理——最坏情况仍然只剩合并插件这一条，不会出现两个 bili 同时跑。
+| 状态 | 网页下发的客户端包 | 加速器接口 |
+|---|---|---|
+| 合并插件在前（正常安装顺序） | 只有 `bili-context-patch` | `2.3.0` |
+| 合并插件排在两个原版之后（靠自检兜） | 只有 `bili-context-patch` | `2.3.0` |
+| 合并插件被关掉或卸载 | `billion-context` 与 `dsh-plugin-model-request-accelerator` 各一份 | `2.3.0` |
 
 ### 用插件管理器增删别的插件之后
 
-插件管理器在包操作后会重算 `dsh.profile.bundles`，把声明了 bundle patch 的依赖重新列进去。这两项本来就在清单里，所以那次回写不再有副作用；如果它把顺序或重复项改乱了，重跑一次 `node scripts/install.mjs` 归一即可。
+插件管理器在包操作后会重算 `dsh.profile.bundles`，把声明了 bundle patch 的依赖重新列进去。合并插件本来就在清单里，这一步不会改变它的行为；如果原版因为这次回写又回到清单里，包自带的条目行和自检会把它们重新关掉，不需要额外操作。
 
 ## 验证
 

@@ -7,15 +7,24 @@
  * from the profile's node_modules, so upgrading either one only means running
  * scripts/install.mjs again.
  *
- * Deliberately absent: any disabling of the standalone rows. Two attempts to
- * switch them off — a `disabled: true` row in the profile patch, then a runtime
- * `loader.update` after mounting — both turned out to be worse than useless:
- * the patch version left the old plugins down even when this package failed to
- * load, and the runtime version cannot remove a card anyway (the plugin list and
- * the client module graph are built from `dsh.profile.bundles`, not from live
- * entries). The rows are simply not listed, which is what "merged" means here,
- * and nothing on disk stays disabled — re-adding the originals from the plugin
- * page works immediately if this package ever breaks.
+ * Two things keep the standalone copies of those packages quiet, and both live
+ * inside this package rather than in the user's configuration:
+ *
+ * 1. The bundle layer this package ships writes `disabled: true` rows for the two
+ *    upstream entries (the gate included), so on a normal install they are never
+ *    mounted. The rows travel with the layer: switch this package off, or remove
+ *    it, and the layer stops being applied, so the other two start again by
+ *    themselves. Nothing on disk stays switched off behind the user's back.
+ *
+ * 2. A row can only land on an entry that already exists, and an entry exists
+ *    only when its package sits earlier in dsh.profile.bundles. That is the
+ *    normal install order but not the only one — installing this package first
+ *    and an upstream one afterwards would leave both running. So before mounting
+ *    anything, apply() walks the built tree and switches off whatever upstream
+ *    entry is still on. It has to happen first: the children claim the same
+ *    services and HTTP routes, and a route left owned by an entry that is about
+ *    to disappear takes the endpoint with it (verified — the version endpoint
+ *    404s when the switch-off runs after the mounts).
  *
  * Two details carry the settings page over:
  *
@@ -47,7 +56,34 @@ export const Config = accelerator.Config;
 /** The accelerator, minus its schema: config has to reach it unparsed. */
 const acceleratorWithoutSchema = { ...accelerator, Config: undefined };
 
+/** Entries the merged unit replaces: billion-context's two, and the accelerator. */
+const UPSTREAM_IDS = ["bili-native", "bili-compaction-gate", "model-request-accelerator"];
+
+/** The loader's entry map, or null when it cannot be reached from here. */
+const entryStore = (ctx) => {
+  try {
+    return ctx.get("loader")?.store?.include?.subtree?.store ?? null;
+  } catch {
+    return null;
+  }
+};
+
 export function apply(ctx, config) {
+  // Before mounting: a leftover entry still owns the services and routes these
+  // children are about to register.
+  const store = entryStore(ctx);
+  if (store !== null) {
+    for (const id of UPSTREAM_IDS) {
+      const entry = store[id];
+      if (entry === undefined || entry.disabled) continue;
+      try {
+        entry.update({ ...entry.options, disabled: true });
+      } catch (error) {
+        console.warn("bili-context-patch: " + id + " is still running: " + (error && error.message));
+      }
+    }
+  }
+
   ctx.plugin(bili);
   ctx.plugin(compactionGate);
   ctx.plugin(acceleratorWithoutSchema, config ?? {});
