@@ -137,9 +137,22 @@ echo gzip > ~/.local/state/billion-context/upstream-encoding   # 或 br；清空
 relay channels: ylinkimi, test -> compression on, brotli-first
 ```
 
-### 版本号
+### 版本号与检查更新
 
-`<上游 bili 版本>-patch.<补丁序号>`，补丁序号每发一版自增。当前 `0.1.212-patch.2`：`.1` 是一体化包装，`.2` 是这两项默认值。
+版本号就是这个包装包自己的三位 semver，写在 `package/package.json` 里，当前 **0.1.0**；发一版就把最后一位加一（0.1.1、0.1.2…），提交推送后远端就有了。基线 bili 版本不写进版本号，记录在安装后 manifest 的 `meta.upstream`（例如 `billion-context@0.1.212`）里。
+
+设置 → 模型请求加速 页面底部那行「版本 / 检查更新」在合并之后指向**本补丁包**：
+
+- 点「检查更新」→ `GET /api/bili-context-patch/version`，把本机版本和仓库里 `package/package.json` 的版本比对；
+- 点「更新到 vX」→ `POST /api/bili-context-patch/version?action=update`，在补丁仓库里 `git pull --ff-only`，然后自动跑一次 `scripts/install.mjs` 重新生成包装包，完成后提示重启 dsh web；
+- 这个动作需要安装时记下仓库路径（manifest 里的 `patchRepo`）。仓库被移动或删除时接口会返回 `no patch checkout recorded`，重跑一次 `node scripts/install.mjs` 就能补上。
+
+手动更新依旧是这两条：
+
+```sh
+cd /Users/senno/Documents/deepseek-harness/billion-context-patched
+git pull && node scripts/install.mjs
+```
 
 ## 上游升级之后
 

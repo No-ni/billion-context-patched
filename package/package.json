@@ -1,6 +1,10 @@
 {
   "name": "bili-context-patch",
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/No-ni/billion-context-patched.git"
+  },
   "type": "module",
   "description": "billion-context patched build, with dsh-plugin-model-request-accelerator mounted inside it",
   "main": "lib/index.js",

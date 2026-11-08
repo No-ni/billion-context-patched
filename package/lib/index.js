@@ -41,6 +41,10 @@
  *    accessors into a snapshot. That is what keeps a provider toggle effective
  *    without a restart.
  */
+import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import * as bili from "billion-context";
 import * as compactionGate from "billion-context/dsh-compaction-gate";
 import * as accelerator from "dsh-plugin-model-request-accelerator";
@@ -58,6 +62,90 @@ const acceleratorWithoutSchema = { ...accelerator, Config: undefined };
 
 /** Entries the merged unit replaces: billion-context's two, and the accelerator. */
 const UPSTREAM_IDS = ["bili-native", "bili-compaction-gate", "model-request-accelerator"];
+
+/** This package as installed — the directory holding package.json and lib/. */
+const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/** Authenticated browser route reporting this package's version, and updating it. */
+const VERSION_PATH = "/api/bili-context-patch/version";
+
+/** The published version is the version field of this repo's package manifest. */
+const PUBLISHED_MANIFEST =
+  "https://raw.githubusercontent.com/No-ni/billion-context-patched/main/package/package.json";
+
+const UPDATE_FETCH_TIMEOUT_MS = 5000;
+const UPDATE_PULL_TIMEOUT_MS = 60000;
+const INSTALL_TIMEOUT_MS = 180000;
+
+/** A three-part version, or null for anything else (a suffixed build, a date). */
+const triple = (value) => {
+  const parts = String(value === undefined || value === null ? "" : value).trim().split(".");
+  if (parts.length !== 3) return null;
+  const numbers = [];
+  for (const part of parts) {
+    const n = Number(part);
+    if (part === "" || !Number.isInteger(n) || n < 0) return null;
+    numbers.push(n);
+  }
+  return numbers;
+};
+
+/** Whether `published` is ahead of `installed`; unreadable pairs never are. */
+const isNewer = (installed, published) => {
+  const a = triple(installed);
+  const b = triple(published);
+  if (a === null || b === null) return false;
+  for (let index = 0; index < 3; index += 1) {
+    if (b[index] > a[index]) return true;
+    if (b[index] < a[index]) return false;
+  }
+  return false;
+};
+
+/** This install's manifest: its version, and where the checkout that built it lives. */
+const readLocalManifest = async () => {
+  try {
+    return JSON.parse(await readFile(join(PACKAGE_ROOT, "package.json"), "utf8"));
+  } catch {
+    return {};
+  }
+};
+
+/** The version the repo publishes, or undefined when it cannot be read. */
+const readPublishedVersion = async () => {
+  try {
+    const response = await fetch(PUBLISHED_MANIFEST, { signal: AbortSignal.timeout(UPDATE_FETCH_TIMEOUT_MS) });
+    if (!response.ok) return undefined;
+    return JSON.parse(await response.text()).version ?? undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/** Run a command, capturing both streams; never rejects. */
+const run = (command, args, options) =>
+  new Promise((resolve) => {
+    execFile(command, args, options, (error, stdout, stderr) => {
+      resolve({ ok: error === null, output: (stdout ?? "") + (stderr ?? "") });
+    });
+  });
+
+/** One update at a time: a second request joins the first instead of racing it. */
+let runningUpdate = null;
+
+/** Pull the checkout that built this install and regenerate the wrapper package. */
+const updateFromRepo = async (repo) => {
+  const pulled = await run("git", ["pull", "--ff-only"], { cwd: repo, timeout: UPDATE_PULL_TIMEOUT_MS });
+  if (!pulled.ok) return { ok: false, output: pulled.output };
+  // The installer is plain Node: run it with this process's own binary, which is
+  // Electron here, in its Node role.
+  const installed = await run(process.execPath, [join(repo, "scripts", "install.mjs")], {
+    cwd: repo,
+    timeout: INSTALL_TIMEOUT_MS,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+  });
+  return { ok: installed.ok, output: (pulled.output + "\n" + installed.output).trim() };
+};
 
 /** The loader's entry map, or null when it cannot be reached from here. */
 const entryStore = (ctx) => {
@@ -87,4 +175,52 @@ export function apply(ctx, config) {
   ctx.plugin(bili);
   ctx.plugin(compactionGate);
   ctx.plugin(acceleratorWithoutSchema, config ?? {});
+
+  // The "version / check for updates" row in the settings page asks this route.
+  // It reports THIS package and, on action=update, pulls the checkout that built
+  // the install and runs its installer — the two steps the README asks for by
+  // hand. Without it that row keeps reporting and pulling the accelerator.
+  ctx.inject(["connection"], (connectionCtx) => {
+    connectionCtx.connection.fetch.register({
+      path: VERSION_PATH,
+      methods: ["GET", "POST"],
+      requestBody: "buffered",
+      fetch: async (request) => {
+        const action = new URL(request.url).searchParams.get("action") ?? "status";
+        const manifest = await readLocalManifest();
+        if (request.method === "GET") {
+          const version = manifest.version ?? null;
+          const latest = (await readPublishedVersion()) ?? null;
+          return Response.json({
+            version,
+            latest,
+            updateAvailable: version !== null && latest !== null && isNewer(version, latest),
+          });
+        }
+        if (action !== "update") return Response.json({ error: "unknown action" }, { status: 400 });
+        const repo = manifest.patchRepo;
+        if (typeof repo !== "string" || repo === "") {
+          return Response.json(
+            { error: "no patch checkout recorded; run scripts/install.mjs again" },
+            { status: 409 },
+          );
+        }
+        const from = manifest.version ?? null;
+        runningUpdate = runningUpdate ?? updateFromRepo(repo).finally(() => {
+          runningUpdate = null;
+        });
+        const result = await runningUpdate;
+        const to = (await readLocalManifest()).version ?? null;
+        ctx.logger?.info?.(
+          "bili-context-patch: update " +
+            (result.ok ? "applied" : "failed") +
+            " " +
+            (from ?? "?") +
+            " -> " +
+            (to ?? "?"),
+        );
+        return Response.json({ ok: result.ok, from, to, output: result.output });
+      },
+    });
+  });
 }

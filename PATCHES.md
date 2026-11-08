@@ -118,3 +118,18 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 - 安装脚本会改写 profile 的 `package.json` 与 `cordis.patch.yml`（均保留 `.bak-<时间戳>` 备份）；用 DSH 插件管理器更新 bili 或增删别的插件时它不会自动重做这些，做完需要自己跑一次 `install.mjs`
 - 关掉 `bili-context-patch` 会一起带走：条目本身、它挂的三个子插件、以及这一层里注入 preset 的 `biliBasicCompactionPolicy`。三者同生共死，所以 preset 会退回复用 dsh 自带的压缩策略，不会卡在等一个没人提供的服务上（上游 #3662 描述的是闸门与注入分离的情形）。要回到独立插件形态，关掉它之后去插件页打开对应的原版卡片
 - 一体化之后，卸载 `bili-context-patch` 等于同时停掉三项能力；这是「一张卡」的代价，也是它的定义
+
+## 9. 检查更新
+
+包装包自带一个更新入口，路径 `/api/bili-context-patch/version`：`GET` 查版本，`POST ?action=update` 执行更新，由 `package/lib/index.js` 通过 `connection.fetch.register` 注册。
+
+- `GET` 读本机 `plugins/bili-context-patch/package.json` 的 `version`，再读 `https://raw.githubusercontent.com/No-ni/billion-context-patched/main/package/package.json` 的 `version`；两边都是三位数字才比较，返回 `{ version, latest, updateAvailable }`。
+- `POST ?action=update` 在安装时记下的 `patchRepo` 里跑 `git pull --ff-only`，随后用同一个 Node 进程执行 `scripts/install.mjs`（`ELECTRON_RUN_AS_NODE=1`），返回 `{ ok, from, to, output }`。同一时刻只跑一个更新，第二个请求等第一个。
+
+设置页那行「版本 / 检查更新」是加速器自带的 UI。安装脚本在合并客户端 bundle 时改写三个字面量，让它指向本补丁包：
+
+- 设置命名空间：`const NS = "model-request-accelerator";` → `const NS = "bili-context-patch";`
+- 版本接口：`const VERSION_PATH = "/api/model-request-accelerator/version";` → `const VERSION_PATH = "/api/bili-context-patch/version";`
+- 更新提示：加速器那句“在本插件目录执行 git pull --ff-only” → “拉取补丁仓库并重新生成包装包”
+
+前两个找不到时安装脚本直接报错退出（不然会悄悄退回加速器的旧行为）；第三个找不到只打印一条 warning，因为提示文案不影响功能。

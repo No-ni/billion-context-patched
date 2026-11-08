@@ -36,8 +36,9 @@ const MARKER = "# --- model-request-accelerator: merged by billion-context-patch
 // by host, not by provider name: rename a provider or add another one later and
 // the same rule still applies, as long as it points at one of these relays.
 const COMPRESS_HOSTS = new Set(["www.didudidu.asia", "154.219.111.56"]);
-// Steps with the wrapper's version suffix: 0.1.212-patch.2 and so on.
-const PATCH_REV = 2;
+// The wrapper's version lives in its own package.json (three parts, e.g. 0.1.0)
+// and is bumped by hand when a patch is published: the version this repo shows
+// and the one the update check compares against are the same field.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -198,21 +199,40 @@ const acceleratorClientBody = extractFactory(
 // generated bundle keeps the accelerator's repository untouched.
 const NS_LITERAL = 'const NS = "model-request-accelerator";';
 const NS_REWRITTEN = 'const NS = "' + WRAPPER + '";';
-const occurrences = acceleratorClientBody.split(NS_LITERAL).length - 1;
-if (occurrences !== 1) {
-  fail(
-    ACCELERATOR +
-      ": expected exactly one '" +
-      NS_LITERAL +
-      "' in the client bundle, found " +
-      occurrences +
-      " — the settings page would look under the wrong namespace",
-  );
+
+// The "version / check for updates" row at the bottom of that page is the
+// accelerator's, so by default it asks the accelerator's repository and pulls
+// the accelerator's checkout. Inside the merged unit that row should report and
+// update THIS package instead: it points at the wrapper's own endpoint, which
+// pulls the patch repo and then regenerates the install.
+const VERSION_LITERAL = 'const VERSION_PATH = "/api/model-request-accelerator/version";';
+const VERSION_REWRITTEN = 'const VERSION_PATH = "/api/' + WRAPPER + '/version";';
+const HINT_LITERAL = "更新会在本插件目录执行 git pull --ff-only；更新后需要重启 dsh web 才会生效。";
+const HINT_REWRITTEN = "更新会拉取补丁仓库并重新生成包装包；完成后需要重启 dsh web 才会生效。";
+
+// A literal that upstream renames would silently leave the old behaviour in
+// place, so the ones that decide where the row points must match exactly once.
+const rewriteOnce = (text, literal, replacement, what, { soft = false } = {}) => {
+  const hits = text.split(literal).length - 1;
+  if (hits !== 1) {
+    const problem = "expected exactly one " + what + " in the client bundle, found " + hits;
+    if (soft) return { text, ok: false, problem };
+    fail(ACCELERATOR + ": " + problem);
+  }
+  return { text: text.replace(literal, () => replacement), ok: true };
+};
+
+const nsRewrite = rewriteOnce(acceleratorClientBody, NS_LITERAL, NS_REWRITTEN, "settings namespace literal");
+const versionRewrite = rewriteOnce(nsRewrite.text, VERSION_LITERAL, VERSION_REWRITTEN, "version route literal");
+const hintRewrite = rewriteOnce(versionRewrite.text, HINT_LITERAL, HINT_REWRITTEN, "update hint text", { soft: true });
+if (!hintRewrite.ok) {
+  say("warning: " + hintRewrite.problem + " — the hint still describes the accelerator's own git pull");
 }
+const acceleratorRebuilt = hintRewrite.text;
 
 const mergedClient = template
   .replace("/*__BILI_FACTORY__*/", () => biliClientBody)
-  .replace("/*__ACCELERATOR_FACTORY__*/", () => acceleratorClientBody.replace(NS_LITERAL, NS_REWRITTEN));
+  .replace("/*__ACCELERATOR_FACTORY__*/", () => acceleratorRebuilt);
 
 // ── 4. the wrapper's bundle layer ───────────────────────────────────────────
 // billion-context's own layer supplies the compaction gate wiring that the host
@@ -270,7 +290,10 @@ const wrapperLayer =
 
 const wrapperManifestPath = join(here, "..", "package", "package.json");
 const wrapperManifest = JSON.parse(readFileSync(wrapperManifestPath, "utf8"));
-wrapperManifest.version = biliVersion + "-patch." + PATCH_REV;
+// Where this checkout lives, so the wrapper's own update action can pull it and
+// regenerate the install without the user having to remember the path.
+wrapperManifest.patchRepo = resolve(here, "..");
+wrapperManifest.meta = { ...(wrapperManifest.meta ?? {}), upstream: UPSTREAM + "@" + biliVersion };
 
 // ── 5. write the wrapper package ────────────────────────────────────────────
 const wrapperDir = join(profile, "plugins", WRAPPER);
