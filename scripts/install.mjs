@@ -367,6 +367,7 @@ const patchBefore = existsSync(patchPath) ? readFileSync(patchPath, "utf8") : nu
 // The profile patch is the last layer applied, after every bundle layer, so a
 // disabled row here wins no matter what the manager writes into the bundle
 // list. Idempotent: rows are rewritten in place, never duplicated.
+/** Rows the wrapper replaces; only stale pins of these are cleaned up here. */
 const pinned = ["bili-native", "bili-compaction-gate", "model-request-accelerator"];
 
 /** Split a patch file into id blocks and raw lines, so a rewrite can address whole rows. */
@@ -435,24 +436,18 @@ const rewritePatch = (text, wrapperId, pinnedIds) => {
     return true;
   });
 
-  // (c) Both upstream entries stay shut. DSH's plugin manager re-lists every
-  //     dependency that declares a bundle patch, so these rows can come back
-  //     without anyone asking; the profile layer is applied last, which is what
-  //     makes a pin here final.
-  const present = new Set(blocks.map((block) => block.id).filter(Boolean));
-  for (const id of pinnedIds) {
-    if (!present.has(id)) {
-      blocks.push({ id, header: "- id: " + id, body: ["  disabled: true"] });
-      notes.push(id + " pinned disabled");
-      continue;
-    }
-    for (const block of blocks) {
-      if (block.id !== id || !onlyDisabled(block.body)) continue;
-      if (block.body.length === 1 && block.body[0].trim() === "disabled: true") continue;
-      block.body = ["  disabled: true"];
-      notes.push(id + " pinned disabled");
-    }
-  }
+  // (c) Retire no rows here. An earlier version pinned the two upstream entries
+  //     `disabled: true` from this file, which also disabled them when the merge
+  //     itself failed to load — the exact case where the old two-plugin setup has
+  //     to keep working. The wrapper host half disables them at runtime instead,
+  //     after its children are mounted. Stale pins written by that version are
+  //     removed here so they cannot silence anything by accident.
+  blocks = blocks.filter((block) => {
+    if (!pinnedIds.includes(block.id) || !onlyDisabled(block.body)) return true;
+    if (!(block.body.length === 1 && block.body[0].trim() === "disabled: true")) return true;
+    notes.push("removed stale pin " + block.id);
+    return false;
+  });
 
   return { text: joinPatch(blocks), notes };
 };

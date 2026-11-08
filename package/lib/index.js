@@ -7,6 +7,16 @@
  * from the profile's node_modules, so upgrading either one only means running
  * scripts/install.mjs again.
  *
+ * Deliberately absent: any disabling of the standalone rows. Two attempts to
+ * switch them off — a `disabled: true` row in the profile patch, then a runtime
+ * `loader.update` after mounting — both turned out to be worse than useless:
+ * the patch version left the old plugins down even when this package failed to
+ * load, and the runtime version cannot remove a card anyway (the plugin list and
+ * the client module graph are built from `dsh.profile.bundles`, not from live
+ * entries). The rows are simply not listed, which is what "merged" means here,
+ * and nothing on disk stays disabled — re-adding the originals from the plugin
+ * page works immediately if this package ever breaks.
+ *
  * Two details carry the settings page over:
  *
  * 1. The settings service keys a namespace by the PROFILE ENTRY ID, and it only
