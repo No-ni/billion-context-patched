@@ -4,7 +4,7 @@
 - 本分支基线：**0.1.212**（commit `daa082ea`）
 - 完整 diff：[`patches/upstream-0.1.212.diff`](./patches/upstream-0.1.212.diff)
 
-改动分两类：`dist/index.js` 里的出口压缩（第 1–4 节，见上面的 diff），以及**安装期**对组合层的合并（第 5 节，不进 diff，由 `scripts/install.mjs` 写入）。
+改动分两类：`dist/index.js` 里的出口压缩（第 1–4 节，见上面的 diff），以及**安装期**生成的一体化包装包（第 5 节，源码在 `package/`）。
 
 ## 1. 出口压缩
 
@@ -63,43 +63,39 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 - `encoding`：`gzip` / `br` / `none`
 - `dir`：本次指令原文；空串表示没有指令
 
-每次压缩另写一行 `~/.local/state/billion-context/upstream-encode.log`（Windows 上是 `%USERPROFILE%\.local\state\billion-context\upstream-encode.log`）：
+每次压缩另写一行 `~/.local/state/billion-context/upstream-encode.log`：
 
 ```
 2026-11-08T17:41:48.332Z encoded 481153 -> 142851 (br) rid=e79ee3c7-…
 ```
 
-## 5. 合并层：随 billion-context 启用的加速插件
+## 5. 一体化层：一个条目挂三样东西
 
-这一处不在 `dist/index.js` 里。`scripts/install.mjs` 安装时会在 bili 的 `dsh.bundle.patch.yml` 末尾追加一段：
+这一处不在 `dist/index.js` 里，源码是 `package/`，由 `scripts/install.mjs` 在安装时生成到 `<profile>/plugins/bili-context-patch`。
 
-```yaml
-- insert:
-    - id: model-request-accelerator
-      name: dsh-plugin-model-request-accelerator
-```
+**为什么需要它**：插件列表一条 Loader 条目一张卡，浏览器半侧的客户端 bundle 也是按条目分发的（`@deepseek-ai/dsh-client-modules`：宿主扫描已启用的 Loader 条目并组合启动图）。只要 bili 和加速器各占一条条目，就必然是两张卡——改标题只能改字面。
 
-并把 `dsh-plugin-model-request-accelerator` 从 profile 的 `dsh.profile.bundles` 里移除（依赖保留，写 `link:` 指到本地插件目录）。
+**怎么做的**：
 
-两个约束决定了这一个写法：
+- `package/lib/index.js`（主机半侧）——一个条目内 `ctx.plugin()` 依次挂载 `billion-context`、`billion-context/dsh-compaction-gate`、`dsh-plugin-model-request-accelerator`；本条目收到的 `config` 转发给加速器，渠道开关因此仍然生效；
+- `package/lib/client.template.js`（浏览器半侧）——安装时把两个包客户端 bundle 的工厂体（`window.__ModuleLoader__.load({id, factory})` 里面的那段）切出来，合进同一个 `id: "bili-context-patch"` 的工厂，两个 half 依次 apply、`inject` 取并集；
+- 组合层——复制 bili 的 `dsh.bundle.patch.yml`，删掉开头那条 `- insert:`（`bili-native` 与 `bili-compaction-gate` 改由代码挂载，否则又是两条 Loader 条目），`compaction-basic.auto:false`、四个 preset 的 `inject: [biliBasicCompactionPolicy]`、`llm-deepseek(-account)` 的 retryPolicy 全部保留。
 
-- **不能两边都插**：同一个 id 被两个组合层各插一次，会变成两行 `model-request-accelerator`，是重复条目而不是合并。所以加速插件自己的 `cordis.patch.yml` 不再被应用（它的内容也只有同一行 insert，无损失）。
-- **依赖必须留**：加载器按 `name` 从 profile 的 `node_modules` 解析包，包不在了这行就是悬空引用。
+**profile 侧的三处改写**（都由脚本完成、幂等、带 `.bak-<时间戳>` 备份）：`dsh.profile.bundles` 里 `billion-context` 换成 `bili-context-patch`；`dependencies` 里给包装包与加速器各写一条 `link:`；`cordis.patch.yml` 里按 id 定位的那条渠道配置改成 `- id: bili-context-patch`。
 
-效果是「装一次、卸一次」：移除 `billion-context` 组合包后，这段 patch 层不再被应用，加速插件那一行一起消失，插件不再启动、设置页消失。卸载时 `plugins/model-request-accelerator` 目录会留在磁盘上（只是 profile 的一个 link 依赖，不再被挂载）。
-
-加速插件自身没有一行代码被复制进本仓库：它的设置页（`settings.section`）、耗时面板（`conversation.view`）、接口（`/api/model-request-accelerator/*`）和按渠道开关都还是它自己仓库里的实现，更新它只需更新那个目录。
+**效果**：装一次两个功能都在、插件列表只有一张 `bili-context-patch`；从 `dsh.profile.bundles` 移除它，一切随之停止。两个上游包一个字节都没被改写，升级任一包后重跑 `install.mjs` 即可重新生成包装包。
 
 ## 6. 没有改动的部分
 
 - 入站解压（客户端发来的 gzip / br / zstd）仍用上游实现
 - 折叠策略、健康检查、其他 `/__bili/*` 接口均未改动
-- 仓库里的 `dsh.bundle.patch.yml` 保持上游原样：第 5 节那段是安装时追加的，不进版本库，所以上游一升级、重跑 `install.mjs` 就能接上
+- 仓库里的 `dist/index.js` 之外，仓库不保存任何上游包的副本；包装包在安装时生成
 - `hermes-plugin`、文档等文件原样保留
 
 ## 7. 已知限制
 
 - `dist/index.js` 是构建产物，补丁按**文本锚点**落在 0.1.212 上；上游一旦改动这些函数，需要按上面列的位置手工重做
 - br 是否被上游网关接受取决于网关版本，这里不做自动降级
-- 合并依赖 profile 只有一份依赖清单：如果将来把加速插件重新加回 `dsh.profile.bundles`，必须同时去掉 bili 这层里的 insert，否则是重复条目
-- 安装脚本会改写 profile 的 `package.json`（保留 `.bak-<时间戳>` 备份）；用 DSH 插件管理器更新 bili 时它不会自动重写这段，更新后需要自己跑一次 `install.mjs`
+- 包装包的浏览器半侧按**工厂体文本**切分上游 bundle：上游如果改了客户端 bundle 的封装格式（不再是 `factory: (require) => {...}`），安装脚本会直接报错退出，不会生成半成品
+- 安装脚本会改写 profile 的 `package.json` 与 `cordis.patch.yml`（均保留 `.bak-<时间戳>` 备份）；用 DSH 插件管理器更新 bili 时它不会自动重做这些，更新后需要自己跑一次 `install.mjs`
+- 一体化之后，禁用 `bili-context-patch` 等于同时停掉三项能力；这是「一张卡」的代价，也是它的定义

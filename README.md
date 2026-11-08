@@ -1,10 +1,10 @@
-# billion-context（自维护分支）
+# bili-context-patch（billion-context 的自维护构建）
 
-[billion-context](https://github.com/ranxianglei/billion-context)（命令名 `bili`）的自维护构建，基线 **v0.1.212**，MIT 许可。
+[billion-context](https://github.com/ranxianglei/billion-context)（命令名 `bili`）的自维护构建，基线 **v0.1.212**，MIT 许可；同时内置 [dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator)。
 
-这个仓库做两件事：替换 `dist/index.js`（出口压缩与回执），以及在**安装时**把 [dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator) 并进同一个安装单元——装一次 bili，两个功能都在；卸一次，两个一起走。
+装上它之后，插件列表里**只有一张卡**：`bili-context-patch`。上游的 billion-context 与加速器都不再作为独立插件出现——它们由这层的包装包在内部挂载。
 
-这里保存的是可直接替换的 `dist/index.js` 构建产物，不是源码：上游发布的就是这个 bundle，没有公开的对应源码树。加速插件不复制进来，它仍是自己的仓库、自己的包，安装脚本只负责接线。
+这里保存的是可直接替换的 `dist/index.js` 构建产物，不是源码：上游发布的就是这个 bundle，没有公开的对应源码树。两个上游包都不复制进本仓库，包装包只负责挂载。
 
 ## 为什么维护一个分支
 
@@ -18,24 +18,24 @@ DSH 的「模型请求加速」插件和 bili 都在做同一件事——把请�
 2. **压缩指令** —— `x-accel-compress: off | on | gzip | br`，按请求覆盖全局设置
 3. **回执接口** —— `GET /__bili/encode-stats[?rid=…]`，查这条请求折叠后与出网的字节
 4. **记录与日志** —— `origBytes / wireBytes / encoding / dir`，另写 `upstream-encode.log`
-5. **合并加速插件** —— 安装时在 bili 的组合层追加一行 `insert`，把 `model-request-accelerator` 一起挂上；它的设置页、耗时面板、仓库和发版节奏都不变
+5. **一体化安装** —— 安装脚本生成一个包装包 `bili-context-patch`：一个 Loader 条目同时挂载 bili、它的压缩闸门和加速器，插件列表因此只有一张卡
 
-前四项在 `dist/index.js` 里，第五项在安装期完成，细节和代码位置见 [PATCHES.md](./PATCHES.md)。
+前四项在 `dist/index.js` 里，第五项在 `package/` 里、由 `scripts/install.mjs` 生成到 profile，细节见 [PATCHES.md](./PATCHES.md)。
 
-## 合并是怎么做到的
+## 一体化是怎么做的
 
-DSH 里「一次安装」的单位是组合包：profile 的 `dsh.profile.bundles` 里列了谁，谁的 `dsh.bundle.patch.yml` 才会被应用。所以合并只动组合层，不动任何一方的代码：
+DSH 的插件列表一条 Loader 条目一张卡，浏览器半侧也是按条目发一个客户端 bundle——所以「两张卡」是结构性的，改文案没用。做法是加一层很薄的包装包：
 
-- 那一行的**来源**从加速插件自己的组合层，挪到 bili 的组合层（安装时追加到 `dsh.bundle.patch.yml` 末尾）；
-- 加速插件从 `dsh.profile.bundles` 移除，但**保留 profile 依赖**（`link:./plugins/model-request-accelerator`）——加载器要按名字从 `node_modules` 解析到它的模块；
-- 加速插件自己的 `cordis.patch.yml` 不再被应用（同一个 id 被两个组合层插入会变成重复条目），文件留着即可。
+- **主机半侧**（`package/lib/index.js`）：一个条目里 `ctx.plugin()` 依次挂载 `billion-context`、`billion-context/dsh-compaction-gate` 和加速器，配置转发给加速器（渠道开关就落在它身上）；
+- **浏览器半侧**：安装时把两个包各自的客户端 bundle 的工厂体切出来，合进一个 `id: "bili-context-patch"` 的工厂，两个 half 依次 apply 到同一处，设置页和耗时面板照旧；
+- **组合层**：`billion-context` 原来的 `dsh.bundle.patch.yml` 被复制进包装包，只删掉那两条 `insert`（那两个插件改由代码挂载），压缩闸门、`compaction-basic`、预设注入与重试策略都保留。
 
 于是：
 
-- **装一次**：装好 bili 之后两个功能都在，加速插件的按渠道开关照旧在它自己的设置页里；
-- **卸一次**：从 `dsh.profile.bundles` 移除 billion-context，那行 `insert` 随之消失，加速插件不再启动、设置页消失；
-- **页面各归各**：加速插件的设置页由它自己注册（`settings.section`），bili 还是原来那套面板；
-- **更新解耦**：加速插件更新只动它自己的目录；bili 更新要重跑一次 `install.mjs`——换包会把组合层还原成上游，这一步本来就在你的升级流程里。
+- **装一次**：跑一次安装脚本，两个功能都在，插件列表只有 `bili-context-patch`；
+- **卸一次**：从 `dsh.profile.bundles` 移除 `bili-context-patch`，一切随之停止；
+- **页面各归各**：设置里仍是两页（bili 面板 + 模型请求加速），加速器的渠道开关不受影响；
+- **更新解耦**：两个上游包都没被复制，升级任一包后重跑安装脚本即可重新生成包装包。
 
 ## 平台
 
@@ -49,43 +49,46 @@ macOS、Linux、Windows 都可用，补丁和脚本里没有平台专属命令�
 ## 安装
 
 ```sh
-node scripts/install.mjs                       # 默认位置：装构建 + 合并加速插件
+node scripts/install.mjs                       # 默认位置：装构建 + 生成 bili-context-patch
 node scripts/install.mjs /path/to/billion-context
 node scripts/install.mjs --dry-run             # 只打印要做什么，不写文件
-node scripts/install.mjs --compression-only    # 只要压缩补丁，不合并加速插件
+node scripts/install.mjs --compression-only    # 只要压缩补丁，不生成包装包
 node scripts/install.mjs --accelerator /path/to/dsh-plugin-model-request-accelerator
 node scripts/restart.mjs                       # 重启 bili 代理，让新的 dist 生效
 ```
 
-`install.mjs` 依次做四步，每步都打印结果，且每个被改的文件都留 `<文件>.bak-<时间戳>` 备份：
+`install.mjs` 依次做这些事，每步都打印结果，每个被改的文件都留 `<文件>.bak-<时间戳>` 备份：
 
 1. 备份并覆盖 `dist/index.js`；
-2. 确保加速插件在 `<profile>/plugins/model-request-accelerator`（缺失时 `git clone`，也可用 `--accelerator` 指定已有目录）；
-3. 改 profile 的 `package.json`：依赖写 `link:`，并从 `dsh.profile.bundles` 里移掉加速插件；
-4. 在 bili 的 `dsh.bundle.patch.yml` 末尾追加加速插件那一行（重复执行会替换旧块，不会叠加）。
+2. 确保加速器在 `<profile>/plugins/model-request-accelerator`（缺失时 `git clone`，也可用 `--accelerator` 指定）；
+3. 生成 `<profile>/plugins/bili-context-patch`：manifest、主机入口、合并后的 `lib/client.js`、以及从 bili 复制并删掉 insert 的 `dsh.bundle.patch.yml`；
+4. 把它链进 `node_modules`（加速器同样）；
+5. 改 profile 的 `package.json`：把 `billion-context` 换成 `bili-context-patch`，两个包都写成 `link:` 依赖；
+6. 把 profile 的 `cordis.patch.yml` 里那条按 id 定位的渠道配置改指向 `bili-context-patch`。
 
-装完重启 DSH 生效（开了 HMR 会自动重组）。`restart.mjs` 只重启 bili 代理，用来加载新的 `dist/index.js`。
+装完重启 DSH 生效。`restart.mjs` 只重启 bili 代理，用来加载新的 `dist/index.js`。
 
 ### 卸载
 
-按 DSH 的方式移除组合包即可，两个功能一起停：
-
 ```sh
-dsh plugin --profile desktop remove billion-context
+dsh plugin --profile desktop remove bili-context-patch
 ```
 
-`plugins/model-request-accelerator` 目录会留在磁盘上——它只是 profile 的一个 link 依赖，不再被任何组合层挂载，不启动、不占资源。要彻底清掉，删掉该目录并从 profile 的 `dependencies` 里移除即可。
+`plugins/bili-context-patch`、`plugins/model-request-accelerator` 与 `node_modules/billion-context` 会留在磁盘上，但不再被任何组合层挂载，不启动、不占资源。要彻底清掉，删掉这两个目录并在 profile 的 `dependencies` 里移除对应条目即可。
 
 ## 验证
+
+装上并重启后，看两处：
+
+1. **设置 → 插件 → 插件列表**：只有一张 `bili-context-patch`，不再有 `billion-context` 或 `模型请求加速` 的独立卡片；
+2. **设置侧栏**：`模型请求加速` 那一页仍在（排在 bili 那页前面），对话里能挂出请求耗时面板。
+
+压缩链路：
 
 ```sh
 curl -s http://127.0.0.1:18787/__bili/health
 curl -s "http://127.0.0.1:18787/__bili/encode-stats?rid=<某个 rid>" | head -c 400
 ```
-
-（Windows 上没有 curl 时，浏览器打开同样地址即可。）记录里 `dir` 为空串表示这条请求没有带指令、走的是 bili 自己的全局设置；`encoding` 是 `none` 表示这条没有压缩。
-
-合并是否生效，看两处：DSH 设置里仍有「模型请求加速」那一页（它在 bili 那页上面，注册顺序 30 对 100），以及对话里能挂出请求耗时面板。
 
 ## 开关
 
@@ -98,9 +101,7 @@ echo gzip > ~/.local/state/billion-context/upstream-encoding   # 或 br；清空
 
 ## 上游升级之后
 
-`dist/index.js` 是构建产物，上游一升级，这份补丁就不能照搬了：需要按 [PATCHES.md](./PATCHES.md) 列出的位置重新落一遍。`patches/upstream-0.1.212.diff` 是本分支相对上游 0.1.212 的完整 diff，可对照。
-
-组合层也一样：新版本换上之后 `dsh.bundle.patch.yml` 会退回上游原样，加速插件那一行随之消失——重跑一次 `node scripts/install.mjs` 即可同时补上构建与合并（脚本可重复执行）。
+`dist/index.js` 是构建产物，上游一升级，这份补丁就不能照搬了：需要按 [PATCHES.md](./PATCHES.md) 列出的位置重新落一遍，然后**重跑一次 `node scripts/install.mjs`**——它会用新的 bili 版本重新生成包装包（组合层、合并的客户端 bundle 都从当时磁盘上的上游包里现取）。
 
 ## 风险与边界
 
@@ -108,4 +109,4 @@ echo gzip > ~/.local/state/billion-context/upstream-encoding   # 或 br；清空
 - 请求体小于 1024 字节、压缩后不足原文 95%、或已带 `content-encoding` 时不压
 - br 用 quality 4；上游是否接受 br 由网关决定，这里**不会**在失败时自动降级，客户端可按需改回 gzip
 - 入站解压、折叠策略、其他 `/__bili/*` 接口都没有改动
-- 合并只改组合层，不改加速插件的代码：它的按渠道开关、耗时面板和接口都还是它自己的
+- 合并只在安装期发生：两个上游包一个字节都没被改写，包装包里的客户端 bundle 是安装时从它们的构建产物切出来的

@@ -1,0 +1,29 @@
+{
+  "name": "bili-context-patch",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "billion-context patched build, with dsh-plugin-model-request-accelerator mounted inside it",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "meta": {
+    "title": "bili-context-patch",
+    "description": "billion-context 的补丁构建，内置模型请求加速；上游 billion-context 与加速器不再单独挂载。"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./dsh.bundle.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "dependencies": {
+    "billion-context": "*",
+    "dsh-plugin-model-request-accelerator": "*"
+  }
+}

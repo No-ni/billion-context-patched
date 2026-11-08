@@ -1,10 +1,16 @@
 #!/usr/bin/env node
-// Install this build over an existing billion-context installation, and wire
-// dsh-plugin-model-request-accelerator into the same install unit.
+// Install this build over an existing billion-context installation and expose
+// the result as ONE Loader entry named bili-context-patch.
 //
-// One install: after this script the profile lists billion-context as the only
-// bundle for both features, so removing billion-context stops both — while each
-// plugin keeps its own settings page, its own repository and its own upgrades.
+// Why a wrapper package instead of a second bundle row: the Plugins settings
+// list renders one card per Loader entry, and the host serves one client bundle
+// per entry. Listing billion-context and the accelerator as two rows can never
+// be one card. So this install writes a small package that
+//   - mounts billion-context, its compaction gate and the accelerator as child
+//     plugins (host half), and
+//   - concatenates both client bundles into one factory (browser half).
+// Neither upstream package is modified or copied: the loader resolves both from
+// the profile's node_modules, so upgrading either means re-running this script.
 //
 // Runs the same way on macOS, Linux and Windows: no shell, no lsof, no cp.
 import { execFileSync } from "node:child_process";
@@ -21,6 +27,8 @@ import { homedir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const WRAPPER = "bili-context-patch";
+const UPSTREAM = "billion-context";
 const ACCELERATOR = "dsh-plugin-model-request-accelerator";
 const ACCELERATOR_REPO = "https://github.com/No-ni/dsh-plugin-model-request-accelerator.git";
 const MARKER = "# --- model-request-accelerator: merged by billion-context-patched ---";
@@ -49,16 +57,19 @@ const compressionOnly = argv.includes("--compression-only");
 const target = resolve(
   positional[0] ??
     process.env.BILI_PKG ??
-    join(homedir(), ".dsh", "profiles", "desktop", "node_modules", "billion-context"),
+    join(homedir(), ".dsh", "profiles", "desktop", "node_modules", UPSTREAM),
 );
 const profile = resolve(target, "..", "..");
 const manifestPath = join(profile, "package.json");
+const patchPath = join(profile, "cordis.patch.yml");
 const bundleLayerPath = join(target, "dsh.bundle.patch.yml");
 
 const fail = (message) => {
   console.error(message);
   process.exit(1);
 };
+
+const say = (message) => console.log(message);
 
 if (!existsSync(join(target, "package.json")) || !existsSync(join(target, "dist"))) {
   fail("no billion-context installation at " + target);
@@ -72,13 +83,9 @@ if (!existsSync(bundleLayerPath)) {
 
 const pad = (value) => String(value).padStart(2, "0");
 const withStamp = (date) =>
-  [
-    date.getFullYear(),
-    pad(date.getMonth() + 1),
-    pad(date.getDate()),
-  ].join("") +
+  [date.getFullYear(), date.getMonth() + 1, date.getDate()].map(pad).join("") +
   "-" +
-  [pad(date.getHours()), pad(date.getMinutes()), pad(date.getSeconds())].join("");
+  [date.getHours(), date.getMinutes(), date.getSeconds()].map(pad).join("");
 
 const backupOf = (file) => {
   const to = file + ".bak-" + withStamp(new Date());
@@ -86,27 +93,29 @@ const backupOf = (file) => {
   return to;
 };
 
+const writeWithBackup = (file, content) => {
+  const backup = existsSync(file) ? backupOf(file) : null;
+  writeFileSync(file, content);
+  return backup;
+};
+
 // ── 1. the patched build ────────────────────────────────────────────────────
 const installedBuild = join(target, "dist", "index.js");
 if (dryRun) {
-  console.log("would install " + join(here, "..", "dist", "index.js") + " into " + installedBuild);
+  say("would install " + join(here, "..", "dist", "index.js") + " into " + installedBuild);
 } else {
   const buildBackup = backupOf(installedBuild);
   copyFileSync(join(here, "..", "dist", "index.js"), installedBuild);
-
-  // The package ships index.js as an executable script; keep that bit set on
-  // POSIX. On Windows chmod is a no-op, which is exactly right.
   try {
     chmodSync(installedBuild, 0o755);
   } catch {}
-
-  console.log("installed into " + target);
-  console.log("build backup: " + buildBackup);
+  say("installed into " + target);
+  say("build backup: " + buildBackup);
 }
 
 if (compressionOnly) {
-  console.log("compression only: skipped the accelerator merge (--compression-only)");
-  console.log("restart the bili proxy to activate: node scripts/restart.mjs");
+  say("compression only: skipped the accelerator merge (--compression-only)");
+  say("restart the bili proxy to activate: node scripts/restart.mjs");
   process.exit(0);
 }
 
@@ -125,27 +134,142 @@ const acceleratorManifest = join(acceleratorPath, "package.json");
 if (!existsSync(acceleratorManifest)) {
   const repo = option("--accelerator-repo") ?? process.env.ACCELERATOR_REPO ?? ACCELERATOR_REPO;
   if (dryRun) {
-    console.log("would clone " + repo + " into " + acceleratorPath);
+    say("would clone " + repo + " into " + acceleratorPath);
   } else {
     mkdirSync(dirname(acceleratorPath), { recursive: true });
-    console.log("cloning " + repo + " into " + acceleratorPath);
+    say("cloning " + repo + " into " + acceleratorPath);
     execFileSync("git", ["clone", "--depth", "1", repo, acceleratorPath], { stdio: "inherit" });
   }
 }
-
 if (existsSync(acceleratorManifest)) {
   const declared = JSON.parse(readFileSync(acceleratorManifest, "utf8")).name;
   if (declared !== ACCELERATOR) {
     fail(acceleratorManifest + " declares " + declared + ", expected " + ACCELERATOR);
   }
-  console.log("accelerator: " + acceleratorPath);
+  say("accelerator: " + acceleratorPath);
 }
 
-// ── 3. the profile: dependency yes, bundle no ───────────────────────────────
-// The row comes from billion-context's bundle layer, so the accelerator's own
-// layer has to stay unpublished — two bundles inserting the same row is a
-// duplicate entry, not a merge. The dependency stays: it is what puts the
-// package on the module path the loader resolves the row's name from.
+// ── 3. one merged client bundle from two factories ──────────────────────────
+// Both halves follow the same contract: window.__ModuleLoader__.load({id,
+// factory: (require) => { ... return module.exports; }}). Cutting the factory
+// body out of each file and running it inside one loader call keeps both halves
+// exactly as their authors wrote them, with the same require.
+const extractFactory = (source, label) => {
+  const marker = "factory: (require) => {";
+  const at = source.indexOf(marker);
+  if (at < 0) fail(label + ": client bundle has no factory");
+  let body = source.slice(at + marker.length).trimEnd();
+  const tail = body.lastIndexOf("});");
+  if (tail < 0 || !/}\)?;\s*$/.test(body.slice(tail))) {
+    fail(label + ": unexpected client bundle tail");
+  }
+  body = body.slice(0, tail).trimEnd();
+  if (!body.endsWith("}")) fail(label + ": factory body is not closed");
+  body = body.slice(0, -1).trim();
+  try {
+    new Function("require", body);
+  } catch (error) {
+    fail(label + ": factory body does not parse after extraction: " + error.message);
+  }
+  return body;
+};
+
+const biliVersion = JSON.parse(readFileSync(join(target, "package.json"), "utf8")).version;
+const templatePath = join(here, "..", "package", "lib", "client.template.js");
+const template = readFileSync(templatePath, "utf8");
+const biliClientBody = extractFactory(
+  readFileSync(join(target, "dist", "agent", "dsh-native-client.js"), "utf8"),
+  UPSTREAM,
+);
+const acceleratorClientBody = extractFactory(
+  readFileSync(join(acceleratorPath, "lib", "client.js"), "utf8"),
+  ACCELERATOR,
+);
+const mergedClient = template
+  .replace("/*__BILI_FACTORY__*/", () => biliClientBody)
+  .replace("/*__ACCELERATOR_FACTORY__*/", () => acceleratorClientBody);
+
+// ── 4. the wrapper's bundle layer ───────────────────────────────────────────
+// billion-context's own layer supplies the compaction gate wiring that the host
+// plane needs (compaction-basic off, presets waiting on the gate, retry policy).
+// The wrapper keeps all of it and drops only the two insert rows: those plugins
+// are mounted by the wrapper's host half, and a second row would be a second
+// Loader entry — exactly the second card this change removes.
+const stripInserts = (text) => {
+  const kept = [];
+  let skipping = false;
+  for (const line of text.split("\n")) {
+    if (skipping) {
+      if (line.startsWith(" ") || line.trim() === "") continue;
+      skipping = false;
+    }
+    if (line.startsWith("- insert:")) {
+      skipping = true;
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept.join("\n");
+};
+
+const layerSource = readFileSync(bundleLayerPath, "utf8");
+const layerHead = layerSource.includes(MARKER)
+  ? layerSource.slice(0, layerSource.indexOf(MARKER))
+  : layerSource;
+const wrapperLayer =
+  "# bili-context-patch bundle layer - generated by scripts/install.mjs.\n" +
+  "# Same wiring as billion-context's own layer, minus the two insert rows:\n" +
+  "# the wrapper mounts billion-context and its compaction gate in code, so one\n" +
+  "# Loader entry carries both plugins and the accelerator.\n" +
+  stripInserts(layerHead).replace(/\s+$/, "") +
+  "\n";
+
+const wrapperManifestPath = join(here, "..", "package", "package.json");
+const wrapperManifest = JSON.parse(readFileSync(wrapperManifestPath, "utf8"));
+wrapperManifest.version = biliVersion + "-patch.1";
+
+// ── 5. write the wrapper package ────────────────────────────────────────────
+const wrapperDir = join(profile, "plugins", WRAPPER);
+const wrapperFiles = [
+  [join(wrapperDir, "package.json"), JSON.stringify(wrapperManifest, null, 2) + "\n"],
+  [join(wrapperDir, "lib", "index.js"), readFileSync(join(here, "..", "package", "lib", "index.js"), "utf8")],
+  [join(wrapperDir, "lib", "client.js"), mergedClient],
+  [join(wrapperDir, "dsh.bundle.patch.yml"), wrapperLayer],
+];
+for (const [file, content] of wrapperFiles) {
+  if (dryRun) {
+    say("would write " + file + " (" + content.length + " bytes)");
+    continue;
+  }
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, content);
+}
+if (!dryRun) say("wrapper package: " + wrapperDir);
+
+// pnpm's link: dependency resolves through this symlink; creating it here keeps
+// the merge to one command instead of a pnpm install round trip.
+const linkPath = join(profile, "node_modules", WRAPPER);
+if (!existsSync(linkPath)) {
+  if (dryRun) {
+    say("would link " + linkPath + " -> " + wrapperDir);
+  } else {
+    mkdirSync(dirname(linkPath), { recursive: true });
+    symlinkSync(wrapperDir, linkPath, process.platform === "win32" ? "junction" : "dir");
+    say("linked " + linkPath + " -> " + wrapperDir);
+  }
+}
+const acceleratorLink = join(profile, "node_modules", ACCELERATOR);
+if (!existsSync(acceleratorLink)) {
+  if (dryRun) {
+    say("would link " + acceleratorLink + " -> " + acceleratorPath);
+  } else {
+    mkdirSync(dirname(acceleratorLink), { recursive: true });
+    symlinkSync(acceleratorPath, acceleratorLink, process.platform === "win32" ? "junction" : "dir");
+    say("linked " + acceleratorLink + " -> " + acceleratorPath);
+  }
+}
+
+// ── 6. the profile: one bundle row for both features ────────────────────────
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 const dependencies = (manifest.dependencies ??= {});
 const bundleOwner = manifest.dsh?.profile;
@@ -153,76 +277,77 @@ if (!bundleOwner || !Array.isArray(bundleOwner.bundles)) {
   fail(manifestPath + " has no dsh.profile.bundles list");
 }
 
-const relativePath = relative(profile, acceleratorPath).split(sep).join("/");
-const spec = "link:" + (relativePath.startsWith(".") ? relativePath : "./" + relativePath);
+const linkSpec = (path) => {
+  const rel = relative(profile, path).split(sep).join("/");
+  return "link:" + (rel.startsWith(".") ? rel : "./" + rel);
+};
+const wrapperSpec = linkSpec(wrapperDir);
+const acceleratorSpec = linkSpec(acceleratorPath);
 
-const manifestChanges = [];
-if (dependencies[ACCELERATOR] !== spec) {
-  dependencies[ACCELERATOR] = spec;
-  manifest.dependencies = Object.fromEntries(
-    Object.entries(dependencies).sort(([left], [right]) => left.localeCompare(right)),
-  );
-  manifestChanges.push("dependency " + ACCELERATOR + " = " + spec);
+const changes = [];
+const bundles = [];
+for (const name of bundleOwner.bundles) {
+  if (name === ACCELERATOR) continue;
+  if (name === UPSTREAM) {
+    if (!bundles.includes(WRAPPER)) bundles.push(WRAPPER);
+    continue;
+  }
+  if (name !== WRAPPER) bundles.push(name);
 }
-if (bundleOwner.bundles.includes(ACCELERATOR)) {
-  bundleOwner.bundles = bundleOwner.bundles.filter((name) => name !== ACCELERATOR);
-  manifestChanges.push("removed from dsh.profile.bundles");
+if (!bundles.includes(WRAPPER)) bundles.push(WRAPPER);
+if (JSON.stringify(bundles) !== JSON.stringify(bundleOwner.bundles)) {
+  bundleOwner.bundles = bundles;
+  changes.push("bundles -> " + bundles.join(", "));
 }
 
-if (manifestChanges.length > 0 && !dryRun) {
+const nextDependencies = { ...dependencies, [WRAPPER]: wrapperSpec, [ACCELERATOR]: acceleratorSpec };
+manifest.dependencies = Object.fromEntries(
+  Object.entries(nextDependencies).sort(([left], [right]) => left.localeCompare(right)),
+);
+if (JSON.stringify(manifest.dependencies) !== JSON.stringify(dependencies)) {
+  changes.push("dependencies: " + WRAPPER + " and " + ACCELERATOR + " linked");
+}
+
+if (changes.length > 0 && !dryRun) {
   const manifestBackup = backupOf(manifestPath);
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
-  console.log("profile: " + manifestChanges.join(", ") + " (backup " + manifestBackup + ")");
-} else if (manifestChanges.length > 0) {
-  console.log("would update profile: " + manifestChanges.join(", "));
+  say("profile: " + changes.join("; ") + " (backup " + manifestBackup + ")");
+} else if (changes.length > 0) {
+  say("would update profile: " + changes.join("; "));
 } else {
-  console.log("profile: already wired");
+  say("profile: already wired");
 }
 
-// pnpm's link: dependency resolves through this symlink; creating it here keeps
-// the merge to one command instead of a pnpm install round trip.
-const linkPath = join(profile, "node_modules", ACCELERATOR);
-if (!existsSync(linkPath)) {
-  if (dryRun) {
-    console.log("would link " + linkPath + " -> " + acceleratorPath);
+// ── 7. the channel switches follow the entry ────────────────────────────────
+// The profile patch targets the accelerator entry by id. The entry is gone, so
+// the same config block has to address the wrapper instead, otherwise the
+// provider toggles silently fall back to defaults.
+if (existsSync(patchPath)) {
+  const patch = readFileSync(patchPath, "utf8");
+  const nextPatch = patch
+    .replace(/^(- id: )model-request-accelerator$/m, "$1" + WRAPPER)
+    .replace(/^(\s+name: )dsh-plugin-model-request-accelerator$/m, "$1" + WRAPPER);
+  if (nextPatch !== patch) {
+    if (dryRun) {
+      say("would retarget the channel switches in " + patchPath + " to " + WRAPPER);
+    } else {
+      const patchBackup = backupOf(patchPath);
+      writeFileSync(patchPath, nextPatch);
+      say("channel switches retargeted to " + WRAPPER + " (backup " + patchBackup + ")");
+    }
   } else {
-    mkdirSync(dirname(linkPath), { recursive: true });
-    symlinkSync(acceleratorPath, linkPath, process.platform === "win32" ? "junction" : "dir");
-    console.log("linked " + linkPath + " -> " + acceleratorPath);
+    say("channel switches: already on " + WRAPPER);
   }
 }
 
-// ── 4. the bundle layer: one extra insert ───────────────────────────────────
-const block = [
-  "",
-  MARKER,
-  "# billion-context is the only bundle this profile lists for both features: the",
-  "# row below is what mounts the accelerator, so uninstalling billion-context",
-  "# takes the accelerator with it. The accelerator keeps its own bundle patch,",
-  "# settings page and release cadence; none of its code is copied into this build.",
-  "- insert:",
-  "    - id: model-request-accelerator",
-  "      name: " + ACCELERATOR,
-  "",
-].join("\n");
-
-const current = readFileSync(bundleLayerPath, "utf8");
-const head = (
-  current.includes(MARKER) ? current.slice(0, current.indexOf(MARKER)) : current
-).replace(/\s+$/, "");
-const next = head + "\n" + block;
-
-if (current === next) {
-  console.log("bundle layer: accelerator row already present");
-} else if (dryRun) {
-  console.log("would append the accelerator row to " + bundleLayerPath);
-} else {
-  const layerBackup = backupOf(bundleLayerPath);
-  writeFileSync(bundleLayerPath, next);
-  console.log("bundle layer: accelerator row appended (backup " + layerBackup + ")");
+// Earlier versions of this script appended an insert row to billion-context's
+// own layer. That row is what step 6 removes; leaving the text behind would
+// resurrect the row on the next bundle reset.
+if (!dryRun && layerSource.includes(MARKER)) {
+  writeWithBackup(bundleLayerPath, layerHead.replace(/\s+$/, "") + "\n");
+  say("removed the old insert row from " + bundleLayerPath);
 }
 
-console.log("");
-console.log("one install unit: billion-context mounts both plugins.");
-console.log("restart DSH to activate (HMR recomposes on its own when it is enabled).");
-console.log("restart the bili proxy for the compression build: node scripts/restart.mjs");
+say("");
+say("done. Restart DSH, then check Settings > Plugins: one card, " + WRAPPER + ".");
+say("Both settings pages (billion-context and 模型请求加速) stay where they are.");
