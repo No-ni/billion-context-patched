@@ -105,11 +105,16 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 - 仓库里的 `dist/index.js` 之外，仓库不保存任何上游包的副本；包装包在安装时生成
 - `hermes-plugin`、文档等文件原样保留
 
+## 8. 默认值：装好即开的两项
+
+- **`prompt_cache_key` 默认注入**：`parsePromptCacheRouting` 的兜底值由 `"disabled"` 改成 `"enabled"`。取值仍是三档：`disabled` 不发、`auto` 只对 `api.openai.com` 发、`enabled` 对所有上游发。配置文件里显式写了 `disabled` 的仍然尊重。
+- **中转站渠道自动开请求压缩**：`install.mjs` 扫描 profile 的 `cordis.yml` 与 `cordis.patch.yml`，把 `baseURL` 命中 `www.didudidu.asia` 或 `154.219.111.56` 的渠道名挑出来，在包装包条目的 `config.providers.<渠道>` 下写 `enabled: true` 与 `encoding: auto`（优先 brotli，运行时缺 brotli 或上游拒绝时回落 gzip）。匹配用的是**主机名**，渠道改名不影响；渠道换了别的域名要重跑一次脚本。
+
 ## 7. 已知限制
 
 - `dist/index.js` 是构建产物，补丁按**文本锚点**落在 0.1.212 上；上游一旦改动这些函数，需要按上面列的位置手工重做
 - br 是否被上游网关接受取决于网关版本，这里不做自动降级
 - 包装包的浏览器半侧按**工厂体文本**切分上游 bundle：上游如果改了客户端 bundle 的封装格式（不再是 `factory: (require) => {...}`），安装脚本会直接报错退出，不会生成半成品
 - 安装脚本会改写 profile 的 `package.json` 与 `cordis.patch.yml`（均保留 `.bak-<时间戳>` 备份）；用 DSH 插件管理器更新 bili 或增删别的插件时它不会自动重做这些，做完需要自己跑一次 `install.mjs`
-- **不要**在插件页点开关关掉 `bili-context-patch`：这个条目同时挂着压缩闸门（`biliBasicCompactionPolicy`），bili 上游注释 #3662 说明闸门必须常开，否则新建会话会一直等它。停用请从 `dsh.profile.bundles` 移除
+- 关掉 `bili-context-patch` 会一起带走：条目本身、它挂的三个子插件、以及这一层里注入 preset 的 `biliBasicCompactionPolicy`。三者同生共死，所以 preset 会退回复用 dsh 自带的压缩策略，不会卡在等一个没人提供的服务上（上游 #3662 描述的是闸门与注入分离的情形）。要回到独立插件形态，关掉它之后去插件页打开对应的原版卡片
 - 一体化之后，卸载 `bili-context-patch` 等于同时停掉三项能力；这是「一张卡」的代价，也是它的定义

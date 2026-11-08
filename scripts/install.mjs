@@ -32,6 +32,12 @@ const UPSTREAM = "billion-context";
 const ACCELERATOR = "dsh-plugin-model-request-accelerator";
 const ACCELERATOR_REPO = "https://github.com/No-ni/dsh-plugin-model-request-accelerator.git";
 const MARKER = "# --- model-request-accelerator: merged by billion-context-patched ---";
+// Channels that should ship with request-body compression already on. Matching is
+// by host, not by provider name: rename a provider or add another one later and
+// the same rule still applies, as long as it points at one of these relays.
+const COMPRESS_HOSTS = new Set(["www.didudidu.asia", "154.219.111.56"]);
+// Steps with the wrapper's version suffix: 0.1.212-patch.2 and so on.
+const PATCH_REV = 2;
 
 const here = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -264,7 +270,7 @@ const wrapperLayer =
 
 const wrapperManifestPath = join(here, "..", "package", "package.json");
 const wrapperManifest = JSON.parse(readFileSync(wrapperManifestPath, "utf8"));
-wrapperManifest.version = biliVersion + "-patch.1";
+wrapperManifest.version = biliVersion + "-patch." + PATCH_REV;
 
 // ── 5. write the wrapper package ────────────────────────────────────────────
 const wrapperDir = join(profile, "plugins", WRAPPER);
@@ -411,7 +417,45 @@ const joinPatch = (blocks) =>
 /** A row that carries nothing but `disabled:` — ours to rewrite, nobody else's. */
 const onlyDisabled = (body) => body.every((line) => /^\s+disabled:/.test(line));
 
-const rewritePatch = (text, wrapperId) => {
+/**
+ * Provider names whose endpoint is one of the relays in COMPRESS_HOSTS.
+ * Walks backwards from every `baseURL:` line to the key at two columns less —
+ * the provider name in a `providers:` map.
+ * @param texts - profile config files, in any order.
+ * @returns the matching provider names, each once.
+ */
+const channelsToCompress = (texts) => {
+  const names = new Set();
+  for (const text of texts) {
+    if (!text) continue;
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i += 1) {
+      const match = /^(\s*)baseURL:\s*['"]?([^'"\s]+)['"]?\s*$/.exec(lines[i]);
+      if (!match) continue;
+      let host = "";
+      try {
+        host = new URL(match[2]).hostname.toLowerCase();
+      } catch {
+        continue;
+      }
+      if (!COMPRESS_HOSTS.has(host)) continue;
+      const indent = match[1].length;
+      for (let j = i - 1; j >= 0; j -= 1) {
+        const line = lines[j];
+        if (!line.trim()) continue;
+        const lead = line.length - line.trimStart().length;
+        if (lead < indent - 2) break;
+        if (lead !== indent - 2) continue;
+        const key = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line.trim());
+        if (key) names.add(key[1]);
+        break;
+      }
+    }
+  }
+  return [...names];
+};
+
+const rewritePatch = (text, wrapperId, channels = []) => {
   const notes = [];
   let blocks = splitPatch(text);
 
@@ -437,13 +481,17 @@ const rewritePatch = (text, wrapperId) => {
   //     damage, never intent, so it is repaired rather than respected.
   let keptWrapperRow = false;
   blocks = blocks.filter((block) => {
-    if (block.id !== wrapperId || !onlyDisabled(block.body)) return true;
+    if (block.id !== wrapperId) return true;
+    // Any row of ours carrying a top-level `disabled:` is the pin row, and the pin
+    // row must never carry config: it would override the real one above it.
+    if (!block.body.some((line) => /^ {2}disabled:/.test(line))) return true;
     if (keptWrapperRow) {
       notes.push("dropped a duplicate " + wrapperId + " row");
       return false;
     }
     keptWrapperRow = true;
     if (!block.body.join(" ").includes("false")) notes.push("re-enabled the " + wrapperId + " row");
+    else if (block.body.length > 1) notes.push("stripped stray config from the " + wrapperId + " pin row");
     block.body = ["  disabled: false"];
     return true;
   });
@@ -464,11 +512,93 @@ const rewritePatch = (text, wrapperId) => {
     return false;
   });
 
+  // (d) Every channel that points at one of the relays gets request-body
+  //     compression switched on, brotli-first. Written as plain config next to the
+  //     other channel switches, so the panel shows the same thing the plugin
+  //     actually does, and so the user can still turn a single channel off.
+  if (channels.length > 0) {
+    blocks = blocks.map((block) => {
+      if (block.id !== wrapperId) return block;
+      if (block.body.some((line) => /^ {2}disabled:/.test(line))) return block;
+      const body = [...block.body];
+      let touched = false;
+      let configAt = body.findIndex((line) => /^\s{2}config:\s*$/.test(line));
+      if (configAt === -1) {
+        body.push("  config:");
+        configAt = body.length - 1;
+        touched = true;
+      }
+      let providersAt = body.findIndex((line, index) => index > configAt && /^\s{4}providers:\s*$/.test(line));
+      if (providersAt === -1) {
+        body.splice(configAt + 1, 0, "    providers:");
+        providersAt = configAt + 1;
+        touched = true;
+      }
+      /** End of the block opened on `start`: the first non-blank line indented no deeper than `indent`. */
+      const sectionEnd = (start, indent) => {
+        for (let i = start + 1; i < body.length; i += 1) {
+          if (body[i].trim() && body[i].length - body[i].trimStart().length <= indent) return i;
+        }
+        return body.length;
+      };
+      for (const name of channels) {
+        const escape = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        let nameAt = -1;
+        let end = sectionEnd(providersAt, 4);
+        for (let i = providersAt + 1; i < end; i += 1) {
+          if (new RegExp("^ {6}" + escape + ":\\s*$").test(body[i])) {
+            nameAt = i;
+            break;
+          }
+        }
+        if (nameAt === -1) {
+          body.splice(end, 0, "      " + name + ":", "        enabled: true", "        encoding: auto");
+          touched = true;
+          notes.push("compression on for " + name);
+          continue;
+        }
+        let local = false;
+        let fieldEnd = sectionEnd(nameAt, 6);
+        for (const [key, value] of [["enabled", "true"], ["encoding", "auto"]]) {
+          let at = -1;
+          for (let i = nameAt + 1; i < fieldEnd; i += 1) {
+            if (new RegExp("^ {8}" + key + ":").test(body[i])) {
+              at = i;
+              break;
+            }
+          }
+          if (at === -1) {
+            body.splice(fieldEnd, 0, "        " + key + ": " + value);
+            fieldEnd += 1;
+            local = true;
+          } else if (body[at].trim() !== key + ": " + value) {
+            body[at] = "        " + key + ": " + value;
+            local = true;
+          }
+        }
+        if (local) {
+          touched = true;
+          notes.push("compression on for " + name);
+        }
+      }
+      return touched ? { ...block, body } : block;
+    });
+  }
+
   return { text: joinPatch(blocks), notes };
 };
 
+// Providers are declared in either the profile's own config or its patch layer;
+// scanning both means a relay channel is found wherever the user put it.
+const cordisMain = join(profile, "cordis.yml");
+const channels = channelsToCompress([
+  patchBefore ?? "",
+  existsSync(cordisMain) ? readFileSync(cordisMain, "utf8") : "",
+]);
+if (channels.length > 0) say("relay channels: " + channels.join(", ") + " -> compression on, brotli-first");
+
 if (patchBefore !== null) {
-  const rewritten = rewritePatch(patchBefore, WRAPPER);
+  const rewritten = rewritePatch(patchBefore, WRAPPER, channels);
   if (rewritten.text !== patchBefore) {
     if (dryRun) {
       say("would rewrite " + patchPath + ": " + rewritten.notes.join("; "));

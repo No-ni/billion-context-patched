@@ -19,8 +19,9 @@ DSH 的「模型请求加速」插件和 bili 都在做同一件事——把请�
 3. **回执接口** —— `GET /__bili/encode-stats[?rid=…]`，查这条请求折叠后与出网的字节
 4. **记录与日志** —— `origBytes / wireBytes / encoding / dir`，另写 `upstream-encode.log`
 5. **一体化安装** —— 安装脚本生成一个包装包 `bili-context-patch`：一个 Loader 条目同时挂载 bili、它的压缩闸门和加速器，插件列表因此只有一张卡
+6. **默认值调整** —— `prompt_cache_key` 装好即发；中转站渠道装好即开请求压缩（brotli 优先），见下面「装好之后的默认值」
 
-前四项在 `dist/index.js` 里，第五项在 `package/` 里、由 `scripts/install.mjs` 生成到 profile，细节见 [PATCHES.md](./PATCHES.md)。
+前四项在 `dist/index.js` 里，第五、六项在 `package/` 与 `scripts/install.mjs` 里，细节见 [PATCHES.md](./PATCHES.md)。
 
 ## 一体化是怎么做的
 
@@ -120,6 +121,25 @@ echo gzip > ~/.local/state/billion-context/upstream-encoding   # 或 br；清空
 ```
 
 带 `x-accel-compress` 的请求以指令为准。
+
+## 装好之后的默认值
+
+两件事不用手动开，装完就是开的：
+
+| 能力 | 默认 | 起作用的地方 | 怎么关 |
+| --- | --- | --- | --- |
+| `prompt_cache_key` 注入 | 开 | `dist/index.js` 里 `parsePromptCacheRouting` 的兜底值由 `disabled` 改成 `enabled`，配置没写 `routing` 时对所有上游都发 | 在 bili 配置里写 `promptCache.routing: "disabled"`；写 `"auto"` 则只对 `api.openai.com` 发 |
+| 中转站渠道的请求压缩 | 开，`encoding: auto`（优先 brotli，缺 brotli 或上游拒绝时回落 gzip） | `install.mjs` 扫描 profile 里的 `baseURL`，主机名是 `www.didudidu.asia` 或 `154.219.111.56` 的渠道，自动在包装包条目下写 `enabled: true` + `encoding: auto` | 设置 → 模型请求加速 → 渠道，关掉对应开关；或改 `cordis.patch.yml` 里那个渠道的 `enabled` |
+
+渠道是**按主机名匹配**的，渠道名字（`ylinkimi`、`test` 之类）随便改都不影响；换成别的域名要重跑一次 `node scripts/install.mjs`。脚本每次运行都会打印它认出了哪些渠道：
+
+```
+relay channels: ylinkimi, test -> compression on, brotli-first
+```
+
+### 版本号
+
+`<上游 bili 版本>-patch.<补丁序号>`，补丁序号每发一版自增。当前 `0.1.212-patch.2`：`.1` 是一体化包装，`.2` 是这两项默认值。
 
 ## 上游升级之后
 
