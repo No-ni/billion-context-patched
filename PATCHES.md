@@ -181,6 +181,8 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 
 补丁版构建在仓库里只有一份：`vendor/billion-context/dist/index.js`（旧版在仓库根另存过一份 `dist/`，两份内容相同，已合并）。脚本允许用 `--bili <目录>` 从外部更新它，但只接受带 `__biliEncZlib` 的构建，没打过补丁的 bili 不会顶掉现有构建。
 
+取源顺序（0.4.2 起）：显式 `--bili` → 本包自带的 `vendor/billion-context` → profile 里已装的 billion-context → 上次装进 profile 的 vendor 副本。自带副本排在最前，是因为它自洽（清单、层、agent 文件、补丁构建来自同一个上游版本）；否则在已经装过旧版的机器上再跑一次脚本，会继续沿用 profile 里的旧上游，静默不升级。包管理器安装时前两项是同一个路径，等于没有复制。
+
 ## 12. fork 会话记住父会话（0.4.1）
 
 **症状**：在长会话顶部 fork，新会话要等很久才出第一个字，重的时候直接 413。日志依次是：

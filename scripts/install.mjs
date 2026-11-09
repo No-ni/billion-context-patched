@@ -95,15 +95,19 @@ const vendorAccelerator = join(vendorDir, ACCELERATOR);
 if (!buildMode && !existsSync(manifestPath)) fail("no profile manifest at " + manifestPath);
 
 // ── 0. where the sources come from ──────────────────────────────────────────
-// Best first: an explicit path, the copy this profile has installed, the vendored
-// copy an earlier run left behind. The last one is what makes a re-run work after
-// the profile stops declaring billion-context altogether.
+// Best first: an explicit path, this package's own vendored copy, then whatever
+// the profile carries. The vendored copy wins because it is self-consistent - its
+// manifest, layer, agent files and patched build all come from one upstream
+// version - and because a re-run from a checkout must not quietly keep the older
+// upstream an earlier install left in the profile. When this package came from
+// the plugin list the vendored path IS the installed path, so nothing is copied.
 const looksLikeBili = (path) =>
   existsSync(join(path, "package.json")) && existsSync(join(path, "dist", "index.js"));
+const ownVendor = join(here, "..", "vendor", UPSTREAM);
 const explicitBili = positional[0] ?? option("--bili") ?? process.env.BILI_PKG;
 const target = resolve(
   explicitBili ??
-    [join(profile, "node_modules", UPSTREAM), vendorBili].find((path) => looksLikeBili(path)) ??
+    [ownVendor, join(profile, "node_modules", UPSTREAM), vendorBili].find((path) => looksLikeBili(path)) ??
     join(profile, "node_modules", UPSTREAM),
 );
 if (!looksLikeBili(target)) fail("no billion-context sources at " + target);

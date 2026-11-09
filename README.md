@@ -23,6 +23,8 @@ node scripts/install.mjs
 node scripts/restart.mjs
 ```
 
+脚本以仓库自带的 `vendor/` 为准，所以在本机已经装过旧版的情况下，更新仓库后重跑这一条就够了，不用先卸。
+
 ## 卸载
 
 ```sh
