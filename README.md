@@ -4,6 +4,8 @@
 
 相对上游，这个包多带一个[模型请求加速](https://github.com/No-ni/dsh-plugin-model-request-accelerator)插件：压缩请求体、预传输共享对话历史，并给出每次请求的耗时面板。两样东西装在一起，所以「设置 → 插件」里只有一张 `bili-context-patch`；bili 面板与「模型请求加速」两个设置页照旧各管各的。
 
+另外补了一处 DSH 的缺口：**fork 出来的会话现在会写明自己的父会话**（会话头的 `parentSession`）。bili 靠这个字段继承父会话的压缩状态；没有它，fork 出来的子会话会把继承来的上百万 token 正文从零重压一遍，首字要等好几分钟，甚至直接 413。这是包装包宿主半边自己做的（`lib/fork-lineage.js`），bili 的构建没有为此多打一行补丁。
+
 ## 安装
 
 设置 → 插件 → 安装，填仓库地址即可，装完重启 DSH：
@@ -31,7 +33,7 @@ dsh plugin --profile desktop remove bili-context-patch
 
 ## 目录
 
-- `lib/` —— 主机入口 `index.js`、客户端合并包 `client.js`、上游转发 `upstream.js`
+- `lib/` —— 主机入口 `index.js`、fork 血缘补丁 `fork-lineage.js`、客户端合并包 `client.js`、上游转发 `upstream.js`
 - `vendor/` —— 两个上游的源码副本，自包含，不依赖 profile 里的其他包；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
 - `dsh.bundle.patch.yml` —— 组合层
 - `patches/` —— 相对上游 v0.1.213 的 diff

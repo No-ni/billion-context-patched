@@ -454,6 +454,7 @@ const wrapperFiles = [
   // In --build mode the manifest is the checkout's own file, maintained by hand.
   ...(buildMode ? [] : [[join(wrapperDir, "package.json"), JSON.stringify(wrapperManifest, null, 2) + "\n"]]),
   [join(wrapperDir, "lib", "index.js"), readFileSync(join(here, "..", "lib", "index.js"), "utf8")],
+  [join(wrapperDir, "lib", "fork-lineage.js"), readFileSync(join(here, "..", "lib", "fork-lineage.js"), "utf8")],
   [join(wrapperDir, "lib", "upstream.js"), upstreamModule],
   [join(wrapperDir, "lib", "client.js"), mergedClient],
   [join(wrapperDir, "dsh.bundle.patch.yml"), wrapperLayer],

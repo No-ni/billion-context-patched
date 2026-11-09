@@ -174,9 +174,75 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 
 仓库根就是可分发的插件，没有第二套源码：
 
-- `lib/index.js`、`lib/client.template.js`、`package.json` —— 手写的部分
+- `lib/index.js`、`lib/fork-lineage.js`、`lib/client.template.js`、`package.json` —— 手写的部分
 - `vendor/` —— 两个上游的副本，**直接提交**，安装时不再需要网络或先装上游
 - `lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` —— `install.mjs --build` 生成的产物，也提交，装下来即可运行
 - `patches/` —— 相对上游的 diff，供维护者核对与重做补丁
 
 补丁版构建在仓库里只有一份：`vendor/billion-context/dist/index.js`（旧版在仓库根另存过一份 `dist/`，两份内容相同，已合并）。脚本允许用 `--bili <目录>` 从外部更新它，但只接受带 `__biliEncZlib` 的构建，没打过补丁的 bili 不会顶掉现有构建。
+
+## 12. fork 会话记住父会话（0.4.1）
+
+**症状**：在长会话顶部 fork，新会话要等很久才出第一个字，重的时候直接 413。日志依次是：
+
+```
+[dsh-client] bili-native-dsh: fork adoption for session-… skipped — the session header
+  says isSeeded but carries no usable parentSession; the child starts without inherited
+  compression state (#4215)
+context 1089686 tokens reached preflight target 284464 (model window 284464 …)
+preflight aborted (the client disconnected during preflight compression)
+413 preflight_compress_failed: payload core text alone is ~2280574 bytes … ≥ ~304077
+  tokens vs the model window 284464; no upstream can accept it
+```
+
+**根因**：DSH 的 fork 不写父会话。`@deepseek-ai/dsh-api-session-controller/lib/index.js` 里：
+
+```js
+await this.ctx.agents.create({ sessionId: childId, seed, inheritedEventCount: SessionLogOffset(boundary + 1),
+  meta: { ...cwd, isSeeded: true, ...agentPreset }, agentOptions: { provider, model }, setup: composition.setup });
+```
+
+`meta` 里没有 `parentSession`。字段本身是合法的：`dsh-session` 的 `sessions.prepare` 明确接受
+`meta.parentSession`（`...meta?.parentSession === void 0 ? {} : { parentSession: meta.parentSession }`），
+`session-query` 的血缘查询也按它算——只是没人填。而 bili 的收养门
+（`vendor/billion-context/dist/agent/dsh-native.js`）判的正是这一项：
+
+```js
+const parent = session.header.parentSession;
+if (session.header.isSeeded !== true) return { ok: false, reason: "not-seeded", sid };
+if (typeof parent !== "string" || parent.length === 0) return { ok: false, reason: "parent-missing", sid };
+```
+
+所以补这一格就够了，bili 一行都不用改（上游 #5122 / #5738 说的都是这件事，仍在 open）。
+
+**改法**（`lib/fork-lineage.js`，宿主半边，随包装包一起加载）：
+
+1. 包装 `sessionController.fork`：把本次 fork 的父会话 id 放进 `AsyncLocalStorage`，两个 fork 并发也不会串。
+2. 包装 `agents.create`：当上述 store 生效、且这次创建是 `meta.isSeeded === true`（fork 自己的子会话）时，往 `meta` 补一个 `parentSession`；其余创建原样透传。
+3. 作用域销毁时把两个方法还原，关掉包装包即恢复 DSH 原行为。
+
+包装的是**共享的服务实例**：插件装上去的包装，别的插件通过 `ctx.agents` / `ctx.sessionController` 拿到的就是它，所以会话控制器自己那次 `agents.create` 也能被拦到。
+
+**验证**（沙箱 profile 副本 + 真机启动）：把 live 里一个 1,089,686 token 的会话复制进沙箱，通过网关 RPC 调 `session/fork`，探针日志：
+
+```
+FORK intercepted session-199ef92b-23f0-41e3-96d3-582530dc4a78
+INJECT parentSession session-199ef92b-… -> session-9b8ba0f2-… isSeeded true
+FORK result {"sessionId":"session-9b8ba0f2-b1ae-4619-a41b-cae8c5338781"}
+```
+
+子会话落盘的头（zstd 首帧）：
+
+```json
+{"type":"session","version":4,"id":"session-9b8ba0f2-…","createdAt":1794209889720,
+ "cwd":"/Users/senno/Documents/deepseek-harness/default-workspace",
+ "parentSession":"session-199ef92b-23f0-41e3-96d3-582530dc4a78","isSeeded":true,
+ "delegationDepth":0,"agentPreset":"ptc"}
+```
+
+**边界**：
+
+- 只对 fork 期间、且 `isSeeded: true` 的那一次创建动手；普通新建、subagent、ACP 创建都不带这个字段。
+- 子会话不会被当成 subagent：那条路径还要求 `header.origin === "subagent"`，fork 子会话没有 origin。
+- 会话查询/遥测里会多一个 `parent_id`，语义是对的（它确实是子会话）；`session-query` 的 parent 过滤只在显式按父会话搜索时用到。
+- DSH 改版后若服务名或 fork 实现变了，`ctx.inject` 拿不到服务就不装，行为退回「从零重压」，不会报错、不会阻断启动。
