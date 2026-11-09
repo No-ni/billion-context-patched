@@ -325,6 +325,7 @@ function __biliForkTranscriptSource(session,store){
 | 4. fork 首轮钉住父会话的渲染结果（第 16 节） | `maybeSnapshotView` 首行、`if(!live&&!shadow)return clientMsgs;`、`noteRender(session,deps);return r.view}` | 插入 `__biliPinViewRecord` / `__biliForkPinView`，首轮直接返回父会话那份视图再接新消息 |
 | 5. 请求体落盘（诊断，默认关） | `function __biliEncodeOutbound(opts,url){` | 插入 `__biliDumpBody`，只有标记文件存在时才写盘 |
 | 6. fork 沿用父会话的缓存钥匙（第 16 节） | `if(pckDecision==="stamp"){rebuilt.prompt_cache_key=session.id}` | 改成 `__biliForkPck(session)`，沿血缘取父会话实际用的那把钥匙 |
+| 7. fork 沿用父会话的消息时刻（第 16 节） | `child.state.nextRunId=parent.state.nextRunId;` | 插入一行：把父会话 `state.tsStamps` 里属于本次前缀的时刻抄给子会话 |
 
 **吸收进来的上游改动**（用户可感）：
 
@@ -348,13 +349,15 @@ function __biliForkTranscriptSource(session,store){
 | --- | --- | --- |
 | 1% | 首轮出站前缀与父会话最后一轮不是同一份字节：这一轮又重算了一遍 | 第 4 组：首轮直接复用父会话上一轮的渲染结果，只追加新消息 |
 | 28% → 58% | 请求体带 `prompt_cache_key`，bili 按会话盖章；fork 换了钥匙，上游把前缀分到另一个仓 | 第 6 组：fork 会话沿血缘取父会话**实际用的**那把钥匙（只看一层不够，套娃 fork 会拿错） |
-| 58% → 99.3% | 消息标签 `<acp tokens type time>` 里的时间在 fork 时被重打（18:37:52 → 18:37:54），两位数字之差让前缀从这里断开 | 配置 `compress.messageTimestamps: false`，标签不再带时间；也可用环境变量 `BILI_MESSAGE_TIMESTAMPS=0` |
+| 58% → 99.3% | 消息标签 `<acp tokens type time>` 里的时间在 fork 时被重打（18:37:52 → 18:37:54），两位数字之差让前缀从这里断开 | 第 7 组：fork 时把父会话的时刻表抄给子会话，标签时间与父会话逐字一致。过渡做法是把 `compress.messageTimestamps` 关掉，现在不需要了 |
 
 **定位方法**（可复用）：第 5 组补丁把出站请求体原样落盘（标记文件 `~/.local/state/billion-context/body-dump.on`，目录 `~/.local/state/billion-context/body-dump/`），把父会话最后一轮与 fork 首轮两份放在一起逐条比对。实测 75 条消息里只有 2 条不同，差异精确落在标签时间上——比读代码猜快得多。诊断完删掉标记文件即停止写盘。
 
 **第 4 组（fork-pin）细节**：`maybeSnapshotView` 在 `live` 时先问 `__biliForkPinView`；命中条件是父会话有 pin、本次客户端消息数不比 pin 短、末条前缀一致、追加不超过 8 条、追加段不以 tool 开头。成功后置 `session.metadata.__biliForkPinned`，后续轮次回到常规路径。日志 `[snapshot-render] fork-pin active parent=… pinned=… appended=…`，不命中时打 `fork-pin skipped: <原因>`。
 
 **第 6 组（缓存钥匙）细节**：`__biliPckChain` 在进程内记录每个会话最后盖章用的钥匙；fork 会话先查父会话的、查不到退回父会话 id，再退回自己的 id。进程重启后链为空，退化为「用父会话 id」这一级。
+
+**第 7 组（消息时刻）细节**：时间由 `stamp-timestamps` 节点写进会话状态 `state.tsStamps`（键是原始消息 id），渲染时直接取这张表。fork 出来的子会话这张表是空的，于是每条继承来的消息按 fork 那一刻重新打点——这就是标签时间差几秒的来源。补丁在 `handlePluginFork` 组装子会话状态的地方加一行，把父会话 `tsStamps` 里属于本次前缀（`prefix` 的 `rawId`）的时刻原样抄过去；fork 之后新产生的消息照常按自己的时间打。
 
 **验证数据**（同一台机器，fork 新会话首轮）：
 
@@ -363,6 +366,7 @@ function __biliForkTranscriptSource(session,store){
 | 只有第 3 组 | 89.4K | 28.3K | 32% |
 | ＋第 4 组 | 101.6K | 28.3K | 27.8% |
 | ＋第 6 组（钥匙） | 63.7K | 37.0K | 58.1% |
-| ＋去掉标签时间 | 88.8K | 88.2K | **99.3%**（第二轮 99.6%） |
+| ＋去掉标签时间（过渡做法） | 88.8K | 88.2K | 99.3%（第二轮 99.6%） |
+| ＋第 7 组：沿用父会话时刻，时间戳重新打开 | 78.8K | 78.3K | **99.4%**（第二轮 98.9%、第三轮 99.7%） |
 
-**代价与注意**：模型看不到每条消息的时刻（标签只剩 ref、类型、token 数）；改动上线后每个会话的下一轮会冷一次（标签字节变了）；`compress.messageTimestamps` 是普通配置项，改回 `true` 即恢复，但 fork 首轮会退回 58% 附近。
+**代价与注意**：改动上线后每个会话的下一轮会冷一次（标签字节变了）；第 7 组只在 fork 那一刻抄一次时刻，之后子会话的新消息照常按自己的时间打，`compress.messageTimestamps` 保持默认（开）。

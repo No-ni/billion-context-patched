@@ -193,6 +193,22 @@ if (text.includes(PKC_MARK)) {
   console.log("fork-pck: patched");
 }
 
+// 7. forked sessions keep the parent's message timestamps — the child's stamp
+//    table starts empty, so every inherited message is re-stamped with the
+//    fork's clock (a couple of seconds off) and the tag bytes drift.
+const TS_MARK = "const __biliCopyTsStamps={}";
+const TS_ANCHOR = "child.state.nextRunId=parent.state.nextRunId;";
+const TS_REPL = TS_ANCHOR + 'if(parent.state.tsStamps){const __biliCopyTsStamps={};for(const __tsm of prefix){const __tss=parent.state.tsStamps[__tsm.rawId];if(typeof __tss==="number")__biliCopyTsStamps[__tsm.rawId]=__tss}child.state.tsStamps=__biliCopyTsStamps}';
+
+if (text.includes(TS_MARK)) {
+  console.log("fork-ts: already patched");
+} else if (!text.includes(TS_ANCHOR)) {
+  console.log("fork-ts: anchor not found, skipped");
+} else {
+  text = text.split(TS_ANCHOR).join(TS_REPL);
+  changed = true;
+  console.log("fork-ts: patched");
+}
 if (changed) {
   writeFileSync(target, text, "latin1");
   console.log("written " + target);
