@@ -31,14 +31,30 @@ dsh plugin --profile desktop remove bili-context-patch
 
 ## 目录
 
-- `lib/` —— 主机入口（`index.js`）、客户端合并包（`client.js`）、上游转发（`upstream.js`）
-- `vendor/` —— 两个上游的源码副本，自包含，不依赖 profile 里的其他包
+- `lib/` —— 主机入口 `index.js`、客户端合并包 `client.js`、上游转发 `upstream.js`
+- `vendor/` —— 两个上游的源码副本，自包含，不依赖 profile 里的其他包；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
 - `dsh.bundle.patch.yml` —— 组合层
-- `dist/index.js` —— 这个仓库替换的 bili 构建产物
-- `scripts/install.mjs` —— 安装/重建脚本：默认写进本机 profile；加 `--build` 则重建本仓库里的产物
 - `patches/` —— 相对上游 v0.1.212 的 diff
+- `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`restart.mjs`、`smoke.mjs`
 
-`vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` 都是 `node scripts/install.mjs --build` 生成的，不要手改；上游升级后重建一次并提交。
+`vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` 是 `node scripts/install.mjs --build` 生成的，不要手改。补丁本身改了什么，见 [PATCHES.md](PATCHES.md)。
+
+## 维护：上游发新版
+
+1. 按 `patches/` 里的 diff 把改动落到新版 bili 的 `dist/index.js` 上（锚点位置见 PATCHES.md）。
+2. 把打好补丁的 bili 目录指给脚本重建：
+
+   ```sh
+   node scripts/install.mjs --build --bili /path/to/billion-context
+   ```
+
+3. 看 `git diff`、改 `package.json` 版本号、提交。
+
+`--build` 只接受打过补丁的构建（认 `__biliEncZlib`），没打补丁的 bili 不会被拷进来顶掉现有的；覆盖之前还会先跑一遍冒烟测试。
+
+## 许可
+
+本仓库的补丁与包装层：MIT。`vendor/billion-context` 来自 [ranxianglei/billion-context](https://github.com/ranxianglei/billion-context)（MIT），`vendor/dsh-plugin-model-request-accelerator` 来自 [No-ni/dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator)，其中的压缩闸门 vendored 自 deshark42/dsh-compaction-basic-disable（MIT）。
 
 ## 版本
 

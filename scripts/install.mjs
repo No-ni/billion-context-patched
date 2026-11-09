@@ -149,17 +149,37 @@ const writeWithBackup = (file, content) => {
 };
 
 // ── 1. the patched build: checked here, written after the merge ─────────────
-// It lands in the vendored copy, which is the one this install actually runs.
+// There is ONE copy of the patched build in the repo: the vendored one, because
+// that is the file this install actually runs. A dist/ beside scripts/ is
+// optional and only exists when a maintainer drops in a freshly patched build;
+// when present it wins over everything else.
 const installedBuild = join(vendorBili, "dist", "index.js");
-const candidateBuild = join(here, "..", "dist", "index.js");
+const repoBuild = join(here, "..", "dist", "index.js");
+const sourceBuild = join(target, "dist", "index.js");
+// A stock billion-context has an unpatched build to offer, and copying that over
+// the vendored one would silently ship a proxy without the compression fixes.
+// Only a build that carries the patched encoder may come in from outside.
+const isPatchedBuild = (file) => {
+  try {
+    return readFileSync(file, "latin1").includes("__biliEncZlib");
+  } catch {
+    return false;
+  }
+};
+const pendingBuild = existsSync(repoBuild)
+  ? repoBuild
+  : resolve(target) !== resolve(vendorBili) && isPatchedBuild(sourceBuild)
+    ? sourceBuild
+    : null;
+const smokeTarget = pendingBuild ?? (existsSync(installedBuild) ? installedBuild : null);
 // A build that fails its own smoke test never replaces a working one. The call
 // that breaks in production is the user's next model request, and a backup on
 // disk is no help to someone who does not know it is there. The test runs on the
 // Node that will run the proxy - which is the point of it (scripts/smoke.mjs).
-if (!dryRun && !argv.includes("--skip-smoke")) {
-  say("smoke-testing the candidate build (" + process.version + ")");
+if (!dryRun && !argv.includes("--skip-smoke") && smokeTarget) {
+  say("smoke-testing " + smokeTarget + " (" + process.version + ")");
   try {
-    execFileSync(process.execPath, [join(here, "smoke.mjs"), candidateBuild], {
+    execFileSync(process.execPath, [join(here, "smoke.mjs"), smokeTarget], {
       stdio: "inherit",
       env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
     });
@@ -170,12 +190,16 @@ if (!dryRun && !argv.includes("--skip-smoke")) {
 // The copy waits for the merge below: writing dist first would leave a new build
 // beside an old wrapper if the merge aborts on a reshaped upstream bundle.
 const installBuild = () => {
+  if (!pendingBuild) {
+    say("billion-context: keeping the vendored build at " + installedBuild);
+    return;
+  }
   if (dryRun) {
-    say("would install " + candidateBuild + " into " + installedBuild);
+    say("would install " + pendingBuild + " into " + installedBuild);
     return;
   }
   mkdirSync(dirname(installedBuild), { recursive: true });
-  copyFileSync(candidateBuild, installedBuild);
+  copyFileSync(pendingBuild, installedBuild);
   try {
     chmodSync(installedBuild, 0o755);
   } catch {}
@@ -436,7 +460,7 @@ const wrapperFiles = [
 ];
 for (const [file, content] of wrapperFiles) {
   if (dryRun) {
-    say("would write " + file + " (" + content.length + " bytes)");
+    say("would write " + file + " (" + Buffer.byteLength(content) + " bytes)");
     continue;
   }
   mkdirSync(dirname(file), { recursive: true });

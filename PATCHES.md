@@ -4,7 +4,7 @@
 - 本分支基线：**0.1.212**（commit `daa082ea`）
 - 完整 diff：[`patches/upstream-0.1.212.diff`](./patches/upstream-0.1.212.diff)
 
-改动分两类：`dist/index.js` 里的出口压缩（第 1–4 节，见上面的 diff），以及**安装期**生成的一体化包装包（第 5 节，源码在仓库根）。
+改动分两类：上游 bili 的 `dist/index.js` 里的出口压缩（第 1–4 节，见 `patches/` 里的 diff；本仓库里这份构建只有一份，在 `vendor/billion-context/dist/index.js`），以及**安装期**生成的一体化包装包（第 5 节，源码在仓库根）。
 
 ## 1. 出口压缩
 
@@ -71,13 +71,13 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 
 ## 5. 一体化层：一个包挂三样东西（0.2.0 起，0.2.1 加自检）
 
-这一处不在 `dist/index.js` 里：源码是仓库根的 `lib/` 与 `package.json`，生成物（`vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml`）由 `node scripts/install.mjs --build` 写进仓库，安装时整包被复制到 `<profile>/plugins/bili-context-patch`（或由包管理器装进 `node_modules`）。
+这一处不在 bili 的 `dist/index.js` 里：源码是仓库根的 `lib/` 与 `package.json`，生成物（`vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml`）由 `node scripts/install.mjs --build` 写进仓库，安装时整包被复制到 `<profile>/plugins/bili-context-patch`（或由包管理器装进 `node_modules`）。
 
 **为什么需要它**：「设置 → 插件」**一个装好的包一张卡**——卡片列表来自 profile 的 `dependencies`，卡片开关是 `dsh.profile.bundles` 的投影（`readProfilePlugins` 里 `enabled: bundles.includes(name)`）。只要 bili 与加速器各自还是被依赖的包，就必然是两张卡，改标题只能改字面。0.2.0 起 profile 只依赖这一个包，两个上游的**文件被复制**进它的 `vendor/`。
 
 **怎么做的**：
 
-- **源码复制**：`install.mjs` 把 bili 的 `package.json`、`dist/index.js`（打过补丁的构建）、`dist/build-info.json`、`dist/agent/{dsh-native,dsh-compaction-gate,dsh-native-client}.js`、`dsh.bundle.patch.yml`，以及加速器的 `package.json` + `lib/*.js` 复制进 `plugins/bili-context-patch/vendor/`（约 9.6 MB）。bili 的 `node_modules`（mysql2、zod）不需要：它的两个主机入口都是打包产物，只 import `node:module`，代理脚本由入口按自身路径找到（`nativeProxyScriptPath` = `dist/index.js`）。这份副本是**派生的**，每次运行重建。
+- **源码复制**：`install.mjs` 把 bili 的 `package.json`、`dist/build-info.json`、`dist/agent/{dsh-native,dsh-compaction-gate,dsh-native-client}.js`、`dsh.bundle.patch.yml`，以及加速器的 `package.json` + `lib/*.js` 复制进 `vendor/`（约 9.4 MB）。bili 的 `node_modules`（mysql2、zod）不需要：它的两个主机入口都是打包产物，只 import `node:module`，代理脚本由入口按自身路径找到（`nativeProxyScriptPath` = `dist/index.js`）。这份副本是**派生的**，每次运行重建；打过补丁的构建 `dist/index.js` 单独处理——仓库里已有一份，只有指了 `--bili` 且那份构建确实带补丁时才覆盖。
 - `lib/index.js`（主机半侧）——一个条目内 `ctx.plugin()` 依次挂载 bili、压缩闸门、加速器，三者都从生成的 `lib/upstream.js` 引入；那个文件用相对路径 `../vendor/...` 导出三者（`export * as bili from ...`），所以**没有任何裸包名**需要被 profile 解析；
 - **设置命名空间**：`@deepseek-ai/dsh-settings` 的 `describe()` 用 `entry.options.id` 当 `ns`，并且只在 `entry.fiber.runtime.Config` 存在时才投影该条目。所以包装包必须 `export const Config = accelerator.Config`，否则条目 id 一变，`模型请求加速` 那一页就没有 schema 可读；
 - **配置的活性**：条目的 `.volatile()` 字段不是普通值，而是设置服务原地维护的活访问器（Cordis 的 volatile 更新路径 `volatileEntries(fiber.effectiveConfig)` 只换值、不重启 fiber）。`resolveConfig(runtime, config)` 在 `runtime.Config` 不存在时**原样返回 config**，因此加速器以 `{ ...accelerator, Config: undefined }` 挂载，访问器一路到达它的 `plainConfig()`；二次解析会把访问器冻成快照，渠道开关就不即时了；
@@ -103,22 +103,22 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 3. `cordis.patch.yml` 里按 id 定位的渠道配置改成 `- id: bili-context-patch`——只改**带 `config:`** 的那一行。早先的实现按"第一行同 id"改名，会连别行的钉子一起改名，结果把包装包自己写成 `disabled: true`。
 4. 清掉更早版本写进 profile 的 `!!js` 跟随行（三个 id）。那套做法依赖条目创建顺序，已废弃。
 
-**代价**：`vendor/` 是你上一次运行脚本时的那一版上游，上游发新版不会自动进来。要跟上就重新取一次源码再跑脚本（`--bili <新的 billion-context 目录>`，见 README「上游升级之后」）。仓库里仍然不含上游代码，副本只存在于安装目录。
+**代价**：`vendor/` 是最后一次重建时的那一版上游，上游发新版不会自动进来。要跟上就按 README「维护：上游发新版」重做一次补丁，再 `node scripts/install.mjs --build --bili <新的 billion-context 目录>`，然后提交。
 ## 6. 没有改动的部分
 
 - 入站解压（客户端发来的 gzip / br / zstd）仍用上游实现
 - 折叠策略、健康检查、其他 `/__bili/*` 接口均未改动
-- 仓库里的 `dist/index.js` 之外，仓库不保存任何上游包的副本；包装包在安装时生成
+- 除了 `vendor/` 里那两个上游副本，仓库不保存别的上游代码；仓库根本身就是成品，安装时整包复制进 profile（包管理器安装则拷进 `node_modules`）
 - `hermes-plugin`、文档等文件原样保留
 
-## 8. 默认值：装好即开的两项
+## 7. 默认值：装好即开的两项
 
 - **`prompt_cache_key` 默认注入**：`parsePromptCacheRouting` 的兜底值由 `"disabled"` 改成 `"enabled"`。取值仍是三档：`disabled` 不发、`auto` 只对 `api.openai.com` 发、`enabled` 对所有上游发。配置文件里显式写了 `disabled` 的仍然尊重。
 - **中转站渠道自动开请求压缩**：`install.mjs` 扫描 profile 的 `cordis.yml` 与 `cordis.patch.yml`，把 `baseURL` 命中 `www.didudidu.asia` 或 `154.219.111.56` 的渠道名挑出来，在包装包条目的 `config.providers.<渠道>` 下写 `enabled: true` 与 `encoding: auto`（优先 brotli，运行时缺 brotli 或上游拒绝时回落 gzip）。匹配用的是**主机名**，渠道改名不影响；渠道换了别的域名要重跑一次脚本。
 
-## 7. 已知限制
+## 8. 已知限制
 
-- `dist/index.js` 是构建产物，补丁按**文本锚点**落在 0.1.212 上；上游一旦改动这些函数，需要按上面列的位置手工重做
+- `vendor/billion-context/dist/index.js` 是构建产物，补丁按**文本锚点**落在 0.1.212 上；上游一旦改动这些函数，需要按上面列的位置手工重做
 - br 是否被上游网关接受取决于网关版本，这里不做自动降级
 - 包装包的浏览器半侧按**工厂体文本**切分上游 bundle：上游如果改了客户端 bundle 的封装格式（不再是 `factory: (require) => {...}`），安装脚本会直接报错退出，不会生成半成品
 - 安装脚本会改写 profile 的 `package.json` 与 `cordis.patch.yml`（均保留 `.bak-<时间戳>` 备份）；用 DSH 插件管理器更新 bili 或增删别的插件时它不会自动重做这些，做完需要自己跑一次 `install.mjs`
@@ -147,12 +147,12 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 
 **原因**：`__biliEncodeOutbound` 压缩完自己写了 `h["content-length"] = String(out.length)`。`fetch` 对 Buffer 身体也会补一个，两个值在 Node 24 上被并成 `"5, 5"`，undici 判为非法请求头，请求在到达网络之前就被拒。
 
-**改法**（`dist/index.js`）：
+**改法**（bili 的 `dist/index.js`，本仓库里是 `vendor/billion-context/dist/index.js`）：
 
 - 删掉那行手动写入，只保留「删掉原请求所有大小写形式的 content-length」，长度交给 `fetch` 按压缩后的 Buffer 计算；
 - 顺手修掉冒烟测试暴露的第二个问题：`x-accel-compress` / `x-accel-rid` 在第一跳就被删了，重试时没有指令，会回落到全局默认编码（`~/.local/state/billion-context/upstream-encoding`，这台机器是 `gzip`），于是「明确要求不压缩」的请求重试时反而被压。现在把这两个判断记在请求对象上（`__biliCompress` / `__biliRid`，不可枚举，不参与头部转发），重试沿用第一次的决定。
 
-**安装期冒烟测试**（`scripts/smoke.mjs`）：从候选 `dist/index.js` 切出真实的压缩函数（`var __biliEncZlib=` 到 `async function fetchWithTimeout(`），对本机模拟上游发三路请求，断言：
+**安装期冒烟测试**（`scripts/smoke.mjs`）：从候选构建（本仓库里是 `vendor/billion-context/dist/index.js`）切出真实的压缩函数（`var __biliEncZlib=` 到 `async function fetchWithTimeout(`），对本机模拟上游发三路请求，断言：
 
 1. 上游只收到一个 `content-length`，是纯数字，且等于实收字节数；
 2. 解压后与原文逐字节一致；不压缩那路不能带 `content-encoding`；
@@ -160,12 +160,23 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 4. 内部指令头 `x-accel-compress` 不会转发给上游；
 5. 文本里不得再出现 `h["content-length"]=String(`。
 
-`install.mjs` 在覆盖 `dist/index.js` 之前跑它，失败就退出、不动已装文件；跑在将要运行代理的那个 Node 上（更新接口走 Electron 的 Node，会带上 `ELECTRON_RUN_AS_NODE=1`）。
+`install.mjs` 在覆盖 `vendor/billion-context/dist/index.js` 之前跑它，失败就退出、不动已装文件；跑在将要运行代理的那个 Node 上（更新接口走 Electron 的 Node，会带上 `ELECTRON_RUN_AS_NODE=1`）。
 
 **重启脚本**（`scripts/restart.mjs`）：成功不再是「端口上有人答应 health」，而是「答应的那个 `instanceId` 和关停前不同」。旧进程优雅退出期间会继续应答，旧脚本把这段当成重启成功，等旧进程真正退出后服务就没了。
 
 **同一批顺手修的三处**：
 
 - 渠道开关不再被重装覆盖：安装脚本只补缺失的 `enabled` / `encoding` 键，已有的值原样保留——在设置页关掉的渠道，重跑脚本不会又被打开。
-- `dist/index.js` 的覆盖挪到合并产物生成之后：上游 bundle 改了封装格式、合并在中途退出时，不会留下「新 dist + 旧包装包」的半成品。
+- 构建的覆盖挪到合并产物生成之后：上游 bundle 改了封装格式、合并在中途退出时，不会留下「新 dist + 旧包装包」的半成品。
 - `scripts/restart.mjs` 的探针改成一次性连接（`agent: false`）：旧版用 keep-alive 轮询 health，自己的连接正是代理 drain 时要等的 live conns，关停被拖长；现在探针不占连接。
+
+## 11. 仓库结构
+
+仓库根就是可分发的插件，没有第二套源码：
+
+- `lib/index.js`、`lib/client.template.js`、`package.json` —— 手写的部分
+- `vendor/` —— 两个上游的副本，**直接提交**，安装时不再需要网络或先装上游
+- `lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` —— `install.mjs --build` 生成的产物，也提交，装下来即可运行
+- `patches/` —— 相对上游的 diff，供维护者核对与重做补丁
+
+补丁版构建在仓库里只有一份：`vendor/billion-context/dist/index.js`（旧版在仓库根另存过一份 `dist/`，两份内容相同，已合并）。脚本允许用 `--bili <目录>` 从外部更新它，但只接受带 `__biliEncZlib` 的构建，没打过补丁的 bili 不会顶掉现有构建。

@@ -1,18 +1,26 @@
 {
   "name": "bili-context-patch",
-  "version": "0.3.0",
+  "version": "0.3.1",
+  "description": "billion-context, patched: HTTP/2 off the table, request bodies compressed, and the model-request accelerator mounted inside the same plugin.",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/No-ni/billion-context-patched.git"
   },
   "type": "module",
-  "description": "billion-context patched build, with dsh-plugin-model-request-accelerator mounted inside it",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "billion-context",
+    "compression",
+    "latency"
+  ],
   "meta": {
     "title": "bili-context-patch",
     "description": "billion-context 的补丁构建，内置模型请求加速；上游 billion-context 与加速器不再单独挂载。"

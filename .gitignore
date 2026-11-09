@@ -1,0 +1,6 @@
+node_modules/
+.DS_Store
+*.log
+
+# backups install.mjs leaves behind when it rewrites a file
+*.bak-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]
