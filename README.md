@@ -6,6 +6,8 @@
 
 另外补了一处 DSH 的缺口：**fork 出来的会话现在会写明自己的父会话**（会话头的 `parentSession`）。bili 靠这个字段继承父会话的压缩状态；没有它，fork 出来的子会话会把继承来的上百万 token 正文从零重压一遍，首字要等好几分钟，甚至直接 413。这是包装包宿主半边自己做的（`lib/fork-lineage.js`），bili 的构建没有为此多打一行补丁。
 
+维护当前差异与升级时先读 [MAINTENANCE.md](MAINTENANCE.md)；历史排查和实现细节见 [PATCHES.md](PATCHES.md)。
+
 ## 安装
 
 设置 → 插件 → 安装，填仓库地址即可，装完重启 DSH：
@@ -14,7 +16,7 @@
 github:No-ni/billion-context-patched
 ```
 
-包里自带运行所需的一切（两个上游的源码副本、合并后的客户端包、组合层），装完不需要再跑任何脚本，也不需要先装 billion-context。
+包里自带运行所需的一切（两个上游的运行文件副本、合并后的客户端包、组合层），装完不需要再跑任何脚本，也不需要先装 billion-context。
 
 已经 clone 了这个仓库的话，也可以直接把它装进本机 profile：
 
@@ -36,14 +38,14 @@ dsh plugin --profile desktop remove bili-context-patch
 ## 目录
 
 - `lib/` —— 主机入口 `index.js`、fork 血缘补丁 `fork-lineage.js`、客户端合并包 `client.js`、上游转发 `upstream.js`
-- `vendor/` —— 两个上游的源码副本，自包含，不依赖 profile 里的其他包；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
+- `vendor/` —— 两个上游的运行文件副本，自包含，不依赖 profile 里的其他包；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
 - `dsh.bundle.patch.yml` —— 组合层
 - `patches/` —— 我们对 bili 构建做的改动：`outbound-encoding.block.js` 是请求体压缩那一整块代码，其余由脚本按锚点插入
 - `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`patch-bili-build.mjs`（给 bili 构建按锚点应用补丁，逐项见 [PATCHES.md](PATCHES.md) 第 0.2 节）、`restart.mjs`、`smoke.mjs`
 
-`vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` 是 `node scripts/install.mjs --build` 生成的，不要手改。
+`vendor/` 从选定来源复制，其中 bili 代理构建由补丁脚本修改；`lib/client.js`、`lib/upstream.js`、根 `dsh.bundle.patch.yml` 由 `node scripts/install.mjs --build` 生成。具体来源规则见 MAINTENANCE，不要只手改生成物。
 
-我们相对上游到底改了什么、每处在哪、合并上游时怎么核对，见 [PATCHES.md](PATCHES.md) 第 0 节：四层改动总表、补丁的锚点、已废弃的做法、合并清单。
+当前清单覆盖 10 组 bili 补丁、6 项包装能力、5 项安装与运维行为，并逐项列出检查方法和未覆盖部分。上游已吸收的能力与本包新增能力分开记录。
 
 ## 插件道的快照渲染（0.4.3，可关）
 
@@ -104,29 +106,9 @@ node scripts/smoke.mjs
 
 ## 维护：上游再发新版
 
-1. 取上游源码构建一份（版本对齐上游 master）：
+按 [MAINTENANCE.md](MAINTENANCE.md) 的来源基线、逐项清单和升级流程处理；仓库 [AGENTS.md](AGENTS.md) 要求后续修改同步记录差异及验证。
 
-   ```sh
-   git clone --depth 1 https://github.com/ranxianglei/billion-context.git /tmp/bili-src
-   cd /tmp/bili-src && npm ci && npm run build
-   ```
-
-2. 打我们的补丁并冒烟。脚本按锚点定位，上游挪了代码会直接报错停下，不会静默丢改动：
-
-   ```sh
-   node scripts/patch-bili-build.mjs /tmp/bili-src/dist/index.js
-   node scripts/smoke.mjs /tmp/bili-src/dist/index.js
-   ```
-
-3. 把构建和源码收进仓库，重生成包装包：
-
-   ```sh
-   node scripts/install.mjs --build --bili /tmp/bili-src
-   ```
-
-4. 看 `git diff`、改 `package.json` 版本号、提交。
-
-`--build` 只接受打过补丁的构建（认 `__biliPluginLaneSnapshot` 或 `__biliEncZlib`），没打补丁的 bili 不会被拷进来顶掉现有的；覆盖之前还会先跑一遍冒烟测试。
+当前构建并不默认开启 `prompt_cache_key`，也没有全局禁止加速器 HTTP/2。这两处历史描述已在维护文档中纠正。本页缓存命中率是历史环境测量，不能保证新网关也相同。
 
 ## 许可
 
