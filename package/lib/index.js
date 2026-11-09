@@ -3,9 +3,9 @@
  *
  * One Loader entry (this package) mounts three plugins as child fibers:
  * billion-context's native host plugin, its compaction gate, and the request
- * accelerator. Nothing of either package is copied: the loader resolves them
- * from the profile's node_modules, so upgrading either one only means running
- * scripts/install.mjs again.
+ * accelerator. All three come from the vendor/ tree beside this file, so the
+ * profile depends on nothing else and shows exactly one card. The tree is
+ * rebuilt by scripts/install.mjs; upgrading an upstream means running it again.
  *
  * Two things keep the standalone copies of those packages quiet, and both live
  * inside this package rather than in the user's configuration:
@@ -45,9 +45,10 @@ import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import * as bili from "billion-context";
-import * as compactionGate from "billion-context/dsh-compaction-gate";
-import * as accelerator from "dsh-plugin-model-request-accelerator";
+// The two upstream packages as copies, not as dependencies: this file is written
+// into <profile>/plugins/bili-context-patch, and ./upstream.js re-exports the
+// vendored trees beside it. Nothing the profile declares is a second card.
+import { accelerator, bili, compactionGate } from "./upstream.js";
 
 export const name = "bili-context-patch";
 
@@ -144,7 +145,7 @@ const updateFromRepo = async (repo) => {
   // Electron here, in its Node role.
   // The installer is told which profile to write, so an install in a profile other
   // than the default one still updates itself instead of the default profile.
-  const installed = await run(process.execPath, [join(repo, "scripts", "install.mjs"), join(PROFILE_ROOT, "node_modules", "billion-context")], {
+  const installed = await run(process.execPath, [join(repo, "scripts", "install.mjs"), "--profile", PROFILE_ROOT], {
     cwd: repo,
     timeout: INSTALL_TIMEOUT_MS,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },

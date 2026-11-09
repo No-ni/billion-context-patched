@@ -69,35 +69,33 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 2026-11-08T17:41:48.332Z encoded 481153 -> 142851 (br) rid=e79ee3c7-…
 ```
 
-## 5. 一体化层：一个条目挂三样东西
+## 5. 一体化层：一个包挂三样东西（0.2.0）
 
 这一处不在 `dist/index.js` 里，源码是 `package/`，由 `scripts/install.mjs` 在安装时生成到 `<profile>/plugins/bili-context-patch`。
 
-**为什么需要它**：「设置 → 插件」**一个组合包一张卡**——列表遍历 `dsh.profile.bundles`，每项用 `declaredRows()` 列出它的 patch 声明了哪些行。只要 bili 与加速器各自还在清单里，就必然是两张卡，改标题只能改字面。
+**为什么需要它**：「设置 → 插件」**一个装好的包一张卡**——卡片列表来自 profile 的 `dependencies`，卡片开关是 `dsh.profile.bundles` 的投影（`readProfilePlugins` 里 `enabled: bundles.includes(name)`）。只要 bili 与加速器各自还是被依赖的包，就必然是两张卡，改标题只能改字面。0.2.0 起 profile 只依赖这一个包，两个上游的**文件被复制**进它的 `vendor/`。
 
 **怎么做的**：
 
-- `package/lib/index.js`（主机半侧）——一个条目内 `ctx.plugin()` 依次挂载 `billion-context`、`billion-context/dsh-compaction-gate`、`dsh-plugin-model-request-accelerator`；
+- **源码复制**：`install.mjs` 把 bili 的 `package.json`、`dist/index.js`（打过补丁的构建）、`dist/build-info.json`、`dist/agent/{dsh-native,dsh-compaction-gate,dsh-native-client}.js`、`dsh.bundle.patch.yml`，以及加速器的 `package.json` + `lib/*.js` 复制进 `plugins/bili-context-patch/vendor/`（约 9.6 MB）。bili 的 `node_modules`（mysql2、zod）不需要：它的两个主机入口都是打包产物，只 import `node:module`，代理脚本由入口按自身路径找到（`nativeProxyScriptPath` = `dist/index.js`）。这份副本是**派生的**，每次运行重建。
+- `package/lib/index.js`（主机半侧）——一个条目内 `ctx.plugin()` 依次挂载 bili、压缩闸门、加速器，三者都从生成的 `lib/upstream.js` 引入；那个文件用相对路径 `../vendor/...` 导出三者（`export * as bili from ...`），所以**没有任何裸包名**需要被 profile 解析；
 - **设置命名空间**：`@deepseek-ai/dsh-settings` 的 `describe()` 用 `entry.options.id` 当 `ns`，并且只在 `entry.fiber.runtime.Config` 存在时才投影该条目。所以包装包必须 `export const Config = accelerator.Config`，否则条目 id 一变，`模型请求加速` 那一页就没有 schema 可读；
 - **配置的活性**：条目的 `.volatile()` 字段不是普通值，而是设置服务原地维护的活访问器（Cordis 的 volatile 更新路径 `volatileEntries(fiber.effectiveConfig)` 只换值、不重启 fiber）。`resolveConfig(runtime, config)` 在 `runtime.Config` 不存在时**原样返回 config**，因此加速器以 `{ ...accelerator, Config: undefined }` 挂载，访问器一路到达它的 `plainConfig()`；二次解析会把访问器冻成快照，渠道开关就不即时了；
 - `package/lib/client.template.js`（浏览器半侧）——安装时把两个包客户端 bundle 的工厂体（`window.__ModuleLoader__.load({id, factory})` 里面的那段）切出来，合进同一个 `id: "bili-context-patch"` 的工厂，两个 half 依次 apply、`inject` 取并集。加速器客户端 `lib/client.js:23` 的 `const NS = "model-request-accelerator"` 会被改写成 `"bili-context-patch"`（它按命名空间找文档、注册分区），原文必须恰好出现一次，否则脚本报错退出；包装清单补上 `dsh.client.inject: ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-ui-settings"]`，客户端模块按它决定到达顺序；
-- 组合层——复制 bili 的 `dsh.bundle.patch.yml`，删掉开头那条 `- insert:`（`bili-native` 与 `bili-compaction-gate` 改由代码挂载），换成本包装包自己的一条 `insert`（被列进 `dsh.profile.bundles` 的包只提供 patch 层，不会自己变成 Loader 条目），`compaction-basic.auto:false`、四个 preset 的 `inject: [biliBasicCompactionPolicy]`、`llm-deepseek(-account)` 的 retryPolicy 全部保留。
+- **组合层**——复制 bili 的 `dsh.bundle.patch.yml`，删掉开头那条 `- insert:`（`bili-native` 与 `bili-compaction-gate` 改由代码挂载），换成本包装包自己的一条 `insert`（被列进 `dsh.profile.bundles` 的包只提供 patch 层，不会自己变成 Loader 条目），`compaction-basic.auto:false`、四个 preset 的 `inject: [biliBasicCompactionPolicy]`、`llm-deepseek(-account)` 的 retryPolicy 全部保留。
 
-**上游两个包怎么被关掉**：安装脚本把它们从 `dsh.profile.bundles` 移出去，只留 `bili-context-patch`。插件页的开关就是这张清单的投影（`readProfilePlugins` 里 `enabled: bundles.includes(name)`），所以那两张卡片显示为关闭；没有清单项就没有 Loader 条目，也就没有实例。
+**上游两个包怎么不见的**：不是被关掉，是**不再被装**。安装脚本从 `dependencies` 删掉 `billion-context` 与 `dsh-plugin-model-request-accelerator` 两行（它们不再是运行时依赖），`dsh.profile.bundles` 里同样只留包装包。没有依赖就没有卡片，没有清单项就没有 Loader 条目。
 
-两条兜底：
-
-1. 清单由 `install.mjs` 写：两个上游移出，包装包排**在最后**。排最后是必需的——条目配置按清单顺序合成，包装包的层若排在原版之前，它写的行只能落到还不存在的条目上，日志打印 `patch: entry ... not found`，规则空转，三个包一起跑（实测就是这样）。
-2. `package/lib/index.js` 在挂载子插件**之前**遍历 `ctx.get("loader").store.include.subtree.store`，把仍然开着的上游条目用 `entry.update({ ...entry.options, disabled: true })` 关掉，兜住插件管理器重算清单后原版卡片被重新点亮的情况。顺序必须在挂载之前：两边注册同一批服务和 HTTP 路由，晚一步关会把已注册的接口一起带走——实测 `/api/model-request-accelerator/version` 变 404。
+**兜底**：`package/lib/index.js` 在挂载子插件**之前**遍历 `ctx.get("loader").store.include.subtree.store`，把仍然开着的 `bili-native` / `bili-compaction-gate` / `model-request-accelerator` 条目用 `entry.update({ ...entry.options, disabled: true })` 关掉。正常安装没有这种条目，这条只在有人把上游装回来时起作用。顺序必须在挂载之前：两边注册同一批服务和 HTTP 路由，晚一步关会把已注册的接口一起带走——实测 `/api/model-request-accelerator/version` 变 404。
 
 **profile 侧的改写**（由脚本完成、幂等、带 `.bak-<时间戳>` 备份）：
 
-1. `dsh.profile.bundles`：移出两个上游，包装包追加到最后，其余项一律不增不删不改序；`dependencies` 里加速器写一条 `link:`（包装包按包名 import 它，`billion-context` 从 `node_modules` 直接解析）。
-2. `cordis.patch.yml` 里按 id 定位的渠道配置改成 `- id: bili-context-patch`——只改**带 `config:`** 的那一行。早先的实现按"第一行同 id"改名，会连别行的钉子一起改名，结果把包装包自己写成 `disabled: true`。
-3. 清掉更早版本写进 profile 的 `!!js` 跟随行（三个 id）。那套做法依赖条目创建顺序，已废弃。
+1. `dependencies`：只留 `bili-context-patch`（`link:` 到 `plugins/`），两个上游那两行删掉（0.2.0 起）；其余依赖一律不动。
+2. `dsh.profile.bundles`：只留包装包，且排在**最后**——条目配置按清单顺序合成，包装包的层若排在别的条目之前，它写的行只能落到还不存在的条目上，日志打印 `patch: entry ... not found`，规则空转。
+3. `cordis.patch.yml` 里按 id 定位的渠道配置改成 `- id: bili-context-patch`——只改**带 `config:`** 的那一行。早先的实现按"第一行同 id"改名，会连别行的钉子一起改名，结果把包装包自己写成 `disabled: true`。
+4. 清掉更早版本写进 profile 的 `!!js` 跟随行（三个 id）。那套做法依赖条目创建顺序，已废弃。
 
-**效果**：装一次两个功能都在，插件页只有一张卡片是开的；想换回独立插件，先关掉包装包再打开对应卡片（同时开会注册两套服务，接口会互相顶掉）。两个上游包一个字节都没被改写，升级任一包后重跑 `install.mjs` 即可重新生成包装包。
-
+**代价**：`vendor/` 是你上一次运行脚本时的那一版上游，上游发新版不会自动进来。要跟上就重新取一次源码再跑脚本（`--bili <新的 billion-context 目录>`，见 README「上游升级之后」）。仓库里仍然不含上游代码，副本只存在于安装目录。
 ## 6. 没有改动的部分
 
 - 入站解压（客户端发来的 gzip / br / zstd）仍用上游实现
@@ -116,8 +114,9 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 - br 是否被上游网关接受取决于网关版本，这里不做自动降级
 - 包装包的浏览器半侧按**工厂体文本**切分上游 bundle：上游如果改了客户端 bundle 的封装格式（不再是 `factory: (require) => {...}`），安装脚本会直接报错退出，不会生成半成品
 - 安装脚本会改写 profile 的 `package.json` 与 `cordis.patch.yml`（均保留 `.bak-<时间戳>` 备份）；用 DSH 插件管理器更新 bili 或增删别的插件时它不会自动重做这些，做完需要自己跑一次 `install.mjs`
-- 关掉 `bili-context-patch` 会一起带走：条目本身、它挂的三个子插件、以及这一层里注入 preset 的 `biliBasicCompactionPolicy`。三者同生共死，所以 preset 会退回复用 dsh 自带的压缩策略，不会卡在等一个没人提供的服务上（上游 #3662 描述的是闸门与注入分离的情形）。要回到独立插件形态，关掉它之后去插件页打开对应的原版卡片
+- 关掉 `bili-context-patch` 会一起带走：条目本身、它挂的三个子插件、以及这一层里注入 preset 的 `biliBasicCompactionPolicy`。三者同生共死，所以 preset 会退回复用 dsh 自带的压缩策略，不会卡在等一个没人提供的服务上（上游 #3662 描述的是闸门与注入分离的情形）。要回到独立插件形态，得先把 `billion-context` / 加速器重新装成依赖（0.2.0 起它们不再是依赖条目，插件页没有那两张卡可点）
 - 一体化之后，卸载 `bili-context-patch` 等于同时停掉三项能力；这是「一张卡」的代价，也是它的定义
+- 0.2.0 起两个上游只存在于 `plugins/bili-context-patch/vendor/`：`dsh plugin add billion-context` 之后不会自动接上，必须重跑 `install.mjs`（它会用新的源码重建 vendor 与包装包）
 
 ## 9. 检查更新
 
