@@ -340,7 +340,7 @@ function __biliForkTranscriptSource(session,store){
 
 **复核方法**：`node scripts/smoke.mjs vendor/billion-context/dist/index.js` 打三路请求，断言出站字节被压缩且没有自己写 content-length；`dist/build-info.json` 记录当前构建对应的上游提交。
 
-## 16. fork 第一轮真正复用父会话的缓存（0.5.0）
+## 16. fork 第一轮真正复用父会话的缓存（0.5.1）
 
 第 3 组补丁只解决了「有记录可读」，实测 fork 首轮命中仍然只有 1%。逐轮排查下来是三件事叠在一起，缺一件都不成立：
 
