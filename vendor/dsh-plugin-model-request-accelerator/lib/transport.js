@@ -1,0 +1,401 @@
+/**
+ * HTTP/2 transport for model requests, with a fallback that cannot be worse than
+ * not having it.
+ *
+ * Node's `globalThis.fetch` speaks HTTP/1.1 only. Its dispatcher is the built-in
+ * undici's own `Agent`, which does not pass `allowH2` — and undici upgrades to
+ * h2 only when that option is *explicitly* true — while the built-in Agent class
+ * is not reachable from application code (`process.getBuiltinModule` does not
+ * resolve node's internal undici, and the internal specifier is not a public
+ * builtin). So there is no way to ask the built-in transport for h2.
+ *
+ * What does work is a *consistent pair*: dsh's own `undici` package, driving its
+ * own `fetch` with its own `Agent({ allowH2: true })`. Mixing the two undici
+ * instances in either direction does not: the bundled 7.x fetch rejects an 8.x
+ * Agent's handler with `invalid onRequestStart method`. Hence the rule this
+ * module exists to enforce — **both halves always come from the same module
+ * instance**, and if only one is resolvable, h2 is simply off.
+ *
+ * Degradation is the protocol's own, not a retry state machine: h2 is reached
+ * through ALPN, so an origin that does not offer it stays on http/1.1 inside the
+ * same Agent, with no error and nothing to detect. What is left for this module
+ * is the case ALPN cannot cover — a transport that fails outright, or an
+ * `http://` origin, where h2 would need cleartext h2c — so an origin that has
+ * failed once is remembered and never tried again for the life of the plugin.
+ *
+ * @module dsh-plugin-model-request-accelerator/transport
+ */
+
+import { createRequire } from "node:module";
+import diagnosticsChannel from "node:diagnostics_channel";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+/** This file lives in the package's `lib/`. */
+const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/**
+ * undici's report of a connection that has just been established, carrying the
+ * protocol that won ALPN. It is the only place the negotiated version is exposed:
+ * undici's `Response` has no `httpVersion`, so the answer cannot be read off the
+ * response and has to be taken from the transport's own event.
+ */
+const CONNECTED_CHANNEL = "undici:client:connected";
+
+/**
+ * The orders in which a copy of undici is looked for.
+ *
+ * Node's own resolution comes first, because that is the one that works in the
+ * layout this plugin actually runs in: an installed plugin lives at
+ * `<profile>/plugins/<name>/`, and Node walks up from there into the profile's
+ * hoisted `node_modules`, where dsh's own dependency tree already put undici —
+ * and where the plugin's *imports* resolve from, so a copy found any other way
+ * could be a different instance than the one the rest of the plugin sees.
+ * The explicit candidates are a fallback for a deployment that installed its
+ * dependencies differently.
+ */
+const UNDICI_CANDIDATES = [
+	undefined,
+	join(PLUGIN_ROOT, "node_modules", "undici"),
+	join(PLUGIN_ROOT, "..", "..", "node_modules", "undici"),
+	join(PLUGIN_ROOT, "..", "node_modules", "undici")
+];
+
+/**
+ * Load one module instance of undici — the `fetch` and the `Agent` must come
+ * from this same object, or the pair is rejected at dispatch time.
+ * @returns `{ fetch, Agent }`, or `undefined` when no usable copy is installed.
+ */
+function loadUndici() {
+	const own = createRequire(import.meta.url);
+	const loaders = [own];
+	// A plugin installed by link resolves to its checkout, so walking up from this
+	// file's real path never reaches the profile's hoisted tree — the copy is found
+	// through dsh's own resolution instead, which is the one the process uses.
+	try {
+		loaders.push(createRequire(own.resolve("@deepseek-ai/dsh/package.json")));
+	} catch {}
+	// And the profile keeps its own, for a deployment that installed this plugin another way.
+	const profile = process.env.DSH_PROFILE_DIR;
+	if (typeof profile === "string" && profile.length > 0) {
+		try {
+			loaders.push(createRequire(join(profile, "package.json")));
+		} catch {}
+	}
+	for (const loader of loaders) {
+		for (const candidate of UNDICI_CANDIDATES) {
+			try {
+				// `require.resolve` for the bare specifier, so the profile's hoisted tree is
+				// searched the way Node searches it; a bare directory for the explicit ones.
+				const specifier = candidate === undefined ? "undici" : join(candidate, "index.js");
+				const loaded = loader(loader.resolve(specifier));
+				if (typeof loaded?.fetch === "function" && typeof loaded?.Agent === "function") {
+					return { fetch: loaded.fetch, Agent: loaded.Agent };
+				}
+			} catch {}
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Whether a failure means "this origin cannot do h2 here" rather than "this
+ * request failed".
+ *
+ * An HTTP status is not a transport failure — the request arrived and was
+ * answered — and an abort is the caller's own decision. Everything else
+ * (connection reset, protocol error, TLS negotiation, a body that died
+ * mid-upload) is indistinguishable from an h2 problem at this distance, so it is
+ * treated as one: one wasted retry, and that origin is done with h2 for good.
+ * @param error - whatever `fetch` rejected with.
+ * @param signal - the caller's abort signal, when it supplied one.
+ * @returns whether to fall back and condemn the origin.
+ */
+export function isTransportFailure(error, signal) {
+	if (signal?.aborted === true) return false;
+	const name = error?.name;
+	if (name === "AbortError" || name === "TimeoutError") return false;
+	return true;
+}
+
+/**
+ * Build the h2 transport for one plugin instance.
+ *
+ * @param options - injection points, so the decision logic is testable without a
+ *   network: `load` supplies the module pair, `fetch` the transport.
+ * @param options.log - warning sink.
+ * @param options.load - returns `{ fetch, Agent }`, defaulting to the real loader.
+ * @param options.fetch - returns the transport for an origin, defaulting to the
+ *   loaded module's own `fetch`.
+ * @returns the transport.
+ */
+export function createTransport(options = {}) {
+	const log = options.log;
+	const load = options.load ?? loadUndici;
+	/** The module pair, resolved once, or `null` once it is known to be absent. */
+	let module;
+
+	/** `origin -> Agent`, created lazily so an unused origin costs nothing. */
+	const agents = new Map();
+	/** Origins that failed an h2 attempt, and are never tried again. */
+	const blocked = new Set();
+	/**
+	 * `origin -> the protocol its live connection negotiated`.
+	 *
+	 * This has to be remembered, because `client:connected` fires **once per socket**:
+	 * on a pooled keep-alive connection only the request that opened it ever sees the
+	 * diagnostic, so reading the protocol from that event alone leaves every later
+	 * request reporting nothing while it really does travel over h2. The value is
+	 * cleared whenever an origin's attempt fails, since it is then no longer known
+	 * what that origin will do.
+	 */
+	const negotiated = new Map();
+	let disposed = false;
+
+	/** Resolve the module pair once, and only once. */
+	const resolveModule = () => {
+		if (module === undefined) module = load() ?? null;
+		return module ?? undefined;
+	};
+
+	/** The transport for one origin, or `undefined` when h2 is not set up. */
+	const transportFor = (origin) => {
+		if (disposed) return undefined;
+		const pair = resolveModule();
+		if (pair === undefined) return undefined;
+		if (typeof options.fetch === "function") return options.fetch(pair, origin);
+		return (url, init) => pair.fetch(url, init);
+	};
+
+	/** The Agent for one origin, created on first use. */
+	const agentFor = (origin, allowInsecure, pool) => {
+		const pair = resolveModule();
+		if (pair === undefined) return undefined;
+		// A cleartext and a TLS connection to the same origin are different
+		// connections, so they cannot share one Agent. A pooled member gets a pool of its
+		// own for the same reason one step removed: its body is deliberately left
+		// incomplete, so it can sit in the far end's read path for a minute at a time, and
+		// any bytes queued behind it on one TCP connection wait that long too. Measured on
+		// a real deployment: a 236 KB body reached the gateway 61 s after it was handed to
+		// the transport, while the gateway itself answered in 16 s. Adding a second
+		// connection was not enough — undici only opens a second one when the first has no
+		// free stream — so the two kinds of request are separated by Agent instead.
+		const held = pool === "held";
+		const key = `${allowInsecure === true ? `${origin}\u0000h2c` : origin}${held ? "\u0000held" : ""}`;
+		let agent = agents.get(key);
+		if (agent === undefined) {
+			// `allowH2` is what makes undici offer `h2` in ALPN; an origin that does not
+			// choose it simply continues on http/1.1 through this same Agent — no error,
+			// nothing to detect. `useH2c` is the cleartext variant, reached with no ALPN
+			// and no certificate at all, so it is only added for an origin the
+			// deployment explicitly declared trusted.
+			// The held pool needs one connection (its members multiplex on it); the request
+			// pool keeps two, so one stalled request cannot take the whole pool with it.
+			agent = new pair.Agent({ allowH2: true, ...(allowInsecure === true ? { useH2c: true } : {}), connections: held ? 1 : 2 });
+			agents.set(key, agent);
+		}
+		return agent;
+	};
+
+	return {
+		/**
+		 * Whether h2 should carry this one request. A policy that did not enable it
+		 * and an `http://` origin that was not explicitly allowed are both answered
+		 * here, so the caller only has to ask.
+		 * @param request - provider, policy, URL and the section-wide allowance.
+		 * @returns true when the caller should route through `execute`.
+		 */
+		enabled(request) {
+			if (disposed) return false;
+			if (resolveModule() === undefined) return false;
+			const { provider, policy, url, allowInsecure } = request;
+			if (typeof provider !== "string" || provider.length === 0) return false;
+			if (policy?.http2 !== true) return false;
+			let parsed;
+			try {
+				parsed = new URL(url);
+			} catch {
+				return false;
+			}
+			// h2 is reached through ALPN, which needs TLS. Cleartext h2c is a different
+			// mechanism with no certificate behind it, so it is only ever used when the
+			// deployment says the link is trusted.
+			if (parsed.protocol !== "https:" && !(allowInsecure === true && parsed.protocol === "http:")) return false;
+			return !blocked.has(parsed.origin);
+		},
+
+		/**
+		 * Send one request over h2 and report whether it arrived.
+		 *
+		 * A thrown error whose cause identifies the origin as the problem condemns
+		 * that origin and is reported as "not sent", so the caller can repeat the
+		 * request on the built-in transport. Everything else — including every HTTP
+		 * status — is returned as a response, exactly like `fetch` would.
+		 *
+		 * @param input - the `fetch` first argument.
+		 * @param init - the rewritten init.
+		 * @param options - the abort signal the caller wants honoured, and a
+		 *   `onConnected` sink for the protocol the connection negotiated.
+		 * @returns the response and whether it was sent, or a reason why not.
+		 */
+		async execute(input, init, options = {}) {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : undefined;
+			let origin;
+			try {
+				origin = url === undefined ? undefined : new URL(url).origin;
+			} catch {
+				origin = undefined;
+			}
+			const send = origin === undefined || blocked.has(origin) ? undefined : transportFor(origin);
+			if (send === undefined) return { sent: false, reason: "unavailable" };
+			const agent = agentFor(origin, options.allowInsecure, options.pool);
+			// The caller's abort signal has to reach the transport that actually
+			// carries the request; delegating to it avoids a second controller whose
+			// timing would differ from the one being measured.
+			const signal = options.signal ?? init?.signal ?? undefined;
+			// The protocol is reported while the body is still being written, so it is
+			// learned rather than returned: it arrives mid-request, and the caller's
+			// measurement is the only thing that can still be told about it. It is held
+			// until the send is known to have worked, because undici announces the
+			// connection *before* the handshake is proven — a cleartext upgrade that the
+			// far end refuses reports `h2` and then fails, and a row must not claim a
+			// protocol that never carried anything.
+			//
+			// What is already known about this origin is read *before* the send, so that a
+			// value learned during this attempt cannot stand in for the outcome of it.
+			const target = origin === undefined ? undefined : new URL(origin);
+			const alreadyKnown = origin === undefined ? undefined : negotiated.get(origin);
+			let announced;
+			const watch = typeof options.onConnected === "function" ? (message) => {
+				const connected = message?.connectParams;
+				if (connected === undefined) return;
+				// undici reports the address it connected to rather than an origin, so the
+				// two are compared by host and port. This is a sanity check against
+				// attributing some other socket's negotiation to this request; the
+				// request-level pairing belongs to the caller.
+				const host = connected.hostname ?? connected.host?.split(":")[0];
+				if (target !== undefined && host !== undefined && host !== target.hostname) return;
+				// A default port is reported as an empty string, not as `443`, so it has to
+				// be filled in on both sides or a perfectly good connection is rejected.
+				const expectedPort = target === undefined ? undefined : target.port === "" ? (target.protocol === "https:" ? "443" : "80") : target.port;
+				const connectedPort = connected.port === undefined || connected.port === ""
+					? connected.protocol === "https:" ? "443" : connected.protocol === "http:" ? "80" : undefined
+					: String(connected.port);
+				if (expectedPort !== undefined && connectedPort !== undefined && connectedPort !== expectedPort) return;
+				const version = connected.version === undefined || connected.version === null ? undefined : String(connected.version);
+				if (version === undefined) return;
+				// One origin can announce several connections inside a single request's
+				// window, and they are not equally informative. A cleartext h2c upgrade
+				// starts as an http/1.1 socket and *becomes* an h2 session, announcing both
+				// on the same origin and port — in that order. Taking the last announcement
+				// therefore records the preface and throws away the outcome, which reported
+				// `h1` for requests that really did travel over h2. `h2` is the only version
+				// worth preferring, and it wins whenever it is mentioned at all.
+				if (version !== "h2" && announced === "h2") return;
+				announced = version;
+			} : undefined;
+			if (watch !== undefined) diagnosticsChannel.subscribe(CONNECTED_CHANNEL, watch);
+			// A retry is only possible when the body can be sent twice. A stream cannot:
+			// by the time the first attempt failed, undici has consumed and locked it, so
+			// replaying it throws "Response body object should not be disturbed or locked"
+			// — a second failure that condemns the origin for a reason that has nothing to
+			// do with the endpoint, and it is exactly the shape a held member sends.
+			const replayable = init?.body === undefined
+				|| typeof init.body === "string"
+				|| init.body instanceof Uint8Array
+				|| init.body instanceof ArrayBuffer;
+			// The watch has to live exactly as long as the send, and no longer. Unsubscribing
+			// when this function returns would be too early for a held request: its caller
+			// deliberately does not await the response — a member is *meant* to stay open —
+			// so the connection it opened is announced after the listener would have gone,
+			// and the member would be remembered as having negotiated nothing.
+			const sendOnce = (mayRetry) => send(url, { ...init, dispatcher: agent, signal }).then(
+				(value) => {
+					if (watch !== undefined) diagnosticsChannel.unsubscribe(CONNECTED_CHANNEL, watch);
+					return value;
+				},
+				(error) => {
+					if (mayRetry !== true || !isTransportFailure(error, signal) || !replayable) {
+						if (watch !== undefined) diagnosticsChannel.unsubscribe(CONNECTED_CHANNEL, watch);
+						throw error;
+					}
+					// One retry, then the origin is condemned. A single failure is much more
+					// often this connection's than this endpoint's: a reset stream, a socket
+					// reclaimed while it was idle, a connection that had to be re-established
+					// — undici retries some of those itself and does not retry others. Since
+					// condemning an origin is permanent for the life of the plugin, one more
+					// attempt is cheap insurance against writing h2 off because a socket
+					// happened to be closed at the wrong moment. The retry reuses the same
+					// Agent, so it opens a fresh connection rather than replaying the dead one.
+					return sendOnce(false);
+				}
+			);
+			let response;
+			try {
+				response = await sendOnce(true);
+			} catch (error) {
+				if (isTransportFailure(error, signal)) {
+					blocked.add(origin);
+					negotiated.delete(origin);
+					log?.(`model-request-accelerator: ${origin} failed over HTTP/2 (${error?.cause?.message ?? error?.message ?? error}); using the default transport for it from now on`);
+					return { sent: false, reason: "transport" };
+				}
+				return { sent: false, reason: "aborted", error };
+			}
+			// A fresh announcement is authoritative for this request; otherwise the
+			// connection this request just reused already answered the question.
+			const protocol = announced ?? alreadyKnown;
+			if (protocol !== undefined) {
+				negotiated.set(origin, protocol);
+				// Optional on purpose: pre-transmission opens a held member before there is a
+				// measurement to report into, and subscribes no watch for it — the protocol its row
+				// carries is read back from the origin when the member is claimed. Requiring the
+				// callback made every member opened on a fresh connection throw after its prefix had
+				// already gone out, which cost that whole upload.
+				options.onConnected?.(protocol);
+			}
+			return { sent: true, response };
+		},
+
+		/** Whether one origin has been condemned already, for the settings route. */
+		isBlocked(origin) {
+			return blocked.has(origin);
+		},
+
+		/**
+		 * The protocol an origin's live connection negotiated, when it is already known.
+		 *
+		 * A held request for pre-transmission opens its connection while it is being
+		 * *opened*, and the request that eventually claims it runs in a different async
+		 * scope — long after the connection event fired. Without this, a pre-transmitted
+		 * row could never report a protocol, even though the member genuinely travelled
+		 * over h2.
+		 *
+		 * @param origin - the origin to ask about.
+		 * @returns the negotiated version, or `undefined` when nothing is known yet.
+		 */
+		protocolFor(origin) {
+			if (disposed) return undefined;
+			return negotiated.get(origin);
+		},
+
+		/** Every origin h2 has been abandoned for, for the settings route. */
+		blockedOrigins() {
+			return [...blocked];
+		},
+
+		/** Release every Agent this plugin opened. */
+		dispose() {
+			disposed = true;
+			for (const agent of agents.values()) {
+				try {
+					const closing = agent.close?.();
+					if (closing !== undefined && typeof closing.catch === "function") closing.catch(() => {});
+				} catch {}
+			}
+			agents.clear();
+			blocked.clear();
+			negotiated.clear();
+		}
+	};
+}

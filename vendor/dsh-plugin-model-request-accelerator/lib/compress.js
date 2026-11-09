@@ -1,0 +1,259 @@
+/**
+ * Pure decision core for per-provider request-body compression.
+ *
+ * Everything here is a plain function over plain JSON: no Cordis context, no
+ * Node globals, no zlib. The Host half injects the real encoder — brotli, or
+ * gzip where brotli is unavailable or refused — and the real header objects,
+ * which keeps the decision logic directly unit-testable and keeps the risky part
+ * (touching a live `RequestInit`) confined to one place.
+ *
+ * @module dsh-plugin-model-request-accelerator/compress
+ */
+
+/** Minimum body size (bytes) below which compression is skipped by default. */
+export const DEFAULT_MIN_BYTES = 1024;
+
+/** Lower-cased header names this module manages. */
+const CONTENT_ENCODING = "content-encoding";
+const CONTENT_LENGTH = "content-length";
+
+/**
+ * Drop trailing slashes so a configured `baseURL` becomes a stable prefix.
+ * @param baseURL - provider endpoint as authored in settings.
+ * @returns the normalized endpoint, or `undefined` when absent or blank.
+ */
+export function normalizeEndpoint(baseURL) {
+	if (typeof baseURL !== "string") return undefined;
+	const trimmed = baseURL.trim();
+	if (trimmed.length === 0) return undefined;
+	return trimmed.replace(/\/+$/u, "");
+}
+
+/**
+ * Walk a settings `settingsPath` into a resolved namespace value.
+ * @param value - the namespace's resolved value.
+ * @param path - ordered path segments; empty addresses the value itself.
+ * @returns the addressed node, or `undefined` when the path does not resolve.
+ */
+export function walkPath(value, path) {
+	let node = value;
+	for (const segment of path) {
+		if (node === null || typeof node !== "object" || Array.isArray(node)) return undefined;
+		node = node[segment];
+	}
+	return node;
+}
+
+/**
+ * Read the endpoint a configurable-provider entry declares.
+ * @param namespaceValue - resolved value of the entry's settings namespace.
+ * @param settingsPath - the entry's path inside that namespace.
+ * @returns the normalized `baseURL`, or `undefined` when the profile declares none.
+ */
+export function readEndpoint(namespaceValue, settingsPath) {
+	const profile = walkPath(namespaceValue, settingsPath);
+	if (profile === null || typeof profile !== "object" || Array.isArray(profile)) return undefined;
+	return normalizeEndpoint(profile.baseURL);
+}
+
+/**
+ * Compile the stored settings section into per-route policies.
+ * An unreadable section yields no policies, which means "compress nothing" —
+ * the safe direction for a transport-level switch.
+ * @param raw - the resolved settings section.
+ * @param fallbackEncoding - the section-wide preference a route without its own
+ *   `encoding` inherits.
+ * @param fallbackHttp2 - whether the section offers HTTP/2 at all.
+ * @returns route -> `{ enabled, minBytes, prewarm, http2, encoding }`.
+ */
+export function compilePolicies(raw, fallbackEncoding = "br", fallbackHttp2 = true) {
+	const policies = new Map();
+	const section = raw === null || typeof raw !== "object" ? undefined : raw;
+	const providers = section?.providers;
+	const fallback = normalizeEncoding(section?.encoding) ?? normalizeEncoding(fallbackEncoding) ?? "br";
+	const http2 = section === undefined ? fallbackHttp2 !== false : section.http2 !== false;
+	if (providers === null || typeof providers !== "object" || Array.isArray(providers)) return policies;
+	for (const route of Object.keys(providers)) {
+		const entry = providers[route];
+		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
+		const prewarm = entry.prewarm === true;
+		policies.set(route, {
+			enabled: entry.enabled === true,
+			minBytes: Number.isFinite(entry.minBytes) && entry.minBytes >= 0 ? entry.minBytes : DEFAULT_MIN_BYTES,
+			prewarm,
+			// Pre-transmission is what h2 actually pays for: it repeats the same
+			// multi-kilobyte headers and multiplexes several held requests onto one
+			// connection, so a route that pre-transmits gets h2 unless it says
+			// otherwise, and a route that does not has to ask for it.
+			http2: entry.http2 === undefined ? prewarm && http2 : entry.http2 === true && http2,
+			encoding: normalizeEncoding(entry.encoding) ?? fallback
+		});
+	}
+	return policies;
+}
+
+/**
+ * Normalize a configured algorithm to the two this plugin emits. Anything else
+ * — including the `auto` a user may write — means "prefer brotli", which the
+ * caller then downgrades to gzip when brotli is unavailable or was refused.
+ * @param value - the configured value.
+ * @returns `'br'`, `'gzip'`, or `undefined` when the value says nothing.
+ */
+export function normalizeEncoding(value) {
+	if (value === "gzip") return "gzip";
+	if (value === "br" || value === "auto") return "br";
+	return undefined;
+}
+
+/**
+ * Invert `route -> endpoint` into `endpoint -> routes`, so one request URL can
+ * be traced back to every route that owns it. Several routes may legitimately
+ * share one gateway endpoint.
+ * @param providerEndpoints - iterable of `[route, endpoint]` pairs.
+ * @returns endpoint -> route list.
+ */
+export function indexEndpoints(providerEndpoints) {
+	const byEndpoint = new Map();
+	for (const [route, endpoint] of providerEndpoints) {
+		if (endpoint === undefined) continue;
+		const list = byEndpoint.get(endpoint);
+		if (list === undefined) byEndpoint.set(endpoint, [route]);
+		else list.push(route);
+	}
+	return byEndpoint;
+}
+
+/**
+ * Resolve the policy that governs one outgoing request.
+ *
+ * Exact provider attribution (the streaming provider the request belongs to)
+ * wins whenever it is known: a route that is not enabled then stays
+ * uncompressed even if another route shares its endpoint. Only when
+ * attribution is unavailable does the endpoint index decide, and then the
+ * longest matching endpoint wins and the routes on it are OR-ed together.
+ *
+ * @param request - URL, attributed provider, policies, and the endpoint index.
+ * @returns the governing policy, or `undefined` when the request is out of scope.
+ *   An attributed route yields that route's whole policy; the endpoint fallback
+ *   yields `{ enabled, minBytes }` only, because pre-transmission and the
+ *   algorithm are per-provider decisions that a shared endpoint cannot make.
+ */
+export function resolvePolicy(request) {
+	const { url, provider, policies, byEndpoint } = request;
+	if (typeof provider === "string" && provider.length > 0) return policies.get(provider);
+	if (typeof url !== "string") return undefined;
+	let best;
+	for (const [endpoint, routes] of byEndpoint) {
+		if (!url.startsWith(endpoint)) continue;
+		if (best === undefined || endpoint.length > best.endpoint.length) best = { endpoint, routes };
+	}
+	if (best === undefined) return undefined;
+	const enabled = [];
+	for (const route of best.routes) {
+		const policy = policies.get(route);
+		if (policy !== undefined && policy.enabled) enabled.push(policy);
+	}
+	if (enabled.length === 0) return undefined;
+	let minBytes = enabled[0].minBytes;
+	for (const policy of enabled) if (policy.minBytes < minBytes) minBytes = policy.minBytes;
+	return { enabled: true, minBytes };
+}
+
+/**
+ * Read one header case-insensitively from any of the shapes `fetch` accepts.
+ * @param headers - plain object, pair array, or `Headers` instance.
+ * @param name - lower-cased header name.
+ * @returns the header value, or `undefined` when absent.
+ */
+export function readHeader(headers, name) {
+	if (headers === undefined || headers === null) return undefined;
+	if (typeof headers.get === "function") return headers.get(name) ?? undefined;
+	if (Array.isArray(headers)) {
+		for (const pair of headers) if (String(pair[0]).toLowerCase() === name) return pair[1];
+		return undefined;
+	}
+	if (typeof headers !== "object") return undefined;
+	for (const key of Object.keys(headers)) if (key.toLowerCase() === name) return headers[key];
+	return undefined;
+}
+
+/**
+ * Return a copy of `headers` carrying the given `content-encoding` and no stale
+ * `content-length`. The result is always a plain object: the two shipped
+ * adapters already pass plain objects, and normalizing here keeps the rewrite
+ * in one branch instead of three.
+ * @param headers - the original header container, in any accepted shape.
+ * @param encoding - the algorithm actually used, `br` or `gzip`.
+ * @returns new headers ready to be handed back to `fetch`.
+ */
+export function withEncodingHeader(headers, encoding) {
+	const next = {};
+	const assign = (key, value) => {
+		const lower = String(key).toLowerCase();
+		if (lower === CONTENT_LENGTH || lower === CONTENT_ENCODING) return;
+		next[key] = value;
+	};
+	if (headers !== undefined && headers !== null) {
+		if (typeof headers.forEach === "function" && typeof headers.get === "function") headers.forEach((value, key) => assign(key, value));
+		else if (Array.isArray(headers)) for (const pair of headers) assign(pair[0], pair[1]);
+		else if (typeof headers === "object") for (const key of Object.keys(headers)) assign(key, headers[key]);
+	}
+	next[CONTENT_ENCODING] = encoding;
+	return next;
+}
+
+/**
+ * Return a copy of the headers with one extra header added.
+ *
+ * Unlike withEncodingHeader, every existing header survives: this is used to
+ * tag a request for a local proxy, not to rewrite a body.
+ * @param headers - plain object, pair array, or Headers instance.
+ * @param name - header name to add, replaced case-insensitively when present.
+ * @param value - header value.
+ * @returns new headers ready to be handed back to fetch.
+ */
+export function withExtraHeader(headers, name, value) {
+	if (headers !== undefined && headers !== null && typeof headers.get === "function" && typeof headers.forEach === "function") {
+		const next = new Headers(headers);
+		next.set(name, value);
+		return next;
+	}
+	const next = {};
+	if (headers !== undefined && headers !== null) {
+		if (Array.isArray(headers)) for (const pair of headers) next[pair[0]] = pair[1];
+		else if (typeof headers === "object") for (const key of Object.keys(headers)) next[key] = headers[key];
+	}
+	for (const key of Object.keys(next)) if (key.toLowerCase() === String(name).toLowerCase()) delete next[key];
+	next[name] = value;
+	return next;
+}
+
+/**
+ * Decide whether one `fetch` call should be rewritten, and produce the body.
+ *
+ * A string body is the only compressible input the shipped adapters produce;
+ * anything else (FormData uploads, streams, `Request` objects) is left exactly
+ * as the caller built it. The compressed body is used only when it is strictly
+ * smaller, so the switch can never enlarge a request.
+ *
+ * @param request - body, already-known content-encoding, policy, and codecs.
+ * @returns the compressed body and its sizes, or `undefined` to send as-is.
+ */
+export function planCompression(request) {
+	const { body, policy, hasContentEncoding, byteLength, encode } = request;
+	if (typeof body !== "string") return undefined;
+	if (hasContentEncoding !== undefined) return undefined;
+	if (policy === undefined || !policy.enabled) return undefined;
+	const originalBytes = byteLength(body);
+	if (originalBytes < policy.minBytes) return undefined;
+	const encoding = policy.encoding === "gzip" ? "gzip" : "br";
+	const compressed = encode(body, encoding);
+	if (compressed.byteLength >= originalBytes) return undefined;
+	return {
+		encoding,
+		original: body,
+		body: compressed,
+		originalBytes,
+		compressedBytes: compressed.byteLength
+	};
+}

@@ -64,6 +64,11 @@ const option = (name) => {
 };
 
 const dryRun = argv.includes("--dry-run");
+// Two jobs for one script. By default it builds the package inside a profile -
+// the install an existing user upgrades in place. --build writes the same files
+// into this checkout instead: that is the package a plain `dsh plugin add`
+// installs from the repository, and nothing outside the checkout is touched.
+const buildMode = argv.includes("--build");
 
 const fail = (message) => {
   console.error(message);
@@ -72,20 +77,22 @@ const fail = (message) => {
 
 const say = (message) => console.log(message);
 
-// What gets written: the profile's manifest, its patch file, and the plugins
-// directory the install lives in. Named explicitly, so an install into a second
-// profile updates that profile and not whichever one happens to be default.
+// What gets written: the profile's manifest, its patch file, and the package
+// directory. The profile is named explicitly, so an install into a second one
+// updates that profile and not whichever happens to be the default. In --build
+// mode the package directory is this checkout and the profile is only a place to
+// find upstream sources, so it does not have to exist at all.
 const profile = resolve(
   option("--profile") ?? process.env.DSH_PROFILE_DIR ?? join(homedir(), ".dsh", "profiles", "desktop"),
 );
 const manifestPath = join(profile, "package.json");
 const patchPath = join(profile, "cordis.patch.yml");
-const wrapperDir = join(profile, "plugins", WRAPPER);
+const wrapperDir = buildMode ? resolve(option("--out") ?? join(here, "..")) : join(profile, "plugins", WRAPPER);
 const vendorDir = join(wrapperDir, "vendor");
 const vendorBili = join(vendorDir, UPSTREAM);
 const vendorAccelerator = join(vendorDir, ACCELERATOR);
 
-if (!existsSync(manifestPath)) fail("no profile manifest at " + manifestPath);
+if (!buildMode && !existsSync(manifestPath)) fail("no profile manifest at " + manifestPath);
 
 // ── 0. where the sources come from ──────────────────────────────────────────
 // Best first: an explicit path, the copy this profile has installed, the vendored
@@ -294,7 +301,7 @@ const extractFactory = (source, label) => {
 };
 
 const biliVersion = JSON.parse(readFileSync(join(target, "package.json"), "utf8")).version;
-const templatePath = join(here, "..", "package", "lib", "client.template.js");
+const templatePath = join(here, "..", "lib", "client.template.js");
 const template = readFileSync(templatePath, "utf8");
 const biliClientBody = extractFactory(
   readFileSync(join(target, "dist", "agent", "dsh-native-client.js"), "utf8"),
@@ -373,15 +380,6 @@ const stripInserts = (text) => {
   return kept.join("\n");
 };
 
-// Two upstream packages may or may not be installed here. Rows are written only
-// for the ones that are: a row naming a package nobody installed does nothing
-// but print "patch: entry ... not found" on every start.
-const earlyManifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-const installedDep = (name) =>
-  Object.prototype.hasOwnProperty.call(earlyManifest.dependencies ?? {}, name) &&
-  existsSync(join(profile, "node_modules", name));
-
-void installedDep;
 
 const layerSource = readFileSync(layerPath, "utf8");
 const layerHead = layerSource.includes(MARKER)
@@ -404,12 +402,16 @@ const wrapperLayer =
   stripInserts(layerHead).replace(/\s+$/, "") +
   "\n";
 
-const wrapperManifestPath = join(here, "..", "package", "package.json");
+const wrapperManifestPath = join(here, "..", "package.json");
 const wrapperManifest = JSON.parse(readFileSync(wrapperManifestPath, "utf8"));
 // Where this checkout lives, so the wrapper's own update action can pull it and
 // regenerate the install without the user having to remember the path.
-wrapperManifest.patchRepo = resolve(here, "..");
-wrapperManifest.meta = { ...(wrapperManifest.meta ?? {}), upstream: UPSTREAM + "@" + biliVersion };
+// A package installed by a package manager has no checkout beside it: the field
+// stays out, and the update action reports that instead of pulling nothing.
+if (!buildMode) {
+  wrapperManifest.patchRepo = resolve(here, "..");
+  wrapperManifest.meta = { ...(wrapperManifest.meta ?? {}), upstream: UPSTREAM + "@" + biliVersion };
+}
 
 // ── 5. write the wrapper package ────────────────────────────────────────────
 // One indirection file instead of three bare specifiers: the host half imports
@@ -425,8 +427,9 @@ const upstreamModule =
   'export * as accelerator from "../vendor/' + ACCELERATOR + '/lib/index.js";\n';
 
 const wrapperFiles = [
-  [join(wrapperDir, "package.json"), JSON.stringify(wrapperManifest, null, 2) + "\n"],
-  [join(wrapperDir, "lib", "index.js"), readFileSync(join(here, "..", "package", "lib", "index.js"), "utf8")],
+  // In --build mode the manifest is the checkout's own file, maintained by hand.
+  ...(buildMode ? [] : [[join(wrapperDir, "package.json"), JSON.stringify(wrapperManifest, null, 2) + "\n"]]),
+  [join(wrapperDir, "lib", "index.js"), readFileSync(join(here, "..", "lib", "index.js"), "utf8")],
   [join(wrapperDir, "lib", "upstream.js"), upstreamModule],
   [join(wrapperDir, "lib", "client.js"), mergedClient],
   [join(wrapperDir, "dsh.bundle.patch.yml"), wrapperLayer],
@@ -439,338 +442,352 @@ for (const [file, content] of wrapperFiles) {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, content);
 }
-if (!dryRun) say("wrapper package: " + wrapperDir + " (sources vendored inside)");
+if (!dryRun) {
+  say(
+    buildMode
+      ? "built in " + wrapperDir
+      : "wrapper package: " + wrapperDir + " (sources vendored inside)",
+  );
+}
 
-// pnpm's link: dependency resolves through this symlink; creating it here keeps
-// the merge to one command instead of a pnpm install round trip.
-const linkPath = join(profile, "node_modules", WRAPPER);
-if (!existsSync(linkPath)) {
-  if (dryRun) {
-    say("would link " + linkPath + " -> " + wrapperDir);
+if (!buildMode) {
+  // pnpm's link: dependency resolves through this symlink; creating it here keeps
+  // the merge to one command instead of a pnpm install round trip.
+  const linkPath = join(profile, "node_modules", WRAPPER);
+  if (!existsSync(linkPath)) {
+    if (dryRun) {
+      say("would link " + linkPath + " -> " + wrapperDir);
+    } else {
+      mkdirSync(dirname(linkPath), { recursive: true });
+      symlinkSync(wrapperDir, linkPath, process.platform === "win32" ? "junction" : "dir");
+      say("linked " + linkPath + " -> " + wrapperDir);
+    }
+  }
+
+  // ── 6. the profile: one bundle row for both features ────────────────────────
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const dependencies = (manifest.dependencies ??= {});
+  const bundleOwner = manifest.dsh?.profile;
+  if (!bundleOwner || !Array.isArray(bundleOwner.bundles)) {
+    fail(manifestPath + " has no dsh.profile.bundles list");
+  }
+
+  const linkSpec = (path) => {
+    const rel = relative(profile, path).split(sep).join("/");
+    return "link:" + (rel.startsWith(".") ? rel : "./" + rel);
+  };
+  const wrapperSpec = linkSpec(wrapperDir);
+
+  // Nothing else in the list is touched: other plugins the user installed keep their
+  // order and their rows. Only the two upstream names are dropped, because both now
+  // live inside this package.
+  const changes = [];
+  const bundles = [];
+  const suppressed = new Set([UPSTREAM, ACCELERATOR]);
+  for (const name of bundleOwner.bundles) {
+    if (!bundles.includes(name) && name !== WRAPPER && !suppressed.has(name)) bundles.push(name);
+  }
+  // Both upstream names leave the list, and in a vendored install they leave the
+  // profile too (below): a list row without a declared package is not a card, and
+  // these two are mounted by the wrapper's host half instead of by the loader.
+  bundles.push(WRAPPER);
+  if (JSON.stringify(bundles) !== JSON.stringify(bundleOwner.bundles)) {
+    bundleOwner.bundles = bundles;
+    changes.push("bundles -> " + bundles.join(", "));
+  }
+
+  // One declared package, and therefore one card: the plugin list is the profile's
+  // dependency map, so a leftover billion-context row is a leftover card, and an
+  // accelerator row beside it is a second one. Both are removed — their files are
+  // in vendor/ now. The rows are only removed, never rewritten into something else:
+  // a user who wants the standalone plugin back installs it again, and the two
+  // copies cannot both run (same services, same routes).
+  const nextDependencies = { ...dependencies, [WRAPPER]: wrapperSpec };
+  delete nextDependencies[UPSTREAM];
+  delete nextDependencies[ACCELERATOR];
+  manifest.dependencies = Object.fromEntries(
+    Object.entries(nextDependencies).sort(([left], [right]) => left.localeCompare(right)),
+  );
+  if (JSON.stringify(manifest.dependencies) !== JSON.stringify(dependencies)) {
+    changes.push("dependencies: " + WRAPPER + " only (upstream rows removed)");
+  }
+
+  if (changes.length > 0 && !dryRun) {
+    const manifestBackup = backupOf(manifestPath);
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+    pruneBackups(manifestPath);
+    say("profile: " + changes.join("; ") + " (backup " + manifestBackup + ")");
+  } else if (changes.length > 0) {
+    say("would update profile: " + changes.join("; "));
   } else {
-    mkdirSync(dirname(linkPath), { recursive: true });
-    symlinkSync(wrapperDir, linkPath, process.platform === "win32" ? "junction" : "dir");
-    say("linked " + linkPath + " -> " + wrapperDir);
+    say("profile: already wired");
   }
-}
 
-// ── 6. the profile: one bundle row for both features ────────────────────────
-const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-const dependencies = (manifest.dependencies ??= {});
-const bundleOwner = manifest.dsh?.profile;
-if (!bundleOwner || !Array.isArray(bundleOwner.bundles)) {
-  fail(manifestPath + " has no dsh.profile.bundles list");
-}
+  // ── 7. the channel switches follow the entry ────────────────────────────────
+  // The profile patch targets the accelerator entry by id. The entry is gone, so
+  // the same config block has to address the wrapper instead, otherwise the
+  // provider toggles silently fall back to defaults.
+  // The rewrite itself happens in step 8, so the file is read and written once.
+  const patchBefore = existsSync(patchPath) ? readFileSync(patchPath, "utf8") : null;
 
-const linkSpec = (path) => {
-  const rel = relative(profile, path).split(sep).join("/");
-  return "link:" + (rel.startsWith(".") ? rel : "./" + rel);
-};
-const wrapperSpec = linkSpec(wrapperDir);
+  // ── 8. the profile patch: switches, and one leftover to clear ───────────────
+  // Two jobs, both idempotent.
+  //
+  // The channel switches of the accelerator are addressed by id, and the id is now
+  // the wrapper's, so that row has to be retargeted or the provider toggles fall
+  // back to their defaults.
+  //
+  // The other job is cleanup. The previous version wrote one "follow" row per
+  // upstream entry into this file — user configuration that the user never asked
+  // for and that could not survive being switched off. Those rows are removed;
+  // the switching is now generated into the wrapper's own bundle layer instead.
+  const pinned = ["bili-native", "bili-compaction-gate", "model-request-accelerator"];
 
-// Nothing else in the list is touched: other plugins the user installed keep their
-// order and their rows. Only the two upstream names are dropped, because both now
-// live inside this package.
-const changes = [];
-const bundles = [];
-const suppressed = new Set([UPSTREAM, ACCELERATOR]);
-for (const name of bundleOwner.bundles) {
-  if (!bundles.includes(name) && name !== WRAPPER && !suppressed.has(name)) bundles.push(name);
-}
-// Both upstream names leave the list, and in a vendored install they leave the
-// profile too (below): a list row without a declared package is not a card, and
-// these two are mounted by the wrapper's host half instead of by the loader.
-bundles.push(WRAPPER);
-if (JSON.stringify(bundles) !== JSON.stringify(bundleOwner.bundles)) {
-  bundleOwner.bundles = bundles;
-  changes.push("bundles -> " + bundles.join(", "));
-}
-
-// One declared package, and therefore one card: the plugin list is the profile's
-// dependency map, so a leftover billion-context row is a leftover card, and an
-// accelerator row beside it is a second one. Both are removed — their files are
-// in vendor/ now. The rows are only removed, never rewritten into something else:
-// a user who wants the standalone plugin back installs it again, and the two
-// copies cannot both run (same services, same routes).
-const nextDependencies = { ...dependencies, [WRAPPER]: wrapperSpec };
-delete nextDependencies[UPSTREAM];
-delete nextDependencies[ACCELERATOR];
-manifest.dependencies = Object.fromEntries(
-  Object.entries(nextDependencies).sort(([left], [right]) => left.localeCompare(right)),
-);
-if (JSON.stringify(manifest.dependencies) !== JSON.stringify(dependencies)) {
-  changes.push("dependencies: " + WRAPPER + " only (upstream rows removed)");
-}
-
-if (changes.length > 0 && !dryRun) {
-  const manifestBackup = backupOf(manifestPath);
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
-  pruneBackups(manifestPath);
-  say("profile: " + changes.join("; ") + " (backup " + manifestBackup + ")");
-} else if (changes.length > 0) {
-  say("would update profile: " + changes.join("; "));
-} else {
-  say("profile: already wired");
-}
-
-// ── 7. the channel switches follow the entry ────────────────────────────────
-// The profile patch targets the accelerator entry by id. The entry is gone, so
-// the same config block has to address the wrapper instead, otherwise the
-// provider toggles silently fall back to defaults.
-// The rewrite itself happens in step 8, so the file is read and written once.
-const patchBefore = existsSync(patchPath) ? readFileSync(patchPath, "utf8") : null;
-
-// ── 8. the profile patch: switches, and one leftover to clear ───────────────
-// Two jobs, both idempotent.
-//
-// The channel switches of the accelerator are addressed by id, and the id is now
-// the wrapper's, so that row has to be retargeted or the provider toggles fall
-// back to their defaults.
-//
-// The other job is cleanup. The previous version wrote one "follow" row per
-// upstream entry into this file — user configuration that the user never asked
-// for and that could not survive being switched off. Those rows are removed;
-// the switching is now generated into the wrapper's own bundle layer instead.
-const pinned = ["bili-native", "bili-compaction-gate", "model-request-accelerator"];
-
-/** Split a patch file into id blocks and raw lines, so a rewrite can address whole rows. */
-const splitPatch = (text) => {
-  const blocks = [];
-  let current = null;
-  for (const line of text.replace(/\s+$/, "").split("\n")) {
-    const match = /^- id: (\S+)\s*$/.exec(line);
-    if (match !== null) {
-      current = { id: match[1], header: line, body: [] };
-      blocks.push(current);
-      continue;
-    }
-    if (current !== null && /^\s+\S/.test(line)) {
-      current.body.push(line);
-      continue;
-    }
-    current = null;
-    blocks.push({ raw: line });
-  }
-  return blocks;
-};
-
-const joinPatch = (blocks) =>
-  blocks
-    .map((block) => (block.raw !== undefined ? block.raw : [block.header, ...block.body].join("\n")))
-    .join("\n") + "\n";
-
-/** A row that carries nothing but `disabled:` — ours to rewrite, nobody else's. */
-const onlyDisabled = (body) => body.every((line) => /^\s+disabled:/.test(line));
-
-/**
- * Provider names whose endpoint is one of the relays in COMPRESS_HOSTS.
- * Walks backwards from every `baseURL:` line to the key at two columns less —
- * the provider name in a `providers:` map.
- * @param texts - profile config files, in any order.
- * @returns the matching provider names, each once.
- */
-const channelsToCompress = (texts) => {
-  const names = new Set();
-  for (const text of texts) {
-    if (!text) continue;
-    const lines = text.split("\n");
-    for (let i = 0; i < lines.length; i += 1) {
-      const match = /^(\s*)baseURL:\s*['"]?([^'"\s]+)['"]?\s*$/.exec(lines[i]);
-      if (!match) continue;
-      let host = "";
-      try {
-        host = new URL(match[2]).hostname.toLowerCase();
-      } catch {
+  /** Split a patch file into id blocks and raw lines, so a rewrite can address whole rows. */
+  const splitPatch = (text) => {
+    const blocks = [];
+    let current = null;
+    for (const line of text.replace(/\s+$/, "").split("\n")) {
+      const match = /^- id: (\S+)\s*$/.exec(line);
+      if (match !== null) {
+        current = { id: match[1], header: line, body: [] };
+        blocks.push(current);
         continue;
       }
-      if (!COMPRESS_HOSTS.has(host)) continue;
-      const indent = match[1].length;
-      for (let j = i - 1; j >= 0; j -= 1) {
-        const line = lines[j];
-        if (!line.trim()) continue;
-        const lead = line.length - line.trimStart().length;
-        if (lead < indent - 2) break;
-        if (lead !== indent - 2) continue;
-        const key = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line.trim());
-        if (key) names.add(key[1]);
-        break;
+      if (current !== null && /^\s+\S/.test(line)) {
+        current.body.push(line);
+        continue;
       }
+      current = null;
+      blocks.push({ raw: line });
     }
-  }
-  return [...names];
-};
+    return blocks;
+  };
 
-const rewritePatch = (text, wrapperId, channels = []) => {
-  const notes = [];
-  let blocks = splitPatch(text);
+  const joinPatch = (blocks) =>
+    blocks
+      .map((block) => (block.raw !== undefined ? block.raw : [block.header, ...block.body].join("\n")))
+      .join("\n") + "\n";
 
-  // (a) Retarget the channel switches. Only the row that carries `config:` — a
-  //     blind "first row with this id" would also rename the pin below, and that
-  //     rename is what once left the wrapper itself switched off.
-  blocks = blocks.map((block) => {
-    if (block.id !== "model-request-accelerator") return block;
-    if (!block.body.some((line) => /^\s+config:/.test(line))) return block;
-    notes.push("channel switches -> " + wrapperId);
-    return {
-      id: wrapperId,
-      header: "- id: " + wrapperId,
-      body: block.body.map((line) =>
-        line.replace(/^(\s+name: )dsh-plugin-model-request-accelerator\s*$/, "$1" + wrapperId),
-      ),
-    };
-  });
+  /** A row that carries nothing but `disabled:` — ours to rewrite, nobody else's. */
+  const onlyDisabled = (body) => body.every((line) => /^\s+disabled:/.test(line));
 
-  // (b) The wrapper's own row has to stay enabled: switching it off takes the
-  //     compaction gate with it, and the agent presets then wait forever for a
-  //     service nothing provides (#3662). A stray `disabled: true` here is always
-  //     damage, never intent, so it is repaired rather than respected.
-  let keptWrapperRow = false;
-  blocks = blocks.filter((block) => {
-    if (block.id !== wrapperId) return true;
-    // Any row of ours carrying a top-level `disabled:` is the pin row, and the pin
-    // row must never carry config: it would override the real one above it.
-    if (!block.body.some((line) => /^ {2}disabled:/.test(line))) return true;
-    if (keptWrapperRow) {
-      notes.push("dropped a duplicate " + wrapperId + " row");
-      return false;
-    }
-    keptWrapperRow = true;
-    if (!block.body.join(" ").includes("false")) notes.push("re-enabled the " + wrapperId + " row");
-    else if (block.body.length > 1) notes.push("stripped stray config from the " + wrapperId + " pin row");
-    block.body = ["  disabled: false"];
-    return true;
-  });
-
-  // (c) The previous version kept the two upstream packages in the bundle list
-  //     and switched their rows off through a `!!js` expression that read the
-  //     wrapper's sibling entry. That expression is order-sensitive: switching the
-  //     wrapper back on in the plugin page appends it after them, they get built
-  //     first, do not see it yet, and stay on — three copies at once. The rows are
-  //     removed here; the switching now lives in the wrapper's own bundle layer
-  //     (step 4), which is applied only while the wrapper is listed, and the host
-  //     half adds a runtime check for the ordering case (package/lib/index.js).
-  blocks = blocks.filter((block) => {
-    if (!pinned.includes(block.id)) return true;
-    if (block.body.some((line) => !/^\s+disabled:/.test(line))) return true;
-    if (!block.body.join(" ").includes("!!js")) return true;
-    notes.push("dropped the leftover follow row for " + block.id);
-    return false;
-  });
-
-  // (d) Every channel that points at one of the relays gets request-body
-  //     compression switched on, brotli-first. Written as plain config next to the
-  //     other channel switches, so the panel shows the same thing the plugin
-  //     actually does, and so the user can still turn a single channel off.
-  if (channels.length > 0) {
-    blocks = blocks.map((block) => {
-      if (block.id !== wrapperId) return block;
-      if (block.body.some((line) => /^ {2}disabled:/.test(line))) return block;
-      const body = [...block.body];
-      let touched = false;
-      let configAt = body.findIndex((line) => /^\s{2}config:\s*$/.test(line));
-      if (configAt === -1) {
-        body.push("  config:");
-        configAt = body.length - 1;
-        touched = true;
-      }
-      let providersAt = body.findIndex((line, index) => index > configAt && /^\s{4}providers:\s*$/.test(line));
-      if (providersAt === -1) {
-        body.splice(configAt + 1, 0, "    providers:");
-        providersAt = configAt + 1;
-        touched = true;
-      }
-      /** End of the block opened on `start`: the first non-blank line indented no deeper than `indent`. */
-      const sectionEnd = (start, indent) => {
-        for (let i = start + 1; i < body.length; i += 1) {
-          if (body[i].trim() && body[i].length - body[i].trimStart().length <= indent) return i;
-        }
-        return body.length;
-      };
-      for (const name of channels) {
-        const escape = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        let nameAt = -1;
-        let end = sectionEnd(providersAt, 4);
-        for (let i = providersAt + 1; i < end; i += 1) {
-          if (new RegExp("^ {6}" + escape + ":\\s*$").test(body[i])) {
-            nameAt = i;
-            break;
-          }
-        }
-        if (nameAt === -1) {
-          body.splice(end, 0, "      " + name + ":", "        enabled: true", "        encoding: auto");
-          touched = true;
-          notes.push("compression on for " + name);
+  /**
+   * Provider names whose endpoint is one of the relays in COMPRESS_HOSTS.
+   * Walks backwards from every `baseURL:` line to the key at two columns less —
+   * the provider name in a `providers:` map.
+   * @param texts - profile config files, in any order.
+   * @returns the matching provider names, each once.
+   */
+  const channelsToCompress = (texts) => {
+    const names = new Set();
+    for (const text of texts) {
+      if (!text) continue;
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length; i += 1) {
+        const match = /^(\s*)baseURL:\s*['"]?([^'"\s]+)['"]?\s*$/.exec(lines[i]);
+        if (!match) continue;
+        let host = "";
+        try {
+          host = new URL(match[2]).hostname.toLowerCase();
+        } catch {
           continue;
         }
-        let local = false;
-        let fieldEnd = sectionEnd(nameAt, 6);
-        for (const [key, value] of [["enabled", "true"], ["encoding", "auto"]]) {
-          let at = -1;
-          for (let i = nameAt + 1; i < fieldEnd; i += 1) {
-            if (new RegExp("^ {8}" + key + ":").test(body[i])) {
-              at = i;
+        if (!COMPRESS_HOSTS.has(host)) continue;
+        const indent = match[1].length;
+        for (let j = i - 1; j >= 0; j -= 1) {
+          const line = lines[j];
+          if (!line.trim()) continue;
+          const lead = line.length - line.trimStart().length;
+          if (lead < indent - 2) break;
+          if (lead !== indent - 2) continue;
+          const key = /^([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line.trim());
+          if (key) names.add(key[1]);
+          break;
+        }
+      }
+    }
+    return [...names];
+  };
+
+  const rewritePatch = (text, wrapperId, channels = []) => {
+    const notes = [];
+    let blocks = splitPatch(text);
+
+    // (a) Retarget the channel switches. Only the row that carries `config:` — a
+    //     blind "first row with this id" would also rename the pin below, and that
+    //     rename is what once left the wrapper itself switched off.
+    blocks = blocks.map((block) => {
+      if (block.id !== "model-request-accelerator") return block;
+      if (!block.body.some((line) => /^\s+config:/.test(line))) return block;
+      notes.push("channel switches -> " + wrapperId);
+      return {
+        id: wrapperId,
+        header: "- id: " + wrapperId,
+        body: block.body.map((line) =>
+          line.replace(/^(\s+name: )dsh-plugin-model-request-accelerator\s*$/, "$1" + wrapperId),
+        ),
+      };
+    });
+
+    // (b) The wrapper's own row has to stay enabled: switching it off takes the
+    //     compaction gate with it, and the agent presets then wait forever for a
+    //     service nothing provides (#3662). A stray `disabled: true` here is always
+    //     damage, never intent, so it is repaired rather than respected.
+    let keptWrapperRow = false;
+    blocks = blocks.filter((block) => {
+      if (block.id !== wrapperId) return true;
+      // Any row of ours carrying a top-level `disabled:` is the pin row, and the pin
+      // row must never carry config: it would override the real one above it.
+      if (!block.body.some((line) => /^ {2}disabled:/.test(line))) return true;
+      if (keptWrapperRow) {
+        notes.push("dropped a duplicate " + wrapperId + " row");
+        return false;
+      }
+      keptWrapperRow = true;
+      if (!block.body.join(" ").includes("false")) notes.push("re-enabled the " + wrapperId + " row");
+      else if (block.body.length > 1) notes.push("stripped stray config from the " + wrapperId + " pin row");
+      block.body = ["  disabled: false"];
+      return true;
+    });
+
+    // (c) The previous version kept the two upstream packages in the bundle list
+    //     and switched their rows off through a `!!js` expression that read the
+    //     wrapper's sibling entry. That expression is order-sensitive: switching the
+    //     wrapper back on in the plugin page appends it after them, they get built
+    //     first, do not see it yet, and stay on — three copies at once. The rows are
+    //     removed here; the switching now lives in the wrapper's own bundle layer
+    //     (step 4), which is applied only while the wrapper is listed, and the host
+    //     half adds a runtime check for the ordering case (package/lib/index.js).
+    blocks = blocks.filter((block) => {
+      if (!pinned.includes(block.id)) return true;
+      if (block.body.some((line) => !/^\s+disabled:/.test(line))) return true;
+      if (!block.body.join(" ").includes("!!js")) return true;
+      notes.push("dropped the leftover follow row for " + block.id);
+      return false;
+    });
+
+    // (d) Every channel that points at one of the relays gets request-body
+    //     compression switched on, brotli-first. Written as plain config next to the
+    //     other channel switches, so the panel shows the same thing the plugin
+    //     actually does, and so the user can still turn a single channel off.
+    if (channels.length > 0) {
+      blocks = blocks.map((block) => {
+        if (block.id !== wrapperId) return block;
+        if (block.body.some((line) => /^ {2}disabled:/.test(line))) return block;
+        const body = [...block.body];
+        let touched = false;
+        let configAt = body.findIndex((line) => /^\s{2}config:\s*$/.test(line));
+        if (configAt === -1) {
+          body.push("  config:");
+          configAt = body.length - 1;
+          touched = true;
+        }
+        let providersAt = body.findIndex((line, index) => index > configAt && /^\s{4}providers:\s*$/.test(line));
+        if (providersAt === -1) {
+          body.splice(configAt + 1, 0, "    providers:");
+          providersAt = configAt + 1;
+          touched = true;
+        }
+        /** End of the block opened on `start`: the first non-blank line indented no deeper than `indent`. */
+        const sectionEnd = (start, indent) => {
+          for (let i = start + 1; i < body.length; i += 1) {
+            if (body[i].trim() && body[i].length - body[i].trimStart().length <= indent) return i;
+          }
+          return body.length;
+        };
+        for (const name of channels) {
+          const escape = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          let nameAt = -1;
+          let end = sectionEnd(providersAt, 4);
+          for (let i = providersAt + 1; i < end; i += 1) {
+            if (new RegExp("^ {6}" + escape + ":\\s*$").test(body[i])) {
+              nameAt = i;
               break;
             }
           }
-          // Only a missing key is filled in. An explicit true/false is the user's
-          // answer, and a reinstall that flipped it back would be a bug, not a
-          // default: turn a channel off in the settings page and it stays off.
-          if (at === -1) {
-            body.splice(fieldEnd, 0, "        " + key + ": " + value);
-            fieldEnd += 1;
-            local = true;
+          if (nameAt === -1) {
+            body.splice(end, 0, "      " + name + ":", "        enabled: true", "        encoding: auto");
+            touched = true;
+            notes.push("compression on for " + name);
+            continue;
+          }
+          let local = false;
+          let fieldEnd = sectionEnd(nameAt, 6);
+          for (const [key, value] of [["enabled", "true"], ["encoding", "auto"]]) {
+            let at = -1;
+            for (let i = nameAt + 1; i < fieldEnd; i += 1) {
+              if (new RegExp("^ {8}" + key + ":").test(body[i])) {
+                at = i;
+                break;
+              }
+            }
+            // Only a missing key is filled in. An explicit true/false is the user's
+            // answer, and a reinstall that flipped it back would be a bug, not a
+            // default: turn a channel off in the settings page and it stays off.
+            if (at === -1) {
+              body.splice(fieldEnd, 0, "        " + key + ": " + value);
+              fieldEnd += 1;
+              local = true;
+            }
+          }
+          if (local) {
+            touched = true;
+            notes.push("compression on for " + name);
           }
         }
-        if (local) {
-          touched = true;
-          notes.push("compression on for " + name);
-        }
-      }
-      return touched ? { ...block, body } : block;
-    });
-  }
-
-  return { text: joinPatch(blocks), notes };
-};
-
-// Providers are declared in either the profile's own config or its patch layer;
-// scanning both means a relay channel is found wherever the user put it.
-const cordisMain = join(profile, "cordis.yml");
-const channels = channelsToCompress([
-  patchBefore ?? "",
-  existsSync(cordisMain) ? readFileSync(cordisMain, "utf8") : "",
-]);
-if (channels.length > 0) say("relay channels: " + channels.join(", ") + " -> compression defaults (missing keys only)");
-
-if (patchBefore !== null) {
-  const rewritten = rewritePatch(patchBefore, WRAPPER, channels);
-  if (rewritten.text !== patchBefore) {
-    if (dryRun) {
-      say("would rewrite " + patchPath + ": " + rewritten.notes.join("; "));
-    } else {
-      const patchBackup = backupOf(patchPath);
-      writeFileSync(patchPath, rewritten.text);
-      pruneBackups(patchPath);
-      say("profile patch: " + rewritten.notes.join("; ") + " (backup " + patchBackup + ")");
+        return touched ? { ...block, body } : block;
+      });
     }
-  } else {
-    say("profile patch: already wired");
+
+    return { text: joinPatch(blocks), notes };
+  };
+
+  // Providers are declared in either the profile's own config or its patch layer;
+  // scanning both means a relay channel is found wherever the user put it.
+  const cordisMain = join(profile, "cordis.yml");
+  const channels = channelsToCompress([
+    patchBefore ?? "",
+    existsSync(cordisMain) ? readFileSync(cordisMain, "utf8") : "",
+  ]);
+  if (channels.length > 0) say("relay channels: " + channels.join(", ") + " -> compression defaults (missing keys only)");
+
+  if (patchBefore !== null) {
+    const rewritten = rewritePatch(patchBefore, WRAPPER, channels);
+    if (rewritten.text !== patchBefore) {
+      if (dryRun) {
+        say("would rewrite " + patchPath + ": " + rewritten.notes.join("; "));
+      } else {
+        const patchBackup = backupOf(patchPath);
+        writeFileSync(patchPath, rewritten.text);
+        pruneBackups(patchPath);
+        say("profile patch: " + rewritten.notes.join("; ") + " (backup " + patchBackup + ")");
+      }
+    } else {
+      say("profile patch: already wired");
+    }
+  }
+
+  // Earlier versions of this script appended an insert row to billion-context's
+  // own layer. That row is what step 6 removes; leaving the text behind would
+  // resurrect the row on the next bundle reset.
+  if (!dryRun && layerSource.includes(MARKER)) {
+    writeWithBackup(layerPath, layerHead.replace(/\s+$/, "") + "\n");
+    say("removed the old insert row from " + layerPath);
   }
 }
 
-// Earlier versions of this script appended an insert row to billion-context's
-// own layer. That row is what step 6 removes; leaving the text behind would
-// resurrect the row on the next bundle reset.
-if (!dryRun && layerSource.includes(MARKER)) {
-  writeWithBackup(layerPath, layerHead.replace(/\s+$/, "") + "\n");
-  say("removed the old insert row from " + layerPath);
+say("");
+say("");
+if (buildMode) {
+  say("built the installable package in " + wrapperDir + " (vendor/, lib/client.js, dsh.bundle.patch.yml).");
+  say("Nothing outside this checkout was touched. Commit the result: a plain");
+  say("'dsh plugin add' of this repository then installs a working plugin, no script to run.");
+} else {
+  say("done. Restart DSH. Settings > Plugins lists installed packages: " + WRAPPER + " is the only");
+  say("card for this feature set - billion-context and the accelerator no longer appear, because");
+  say("the profile no longer depends on them. Their files are copied into " + join(wrapperDir, "vendor") + ".");
+  say("To go back to the standalone plugins, install them again (and remove this package first):");
+  say("both forms register the same services and HTTP routes, so they must not run together.");
+  say("Both settings pages (billion-context and 模型请求加速) stay where they are.");
 }
-
-say("");
-say("");
-say("done. Restart DSH. Settings > Plugins lists installed packages: " + WRAPPER + " is the only");
-say("card for this feature set - billion-context and the accelerator no longer appear, because");
-say("the profile no longer depends on them. Their files are copied into " + join(wrapperDir, "vendor") + ".");
-say("To go back to the standalone plugins, install them again (and remove this package first):");
-say("both forms register the same services and HTTP routes, so they must not run together.");
-say("Both settings pages (billion-context and 模型请求加速) stay where they are.");

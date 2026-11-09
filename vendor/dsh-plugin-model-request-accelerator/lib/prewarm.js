@@ -1,0 +1,259 @@
+/**
+ * Pre-transmission support: finding the bytes a follow-up request is expected
+ * to repeat.
+ *
+ * A multi-turn conversation re-sends its whole history every step. The bytes up
+ * to the end of the last element are therefore identical between step N and step
+ * N+1, and only the assistant turn, the tool results and the user's next message
+ * are new. This module locates that boundary inside a serialized request body so
+ * the shared part can be put on the wire as soon as a request is captured,
+ * leaving only the increment to be written when the next request is issued.
+ *
+ * The boundary is only useful if the fixed fields travel inside it, and adapters
+ * put them after the conversation, so this module also moves the conversation to
+ * the end of the body — the one transformation here that rewrites a request.
+ *
+ * Pure string handling: no Cordis, no zlib, no globals.
+ *
+ * @module dsh-plugin-model-request-accelerator/prewarm
+ */
+
+/**
+ * Find the offset just past the last element of the named top-level array.
+ *
+ * The scan is string- and escape-aware, and depth-aware, so a nested array or a
+ * brace inside a message's text cannot end the prefix early. Scalars are not
+ * treated as elements, which is safe: a body whose last element is not an object
+ * simply yields the previous object's end, and the caller verifies the prefix
+ * against the real body before using it.
+ *
+ * @param json - the serialized request body.
+ * @param name - the quoted key to look for, e.g. `"messages"`.
+ * @returns the exclusive end offset of the last element, or `undefined` when the
+ *   body carries no array under that key.
+ */
+function arrayEndForKey(json, name) {
+	if (typeof json !== "string") return undefined;
+	const key = json.indexOf(name);
+	if (key === -1) return undefined;
+	const skipSpace = (from) => {
+		let at = from;
+		while (at < json.length && (json[at] === " " || json[at] === "\n" || json[at] === "\t" || json[at] === "\r")) at += 1;
+		return at;
+	};
+	let index = skipSpace(key + name.length);
+	if (json[index] !== ":") return undefined;
+	index = skipSpace(index + 1);
+	if (json[index] !== "[") return undefined;
+	index += 1;
+
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+	let lastEnd = -1;
+	for (; index < json.length; index += 1) {
+		const ch = json[index];
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (ch === "\\") escaped = true;
+			else if (ch === '"') {
+				inString = false;
+				if (depth === 0) lastEnd = index + 1;
+			}
+			continue;
+		}
+		if (ch === '"') {
+			inString = true;
+			continue;
+		}
+		if (ch === "{" || ch === "[") {
+			depth += 1;
+			continue;
+		}
+		if (ch === "}") {
+			depth -= 1;
+			if (depth === 0) lastEnd = index + 1;
+			continue;
+		}
+		if (ch === "]") {
+			if (depth === 0) break;
+			depth -= 1;
+			if (depth === 0) lastEnd = index + 1;
+		}
+	}
+	return lastEnd === -1 ? undefined : lastEnd;
+}
+
+/**
+ * The bytes a follow-up request is expected to repeat, or `undefined` when this
+ * body offers no shared prefix to pre-send.
+ * @param json - the serialized request body of the request that just finished.
+ * @returns the prefix text.
+ */
+/** Fields a conversation may live in, quoted, in preference order. */
+const CONVERSATION_KEYS = ['"messages"', '"input"'];
+
+/**
+ * Where the conversation array ends, whichever field carries it.
+ *
+ * `messages` is what chat-completions and Anthropic-shaped bodies use; `input`
+ * is what Responses-shaped ones use. A body whose `input` is a plain string has
+ * no append-only structure to share, and a body with neither returns `undefined`
+ * — so a protocol this cannot serve gets no pre-transmission rather than a wrong
+ * one.
+ *
+ * @param json - the serialized request body.
+ * @returns the offset just past the last conversation element.
+ */
+export function messagesPrefixEnd(json) {
+	if (typeof json !== "string") return undefined;
+	for (const name of CONVERSATION_KEYS) {
+		const end = arrayEndForKey(json, name);
+		if (end !== undefined) return end;
+	}
+	return undefined;
+}
+
+/**
+ * The bytes a follow-up request is expected to repeat, or `undefined` when this
+ * body offers no shared prefix to pre-send.
+ * @param json - the serialized request body of the request that just finished.
+ * @returns the prefix text.
+ */
+export function prewarmPrefix(json) {
+	const end = messagesPrefixEnd(json);
+	if (end === undefined || end === 0) return undefined;
+	return json.slice(0, end);
+}
+
+/**
+ * Whether two header sets are the same for pre-transmission purposes. A
+ * pre-opened request carries the previous request's headers, so a follow-up
+ * that differs anywhere — a compaction marker, a changed session id, a new
+ * credential — must not be served from it.
+ * @param prewarmed - the headers the pre-opened request was opened with.
+ * @param incoming - the headers of the request that actually arrived.
+ * @returns true when every incoming header matches, case-insensitively.
+ */
+export function headersMatch(prewarmed, incoming) {
+	const normalize = (headers) => {
+		const pairs = [];
+		if (headers === undefined || headers === null) return pairs;
+		if (typeof headers.forEach === "function" && typeof headers.get === "function") headers.forEach((value, key) => pairs.push([String(key).toLowerCase(), String(value)]));
+		else if (Array.isArray(headers)) for (const pair of headers) pairs.push([String(pair[0]).toLowerCase(), String(pair[1])]);
+		else if (typeof headers === "object") for (const key of Object.keys(headers)) pairs.push([key.toLowerCase(), String(headers[key])]);
+		return pairs.sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0));
+	};
+	const left = normalize(prewarmed);
+	const right = normalize(incoming);
+	if (left.length !== right.length) return false;
+	for (let index = 0; index < left.length; index += 1) {
+		if (left[index][0] !== right[index][0] || left[index][1] !== right[index][1]) return false;
+	}
+	return true;
+}
+
+/**
+ * Whether a pre-transmission attempt should be retried as an ordinary request.
+ *
+ * These are the statuses a gateway uses to refuse the *shape* of the request
+ * rather than its content — a body sent with `Transfer-Encoding: chunked` is
+ * what pre-transmission produces. Anything else is a real provider answer and
+ * is handed back untouched, so retry policy and error reporting stay the
+ * adapter's business.
+ * @param status - the pre-opened request's response status.
+ * @returns true when the same body should be sent again as a normal request.
+ */
+export function isShapeRejection(status) {
+	return status === 411 || status === 415 || status === 501;
+}
+
+/**
+ * Move the conversation to the end of the body, leaving every other field in the
+ * order the adapter chose. The conversation is whichever of `messages` and
+ * `input` the body carries — the name is historical, from when only the former
+ * existed.
+ *
+ * The pre-sent prefix is the *beginning* of the body, so any field that sits
+ * after it — the tool schemas above all, then the stream flag, the tool choice
+ * and the rest — can never be part of it and is uploaded again on every single
+ * request. JSON objects are unordered, so moving one key changes no
+ * meaning, only how much of the body can be put on the wire early. It does not
+ * make the request any smaller: it moves bytes off the critical path, it does not
+ * remove them.
+ *
+ * The transformation is deliberately minimal and refused whenever it cannot be
+ * proven byte-safe: the body must be exactly what `JSON.stringify` produces, so
+ * that re-serializing it leaves every field's own bytes alone, and only one key
+ * moves.
+ *
+ * @param body - the serialized request body.
+ * @returns the reordered body, or `undefined` to leave it exactly as it is.
+ */
+export function moveMessagesLast(body) {
+	if (typeof body !== "string") return undefined;
+	let parsed;
+	try {
+		parsed = JSON.parse(body);
+	} catch {
+		return undefined;
+	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+	const field = ["messages", "input"].find((name) => Object.hasOwn(parsed, name));
+	if (field === undefined) return undefined;
+	// Only plain `JSON.stringify` output can be reordered without touching any
+	// field's bytes; anything else is left alone.
+	if (JSON.stringify(parsed) !== body) return undefined;
+	const keys = Object.keys(parsed);
+	if (keys[keys.length - 1] === field) return undefined;
+	if (keys.length < 2) return undefined;
+	const reordered = {};
+	for (const key of keys) if (key !== field) reordered[key] = parsed[key];
+	reordered[field] = parsed[field];
+	const next = JSON.stringify(reordered);
+	return next === body ? undefined : next;
+}
+
+/**
+ * How long a member may sit without new bytes before claiming it stops being worth it.
+ *
+ * A held member is a half-written body: the far end is waiting for the rest of it, and a
+ * gateway that bounds how long a request body may stay idle will eventually abandon one.
+ * Claiming a member past that age writes its increment onto a stream — and a connection —
+ * that is already being torn down, and the write blocks until TCP gives up: measured on a
+ * real deployment the send phase was 3-5 ms while a member was fresh and up to 129 s once
+ * it had been held longer than the gateway's own body-idle limit.
+ *
+ * Half the hold window, capped at a minute: never past the point the pool would have
+ * expired the member anyway, and never so late that the far end is close to giving up.
+ * @param holdMs - the configured hold window.
+ * @returns the age past which a member is not worth claiming.
+ */
+export const staleClaimMs = (holdMs) => Math.min(60000, Math.floor(holdMs / 2));
+
+/**
+ * Pick the member an arriving body continues furthest.
+ *
+ * Members sit at different depths — an older one may have been advanced less far — and the
+ * deepest match leaves the least to write. A member whose bytes would line up but which has
+ * sat untouched for longer than `staleMs` is reported instead of chosen: it is the one most
+ * likely to be abandoned under the increment, and a full upload is cheaper than that.
+ * @param members - the conversation's held members.
+ * @param request - the arriving URL, body, headers, clock, and staleness bound.
+ * @returns the member to claim (or `undefined`), and the worst stale age seen.
+ */
+export const choosePrewarmMember = (members, { url, body, headers, now, staleMs }) => {
+	let member;
+	let staleIdleMs = 0;
+	for (const candidate of members) {
+		if (candidate.url !== url || candidate.settled === true || !body.startsWith(candidate.prefix)) continue;
+		if (!headersMatch(candidate.headers, headers)) continue;
+		const idle = now - candidate.lastWriteAt;
+		if (idle > staleMs) {
+			if (idle > staleIdleMs) staleIdleMs = idle;
+			continue;
+		}
+		if (member === undefined || candidate.prefix.length > member.prefix.length) member = candidate;
+	}
+	return { member, staleIdleMs };
+};

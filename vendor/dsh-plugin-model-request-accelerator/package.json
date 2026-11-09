@@ -1,0 +1,85 @@
+{
+  "name": "dsh-plugin-model-request-accelerator",
+  "version": "2.3.0",
+  "description": "Gzip request-body compression, HTTP/2 transport, pre-transmission, and request timing breakdown for DeepSeek Harness model calls",
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "files": [
+    "README.md",
+    "README.zh.md",
+    "cordis.patch.yml",
+    "docs",
+    "install.sh",
+    "lib",
+    "lib/client.js",
+    "lib/compress.js",
+    "lib/index.js",
+    "lib/ledger.js",
+    "lib/prewarm.js",
+    "lib/timing.js",
+    "lib/transport.js",
+    "lib/version.js",
+    "scripts"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "cordis-plugin",
+    "gzip",
+    "compression",
+    "llm",
+    "provider"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/No-ni/dsh-plugin-model-request-accelerator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/No-ni/dsh-plugin-model-request-accelerator/issues"
+  },
+  "homepage": "https://github.com/No-ni/dsh-plugin-model-request-accelerator#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/host.test.mjs test/client.test.mjs test/timing.test.mjs test/prewarm.test.mjs test/transport.test.mjs test/version.test.mjs test/install.test.mjs test/migrate.test.mjs test/docs.test.mjs"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "zod": "^4.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-storage-domain": "^0.1.5-rc.2 || ^0.2.0-rc.2"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-storage-domain": "^0.2.0-rc.2"
+  },
+  "meta": {
+    "title": "模型请求加速",
+    "description": "压缩请求体、预传输共享历史，并分解每次请求的耗时。"
+  }
+}

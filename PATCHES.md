@@ -4,7 +4,7 @@
 - 本分支基线：**0.1.212**（commit `daa082ea`）
 - 完整 diff：[`patches/upstream-0.1.212.diff`](./patches/upstream-0.1.212.diff)
 
-改动分两类：`dist/index.js` 里的出口压缩（第 1–4 节，见上面的 diff），以及**安装期**生成的一体化包装包（第 5 节，源码在 `package/`）。
+改动分两类：`dist/index.js` 里的出口压缩（第 1–4 节，见上面的 diff），以及**安装期**生成的一体化包装包（第 5 节，源码在仓库根）。
 
 ## 1. 出口压缩
 
@@ -71,17 +71,17 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 
 ## 5. 一体化层：一个包挂三样东西（0.2.0 起，0.2.1 加自检）
 
-这一处不在 `dist/index.js` 里，源码是 `package/`，由 `scripts/install.mjs` 在安装时生成到 `<profile>/plugins/bili-context-patch`。
+这一处不在 `dist/index.js` 里：源码是仓库根的 `lib/` 与 `package.json`，生成物（`vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml`）由 `node scripts/install.mjs --build` 写进仓库，安装时整包被复制到 `<profile>/plugins/bili-context-patch`（或由包管理器装进 `node_modules`）。
 
 **为什么需要它**：「设置 → 插件」**一个装好的包一张卡**——卡片列表来自 profile 的 `dependencies`，卡片开关是 `dsh.profile.bundles` 的投影（`readProfilePlugins` 里 `enabled: bundles.includes(name)`）。只要 bili 与加速器各自还是被依赖的包，就必然是两张卡，改标题只能改字面。0.2.0 起 profile 只依赖这一个包，两个上游的**文件被复制**进它的 `vendor/`。
 
 **怎么做的**：
 
 - **源码复制**：`install.mjs` 把 bili 的 `package.json`、`dist/index.js`（打过补丁的构建）、`dist/build-info.json`、`dist/agent/{dsh-native,dsh-compaction-gate,dsh-native-client}.js`、`dsh.bundle.patch.yml`，以及加速器的 `package.json` + `lib/*.js` 复制进 `plugins/bili-context-patch/vendor/`（约 9.6 MB）。bili 的 `node_modules`（mysql2、zod）不需要：它的两个主机入口都是打包产物，只 import `node:module`，代理脚本由入口按自身路径找到（`nativeProxyScriptPath` = `dist/index.js`）。这份副本是**派生的**，每次运行重建。
-- `package/lib/index.js`（主机半侧）——一个条目内 `ctx.plugin()` 依次挂载 bili、压缩闸门、加速器，三者都从生成的 `lib/upstream.js` 引入；那个文件用相对路径 `../vendor/...` 导出三者（`export * as bili from ...`），所以**没有任何裸包名**需要被 profile 解析；
+- `lib/index.js`（主机半侧）——一个条目内 `ctx.plugin()` 依次挂载 bili、压缩闸门、加速器，三者都从生成的 `lib/upstream.js` 引入；那个文件用相对路径 `../vendor/...` 导出三者（`export * as bili from ...`），所以**没有任何裸包名**需要被 profile 解析；
 - **设置命名空间**：`@deepseek-ai/dsh-settings` 的 `describe()` 用 `entry.options.id` 当 `ns`，并且只在 `entry.fiber.runtime.Config` 存在时才投影该条目。所以包装包必须 `export const Config = accelerator.Config`，否则条目 id 一变，`模型请求加速` 那一页就没有 schema 可读；
 - **配置的活性**：条目的 `.volatile()` 字段不是普通值，而是设置服务原地维护的活访问器（Cordis 的 volatile 更新路径 `volatileEntries(fiber.effectiveConfig)` 只换值、不重启 fiber）。`resolveConfig(runtime, config)` 在 `runtime.Config` 不存在时**原样返回 config**，因此加速器以 `{ ...accelerator, Config: undefined }` 挂载，访问器一路到达它的 `plainConfig()`；二次解析会把访问器冻成快照，渠道开关就不即时了；
-- `package/lib/client.template.js`（浏览器半侧）——安装时把两个包客户端 bundle 的工厂体（`window.__ModuleLoader__.load({id, factory})` 里面的那段）切出来，合进同一个 `id: "bili-context-patch"` 的工厂，两个 half 依次 apply、`inject` 取并集。加速器客户端 `lib/client.js:23` 的 `const NS = "model-request-accelerator"` 会被改写成 `"bili-context-patch"`（它按命名空间找文档、注册分区），原文必须恰好出现一次，否则脚本报错退出；包装清单补上 `dsh.client.inject: ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-ui-settings"]`，客户端模块按它决定到达顺序；
+- `lib/client.template.js`（浏览器半侧）——安装时把两个包客户端 bundle 的工厂体（`window.__ModuleLoader__.load({id, factory})` 里面的那段）切出来，合进同一个 `id: "bili-context-patch"` 的工厂，两个 half 依次 apply、`inject` 取并集。加速器客户端 `lib/client.js:23` 的 `const NS = "model-request-accelerator"` 会被改写成 `"bili-context-patch"`（它按命名空间找文档、注册分区），原文必须恰好出现一次，否则脚本报错退出；包装清单补上 `dsh.client.inject: ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-ui-settings"]`，客户端模块按它决定到达顺序；
 - **组合层**——复制 bili 的 `dsh.bundle.patch.yml`，删掉开头那条 `- insert:`（`bili-native` 与 `bili-compaction-gate` 改由代码挂载），换成本包装包自己的一条 `insert`（被列进 `dsh.profile.bundles` 的包只提供 patch 层，不会自己变成 Loader 条目），`compaction-basic.auto:false`、四个 preset 的 `inject: [biliBasicCompactionPolicy]`、`llm-deepseek(-account)` 的 retryPolicy 全部保留。
 
 **上游两个包怎么不见的**：不是被关掉，是**不再被装**。安装脚本从 `dependencies` 删掉 `billion-context` 与 `dsh-plugin-model-request-accelerator` 两行（它们不再是运行时依赖），`dsh.profile.bundles` 里同样只留包装包。没有依赖就没有卡片，没有清单项就没有 Loader 条目。
@@ -128,9 +128,9 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 
 ## 9. 检查更新
 
-包装包自带一个更新入口，路径 `/api/bili-context-patch/version`：`GET` 查版本，`POST ?action=update` 执行更新，由 `package/lib/index.js` 通过 `connection.fetch.register` 注册。
+包装包自带一个更新入口，路径 `/api/bili-context-patch/version`：`GET` 查版本，`POST ?action=update` 执行更新，由 `lib/index.js` 通过 `connection.fetch.register` 注册。
 
-- `GET` 读本机 `plugins/bili-context-patch/package.json` 的 `version`，再读 `https://raw.githubusercontent.com/No-ni/billion-context-patched/main/package/package.json` 的 `version`；两边都是三位数字才比较，返回 `{ version, latest, updateAvailable }`。
+- `GET` 读本机 `plugins/bili-context-patch/package.json` 的 `version`，再读 `https://raw.githubusercontent.com/No-ni/billion-context-patched/main/package.json` 的 `version`；两边都是三位数字才比较，返回 `{ version, latest, updateAvailable }`。
 - `POST ?action=update` 在安装时记下的 `patchRepo` 里跑 `git pull --ff-only`，随后用同一个 Node 进程执行 `scripts/install.mjs`（`ELECTRON_RUN_AS_NODE=1`），返回 `{ ok, from, to, output }`。同一时刻只跑一个更新，第二个请求等第一个。
 
 设置页那行「版本 / 检查更新」是加速器自带的 UI。安装脚本在合并客户端 bundle 时改写三个字面量，让它指向本补丁包：

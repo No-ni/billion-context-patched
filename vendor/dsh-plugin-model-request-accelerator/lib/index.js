@@ -1,0 +1,1694 @@
+/**
+ * Per-provider request-body compression, pre-transmission, and timing for model
+ * requests.
+ *
+ * Response compression is already on in Node: undici's `fetch` sends
+ * `accept-encoding: gzip, deflate` by default and decompresses the reply, so
+ * there is nothing to enable on that side. The switch that actually moves
+ * bytes is the **request** direction: a long body is compressed — brotli by
+ * default, gzip where brotli is unavailable or refused — and announced with the
+ * matching `content-encoding`. On a real session that is 3.8 MB down to 1.46 MB,
+ * and what matters beyond the ratio is that the fixed fields can then be
+ * pre-transmitted, leaving a few hundred bytes for the request itself to write.
+ *
+ * The adapter seam offers no header hook — both shipped adapters call the
+ * global `fetch` directly — so this plugin owns that seam: it patches
+ * `globalThis.fetch` for the lifetime of its fiber and rewrites only requests
+ * it can attribute to an enabled provider.
+ *
+ * Attribution comes from the `llm/stream` waterfall, wrapped in an
+ * `AsyncLocalStorage` scope so the provider identity survives the adapter's
+ * internal `await`s and cannot be confused by concurrent streams. When a
+ * request arrives with no attribution (a hand-built call), the endpoint index
+ * is used as a fallback.
+ *
+ * @module dsh-plugin-model-request-accelerator
+ */
+
+import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { AsyncLocalStorage } from "node:async_hooks";
+import diagnosticsChannel from "node:diagnostics_channel";
+import { performance } from "node:perf_hooks";
+import { constants as zlibConstants, brotliCompressSync, createBrotliCompress, createGzip, gzipSync } from "node:zlib";
+import z from "@deepseek-ai/schemastery";
+import {
+	compilePolicies,
+	DEFAULT_MIN_BYTES,
+	indexEndpoints,
+	planCompression,
+	readEndpoint,
+	readHeader,
+	resolvePolicy,
+	withEncodingHeader,
+	withExtraHeader
+} from "./compress.js";
+import { choosePrewarmMember, isShapeRejection, messagesPrefixEnd, moveMessagesLast, prewarmPrefix, staleClaimMs } from "./prewarm.js";
+import { openLedger } from "./ledger.js";
+import { isNewer, versionFromPackage } from "./version.js";
+import { createTimingStore } from "./timing.js";
+import { createTransport } from "./transport.js";
+import { randomUUID } from "node:crypto";
+
+/**
+ * Encode one request body. Brotli is preferred when the runtime has it — on the
+ * JSON these adapters send it is typically 5–15% smaller than gzip — and it is
+ * an endpoint's refusal, not a guess, that moves a route back to gzip.
+ * @param text - the serialized request body.
+ * @param encoding - `'br'` or `'gzip'`.
+ * @returns the compressed bytes.
+ */
+function encodeBody(text, encoding) {
+	const buffer = Buffer.from(text, "utf8");
+	return encoding === "br" ? brotliCompressSync(buffer, { params: brotliParams(buffer.length) }) : gzipSync(buffer);
+}
+
+/**
+ * Brotli parameters that are worth their own cost.
+ *
+ * Brotli defaults to quality 11, which spends about a second of CPU per
+ * megabyte — synchronously, in the request path, for roughly another 15% over
+ * quality 9. Quality 9 is a few percent better than gzip at a comparable time,
+ * which is the trade this plugin wants. The size hint lets the encoder size its
+ * window up front.
+ * @param size - the body size, when it is known.
+ * @returns the zlib parameters.
+ */
+function brotliParams(size) {
+	const params = { [zlibConstants.BROTLI_PARAM_QUALITY]: 9 };
+	if (Number.isFinite(size) && size > 0) params[zlibConstants.BROTLI_PARAM_SIZE_HINT] = size;
+	return params;
+}
+
+/** Host plugin name; also the settings namespace this plugin owns. */
+export const name = "model-request-accelerator";
+
+/** Settings namespace key. Must be a lowercase hyphenated identifier. */
+export const NS = name;
+
+/** Header this plugin adds; its presence means the request is already compressed. */
+const CONTENT_ENCODING = "content-encoding";
+
+/** Composition base: everything off until the user opts a provider in. */
+const BASE = { providers: {} };
+
+/** How long a pre-opened request is held open by default. */
+const DEFAULT_PREWARM_HOLD_MS = 120000;
+
+/**
+ * How many held requests one conversation keeps. They are opened at staggered
+ * moments and advanced as content becomes known, so they carry progressively
+ * longer prefixes; a request claims the deepest one it continues. More members
+ * mean a longer lead time and more connections held open.
+ */
+const DEFAULT_PREWARM_POOL_SIZE = 2;
+
+/** How long a changed session's ledger waits before it is written. */
+const SAVE_DEBOUNCE_MS = 300;
+
+/** Multiple of the per-conversation pool that may be held across all conversations. */
+const TOTAL_HELD_MULTIPLIER = 8;
+
+/** Whether this runtime can brotli-encode at all. */
+const BROTLI_AVAILABLE = typeof brotliCompressSync === "function" && typeof createBrotliCompress === "function";
+
+/** How many leading bytes two strings share. */
+function sharedBytes(a, b) {
+	if (typeof a !== "string" || typeof b !== "string") return 0;
+	const max = Math.min(a.length, b.length);
+	let index = 0;
+	while (index < max && a.charCodeAt(index) === b.charCodeAt(index)) index += 1;
+	return index;
+}
+
+/** The installed package root — this file lives in its `lib/`. */
+const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/** How long the published version may take to answer. */
+const UPDATE_FETCH_TIMEOUT_MS = 5000;
+
+/** How long a fast-forward pull may take. */
+const UPDATE_PULL_TIMEOUT_MS = 60000;
+
+/** Authenticated browser route reporting what real traffic taught us per endpoint. */
+const ENDPOINTS_PATH = "/api/model-request-accelerator/endpoints";
+
+/** Authenticated browser route for the version and the update action. */
+const VERSION_PATH = "/api/model-request-accelerator/version";
+
+/** Authenticated browser route serving the timing ledger. */
+const TIMINGS_PATH = "/api/model-request-accelerator/timings";
+
+/** Authenticated browser route reporting the ledger's size, and clearing it. */
+const LEDGER_PATH = "/api/model-request-accelerator/ledger";
+
+/** The undici diagnostic that identifies one request, emitted before any socket I/O. */
+const REQUEST_CREATED_CHANNEL = "undici:request:create";
+
+/** undici transport diagnostics consumed per measurement, as `channel -> sink`. */
+const TRANSPORT_CHANNELS = [
+	["undici:request:bodySent", "phase:body-sent"],
+	["undici:request:headers", "phase:headers"],
+	["undici:request:bodyChunkReceived", "response-bytes"]
+];
+
+/**
+ * Durable settings section. Routes are dynamic (they mirror the deployment's
+ * configurable providers), so the per-route policy is a dict rather than a
+ * fixed field list.
+ */
+export const Config = z.object({
+	providers: z.dict(z.object({
+		enabled: z.boolean().default(false).description("Send this provider's model requests compressed."),
+		minBytes: z.number().step(1).min(0).default(DEFAULT_MIN_BYTES).description("Skip compression below this request-body size, in bytes."),
+		prewarm: z.boolean().default(false).description("Put this conversation's shared history on the wire before the next request needs it, leaving only the increment for the real request. Needs an endpoint that accepts a chunked body."),
+		http2: z.boolean().description("Send this provider's model requests over HTTP/2 when the endpoint negotiates it, falling back to the default transport when it does not. Defaults to on for a provider that pre-transmits."),
+		encoding: z.union([z.const("auto"), z.const("gzip")]).description("Request-body algorithm for this provider. Overrides the section default.")
+	})).default({}).volatile().description("Per-provider request-body policy."),
+	encoding: z.union([z.const("auto"), z.const("gzip")]).default("auto").volatile().description("Request-body algorithm. `auto` prefers brotli and falls back to gzip when the runtime lacks it or the endpoint refuses it; `gzip` never tries brotli."),
+	prewarmHoldMs: z.number().step(1).min(1000).default(DEFAULT_PREWARM_HOLD_MS).volatile().description("How long a pre-opened request may sit idle before it is abandoned. The timer restarts whenever it advances."),
+	prewarmPoolSize: z.number().step(1).min(1).default(DEFAULT_PREWARM_POOL_SIZE).volatile().description("How many pre-opened requests one conversation keeps. More means a longer lead time and more connections held open."),
+	http2: z.boolean().default(true).volatile().description("Offer HTTP/2 to every provider that has it enabled. `false` is the plugin-wide kill switch."),
+	allowInsecureH2c: z.boolean().default(false).volatile().description("Also use HTTP/2 for `http://` endpoints, over a cleartext connection with no certificate. Only for a link you trust."),
+	timing: z.boolean().default(true).volatile().description("Record request timings and offer the Request timing view beside the Trajectory.")
+});
+
+/**
+ * The origin of a full request URL, for comparing an endpoint against the
+ * origins the h2 transport has abandoned. A protocol swap is an origin-level
+ * decision, so an unparseable URL has no origin to compare.
+ * @param url - a full request URL, as a provider declares it.
+ * @returns its origin, or `undefined`.
+ */
+function originOf(url) {
+	try {
+		return new URL(url).origin;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Read one header out of an undici diagnostics payload.
+ *
+ * The two protocols deliver the same information in two different shapes, and
+ * undici passes each through as it received it: HTTP/1.1 gives a flat list of
+ * alternating Buffer names and values — not a map, so it has to be walked —
+ * while HTTP/2 gives a plain object. Reading only the list shape does not fail
+ * loudly on h2, it silently reports "no content-encoding", which is exactly the
+ * kind of wrong that looks like a working panel.
+ *
+ * @param headers - the diagnostic's `response.headers`.
+ * @param name - lower-cased header name to find.
+ * @returns the decoded value, or `undefined` when the header is absent.
+ */
+export function diagnosticHeader(headers, name) {
+	const decode = (value) => (Buffer.isBuffer(value) ? value.toString("latin1") : String(value));
+	if (Array.isArray(headers)) {
+		for (let index = 0; index + 1 < headers.length; index += 2) {
+			if (decode(headers[index]).toLowerCase() !== name) continue;
+			return decode(headers[index + 1]);
+		}
+		return undefined;
+	}
+	if (headers === null || typeof headers !== "object") return undefined;
+	// HTTP/2 pseudo-headers arrive in the same object; they never collide with a
+	// real header name because every one of them is prefixed with a colon.
+	for (const key of Object.keys(headers)) {
+		if (key.toLowerCase() !== name) continue;
+		return decode(headers[key]);
+	}
+	return undefined;
+}
+
+/**
+ * Register the settings section and its legacy namespace, attribute streaming
+ * calls to their provider, patch the global `fetch` for the lifetime of this
+ * plugin's fiber, serve the timing, endpoint-state and version routes, and open
+ * the durable ledger.
+ * @param ctx - Host context.
+ */
+export function apply(ctx, config) {
+	const attribution = new AsyncLocalStorage();
+	const state = { policies: new Map(), byEndpoint: new Map(), timing: true, prewarmHoldMs: DEFAULT_PREWARM_HOLD_MS, prewarmPoolSize: DEFAULT_PREWARM_POOL_SIZE, http2: true, allowInsecureH2c: false };
+
+	/**
+	 * Endpoints that answered a brotli-encoded request with a shape rejection. A
+	 * request body has no negotiation, so this is how "brotli is not usable here"
+	 * gets learned — once, rather than on every request. It is per plugin
+	 * instance, so a reload re-learns at the cost of one request.
+	 */
+	const brotliRefused = new Set();
+
+	/**
+	 * Endpoints that rejected a body with its conversation moved to the end. JSON objects
+	 * are unordered, so this should not happen — but a hand-rolled relay may match
+	 * on the body's shape, and one wasted request is a cheaper way to find that out
+	 * than a broken conversation. Per plugin instance, like the other refusals, so
+	 * reloading the plugin starts the learning over instead of inheriting a
+	 * decision made by code that no longer exists.
+	 */
+	const reorderRefused = new Set();
+	// A plugin that exports `Config` is projected by the settings service, and the
+	// row's live values arrive here as `config`. There is no `installSection` to call:
+	// the service registers what a plugin declares, not what it asks for.
+	let source = () => (config !== null && typeof config === "object" ? config : BASE);
+
+	/**
+	 * Recompile the stored policy and the `endpoint -> routes` index. Provider
+	 * endpoints live in *other* plugins' settings namespaces, so this runs again
+	 * whenever any namespace changes or the adapter directory moves.
+	 */
+	/**
+	 * Resolve one config value, unwrapping a `volatile` field.
+	 *
+	 * A field marked `.volatile()` — which the settings service requires before it will
+	 * project a plugin at all — validates into a live accessor rather than a plain
+	 * value: `{ get, [Symbol(cosmokit.volatile.write)] }`, whose own keys are just
+	 * `get`. Everything below wants plain values, so the accessor is read here once.
+	 */
+	const plainConfig = (value) => {
+		if (value === null || typeof value !== "object") return value;
+		const live = Object.getOwnPropertySymbols(value).some((key) => String(key).includes("cosmokit.volatile"));
+		if (live && typeof value.get === "function") return plainConfig(value.get());
+		if (Array.isArray(value)) return value.map(plainConfig);
+		const out = {};
+		for (const key of Object.keys(value)) out[key] = plainConfig(value[key]);
+		return out;
+	};
+
+	const refresh = () => {
+		const section = plainConfig(source());
+		state.policies = compilePolicies(section);
+		state.timing = section?.timing !== false;
+		state.prewarmHoldMs = Number.isFinite(section?.prewarmHoldMs) && section.prewarmHoldMs >= 1000 ? section.prewarmHoldMs : DEFAULT_PREWARM_HOLD_MS;
+		state.prewarmPoolSize = Number.isFinite(section?.prewarmPoolSize) && section.prewarmPoolSize >= 1 ? Math.floor(section.prewarmPoolSize) : DEFAULT_PREWARM_POOL_SIZE;
+		state.http2 = section?.http2 !== false;
+		state.allowInsecureH2c = section?.allowInsecureH2c === true;
+		const directory = ctx.get("llm")?.listConfigurableProviders?.() ?? [];
+		// A provider's endpoint lives in *another* plugin's namespace, and the settings
+		// service exposes those through one document rather than per-key reads.
+		let descriptors = [];
+		try {
+			descriptors = ctx.get("settings")?.describe?.() ?? [];
+		} catch (error) {
+			ctx.logger?.warn?.("model-request-accelerator: could not read the settings document");
+			ctx.logger?.warn?.(error);
+		}
+		const byNamespace = new Map(descriptors.map((entry) => [entry.ns, entry.value]));
+		const endpoints = new Map();
+		for (const entry of directory) {
+			endpoints.set(entry.provider, readEndpoint(byNamespace.get(entry.settingsNs), entry.settingsPath));
+		}
+		state.byEndpoint = indexEndpoints(endpoints);
+	};
+
+	// Declaring `Config` lets the Host read this plugin's schema; registering a page
+	// policy is what puts the entry into the settings document at all — without it the
+	// page has nothing to read and renders read-only with its defaults.
+	ctx.inject(["settings"], (settingsCtx) => {
+		try {
+			ctx.effect(() => settingsCtx.settings.configure({ auto: true }));
+		} catch (error) {
+			ctx.logger?.warn?.("model-request-accelerator: could not register a settings page policy");
+			ctx.logger?.warn?.(error);
+		}
+	});
+
+	// One profile entry's form values changed: recompile, since the endpoint index and
+	// every policy read the same document.
+	ctx.on("settings/document-updated", () => {
+		refresh();
+	});
+	/**
+	 * The durable half of the timing ledger. These records describe one
+	 * conversation, so they are stored per session and outlive a restart. A
+	 * deployment without a storage backend leaves this undefined and the ledger
+	 * stays memory-only, which is what it was before.
+	 */
+	let ledger;
+	/**
+	 * Look for a session's stored history, once per process.
+	 *
+	 * Called before a session's first record is numbered as well as from the route:
+	 * restored ids have to be known before the first live one is allocated, or the
+	 * merged list would carry duplicates.
+	 * @param sessionId - the session key.
+	 */
+	const consultLedger = (sessionId) => {
+		if (ledger === undefined || sessionId === null || sessionId === undefined || consulted.has(sessionId)) return;
+		consulted.add(sessionId);
+		try {
+			timing.seed(sessionId, ledger.read(sessionId));
+		} catch (error) {
+			ledger = undefined;
+			ctx.logger?.warn?.("model-request-accelerator: the durable timing store could not be read; showing only this run");
+			ctx.logger?.warn?.(error);
+		}
+	};
+	/** Debounced writes, one per session, so a burst of requests writes once. */
+	const pendingWrites = new Map();
+	/** Sessions whose stored history has been looked for in this process. */
+	const consulted = new Set();
+
+	/** Persist one session's rows shortly after they change. */
+	const scheduleSave = (sessionId) => {
+		if (ledger === undefined || sessionId === null || sessionId === undefined) return;
+		clearTimeout(pendingWrites.get(sessionId));
+		pendingWrites.set(sessionId, setTimeout(() => {
+			pendingWrites.delete(sessionId);
+			Promise.resolve(ledger.write(sessionId, timing.snapshot(sessionId))).catch((error) => {
+				ctx.logger?.warn?.("model-request-accelerator: could not persist the timing ledger");
+				ctx.logger?.warn?.(error);
+			});
+		}, SAVE_DEBOUNCE_MS));
+	};
+
+	ctx.inject(["storage"], (storageCtx) => {
+		openLedger(storageCtx.get("storage"), (message) => ctx.logger?.warn?.(message)).then((opened) => {
+			ledger = opened;
+		}, (error) => {
+			ctx.logger?.warn?.("model-request-accelerator: could not open the durable timing store");
+			ctx.logger?.warn?.(error);
+		});
+	});
+
+	// Writes still queued belong on disk before the domain closes under them.
+	ctx.effect(() => () => {
+		const queued = [...pendingWrites.entries()];
+		pendingWrites.clear();
+		const flushes = queued.map(([sessionId, timer]) => {
+			clearTimeout(timer);
+			if (ledger === undefined) return Promise.resolve();
+			return Promise.resolve(ledger.write(sessionId, timing.snapshot(sessionId))).catch(() => {});
+		});
+		return Promise.all(flushes).then(() => (ledger === undefined ? undefined : ledger.close().catch(() => {})));
+	});
+	ctx.on("llm/adapters-updated", () => {
+		refresh();
+	});
+	refresh();
+
+	/** Monotonic clock for phase durations; the wall clock is for display only. */
+	const timing = createTimingStore({ now: () => performance.now(), wallNow: () => Date.now() });
+
+	/**
+	 * The HTTP/2 transport. It is optional by construction: a deployment where no
+	 * copy of undici is resolvable simply keeps using the built-in transport, so h2
+	 * is an upgrade and never a dependency. The protocol actually used is read from
+	 * each response, not assumed from the fact that h2 was asked for.
+	 */
+	const transport = createTransport({
+		log: (message) => ctx.logger?.warn?.(message)
+	});
+
+	//#region pre-transmission
+
+	/**
+	 * Held requests per conversation, oldest first.
+	 *
+	 * The pool exists because a request's worth of bytes does not reach the far
+	 * end instantly: the longer the history, the longer a relay chain needs to
+	 * carry it. Members are therefore opened at staggered moments and kept
+	 * advancing, so whichever one is consumed has already been in flight for
+	 * several steps rather than for one.
+	 */
+	const prewarms = new Map();
+
+	/**
+	 * Endpoints that answered a pre-transmitted request badly, and how many times
+	 * in a row. This is the one thing shared across agents on purpose: whether an
+	 * endpoint will take a chunked body is a property of the endpoint, not of the
+	 * conversation asking. It is also the reason a transient server error must not
+	 * condemn it — a single 5xx or rate limit would otherwise switch
+	 * pre-transmission off for every agent until the process restarts.
+	 */
+	const prewarmBlocked = new Set();
+	const endpointFailures = new Map();
+
+	/** Consecutive failures an endpoint may answer before it is given up on. */
+	const MAX_ENDPOINT_FAILURES = 3;
+
+	/** Record one bad answer, condemning the endpoint only on repetition. */
+	const noteEndpointFailure = (url, status) => {
+		if (isShapeRejection(status)) {
+			// It will not take a chunked body at all; retrying cannot help.
+			prewarmBlocked.add(url);
+			endpointFailures.delete(url);
+			ctx.logger?.warn?.(`model-request-accelerator: ${url} answered ${status} to a pre-transmitted request; pre-transmission is off for it`);
+			return;
+		}
+		const count = (endpointFailures.get(url) ?? 0) + 1;
+		endpointFailures.set(url, count);
+		if (count < MAX_ENDPOINT_FAILURES) {
+			ctx.logger?.warn?.(`model-request-accelerator: ${url} answered ${status} to a pre-transmitted request (${count}/${MAX_ENDPOINT_FAILURES})`);
+			return;
+		}
+		prewarmBlocked.add(url);
+		endpointFailures.delete(url);
+		ctx.logger?.warn?.(`model-request-accelerator: ${url} answered ${status} ${count} times in a row to pre-transmitted requests; pre-transmission is off for it`);
+	};
+
+	/** The key a conversation's members are filed under, or `undefined` to skip it. */
+	const prewarmKey = (scope) => {
+		if (scope.prewarm !== true || scope.provider === undefined) return undefined;
+		// Compaction and title requests carry a different history, and a different
+		// body shape; they neither open nor consume held requests.
+		if (scope.purpose !== null && scope.purpose !== undefined) return undefined;
+		return `${scope.sessionId ?? ""}\u0000${scope.provider}\u0000${scope.model ?? ""}`;
+	};
+
+	/** A plain header copy, so two header sets can be compared and reused. */
+	const plainHeaders = (headers) => {
+		const out = {};
+		if (headers === undefined || headers === null) return out;
+		if (typeof headers.forEach === "function" && typeof headers.get === "function") headers.forEach((value, key) => { out[key] = value; });
+		else if (Array.isArray(headers)) for (const pair of headers) out[String(pair[0])] = pair[1];
+		else if (typeof headers === "object") for (const key of Object.keys(headers)) out[key] = headers[key];
+		return out;
+	};
+
+	/**
+	 * Encode one body in parts whose concatenation is a single valid stream: a
+	 * second codec member would break decompression and a second JSON chunk would
+	 * double the framing, so each codec keeps ONE stream open across every part and
+	 * flushes it between them — a sync flush for gzip, a brotli flush for brotli —
+	 * so a receiver sees one body however many parts it arrived in.
+	 */
+	const createWireEncoder = (encoding) => {
+		if (encoding !== "br" && encoding !== "gzip") {
+			const encoder = new TextEncoder();
+			return {
+				async write(text) {
+					return encoder.encode(text);
+				},
+				async finish(text) {
+					return encoder.encode(text);
+				},
+				dispose() {}
+			};
+		}
+		const stream = encoding === "br" ? createBrotliCompress({ params: brotliParams(0) }) : createGzip();
+		const flushKind = encoding === "br" ? zlibConstants.BROTLI_OPERATION_FLUSH : zlibConstants.Z_SYNC_FLUSH;
+		const chunks = [];
+		let drained = 0;
+		stream.on("data", (chunk) => chunks.push(chunk));
+		const take = () => {
+			const next = Buffer.concat(chunks).subarray(drained);
+			drained += next.length;
+			return next;
+		};
+		const flush = (text, end) => new Promise((resolve, reject) => {
+			stream.once("error", reject);
+			const done = () => {
+				stream.removeListener("error", reject);
+				resolve(take());
+			};
+			if (end === true) {
+				stream.once("end", done);
+				stream.end(Buffer.from(text));
+				return;
+			}
+			stream.write(Buffer.from(text));
+			stream.flush(flushKind, done);
+		});
+		return {
+			async write(text) {
+				return flush(text, false);
+			},
+			async finish(text) {
+				// `end(chunk, callback)` reports the write, not the drain: waiting on
+				// it would hand back a truncated body with no gzip footer.
+				return flush(text, true);
+			},
+			dispose() {
+				try {
+					stream.destroy();
+				} catch {}
+			}
+		};
+	};
+
+	/** Set once the plugin is disposed, so an in-flight sync cannot open more. */
+	let prewarmDisposed = false;
+
+	/**
+	 * The undici request each measurement is currently listening to.
+	 *
+	 * A held member's request is created while the *previous* step's stream is
+	 * still the ambient context, so it must not be attributed then — it is
+	 * recorded here instead and re-pointed at the measurement that claims it.
+	 * Without that, a pre-transmitted row would lose its transport phases and the
+	 * previous row would be charged with its response bytes.
+	 */
+	const requestOwner = new WeakMap();
+
+	/** The member whose `fetch` is being called right now, if any. */
+	let openingMember;
+
+	/** The members filed for one conversation. */
+	const membersOf = (key) => prewarms.get(key) ?? [];
+
+	/**
+	 * One pool mutation at a time, per conversation.
+	 *
+	 * Syncing is fire-and-forget, so without this a sync started by the previous
+	 * step can still be running when the next request claims a member — and it can
+	 * decide that same member is stale and abort it out from under the handover.
+	 * That is not hypothetical: it is what a claimed request failing mid-flight
+	 * looks like, and it costs the whole upload.
+	 */
+	const poolLocks = new Map();
+	const withPoolLock = (key, operation) => {
+		const previous = poolLocks.get(key) ?? Promise.resolve();
+		const result = previous.then(operation, operation);
+		const settled = result.then(() => {}, () => {});
+		poolLocks.set(key, settled);
+		// Drop the entry once it is the tail of the chain, so a process that sees
+		// many conversations does not keep a promise per conversation forever.
+		settled.then(() => {
+			if (poolLocks.get(key) === settled) poolLocks.delete(key);
+		});
+		return result;
+	};
+
+	/**
+	 * Restart a member's hold timer. A member that has just been advanced is
+	 * provably still wanted — the conversation moved on and its bytes were still a
+	 * prefix — so the timer measures idleness, not age. Without this, a long step
+	 * retires the member that the following request was going to use.
+	 */
+	const refreshHold = (entry) => {
+		if (entry.dropped === true) return;
+		clearTimeout(entry.timer);
+		entry.timer = setTimeout(() => dropMember(entry), state.prewarmHoldMs);
+	};
+
+	/**
+	 * Keep the number of open held requests bounded in total, across every
+	 * conversation, by retiring the oldest first. The per-conversation pool is
+	 * what buys lead time; this only stops many conversations from multiplying it
+	 * without limit.
+	 */
+	const enforceTotalCap = () => {
+		const cap = state.prewarmPoolSize * TOTAL_HELD_MULTIPLIER;
+		let total = 0;
+		for (const list of prewarms.values()) total += list.length;
+		while (total > cap) {
+			let oldest;
+			for (const list of prewarms.values()) {
+				for (const member of list) if (oldest === undefined || member.createdAt < oldest.createdAt) oldest = member;
+			}
+			if (oldest === undefined) break;
+			dropMember(oldest);
+			total -= 1;
+		}
+	};
+
+	/** Abandon one held request: stop its timer, fail its body, close its socket. */
+	const dropMember = (entry) => {
+		if (entry.dropped === true) return;
+		entry.dropped = true;
+		clearTimeout(entry.timer);
+		for (const [key, list] of prewarms) {
+			const next = list.filter((member) => member !== entry);
+			if (next.length === list.length) continue;
+			if (next.length === 0) prewarms.delete(key);
+			else prewarms.set(key, next);
+		}
+		try {
+			entry.encoder.dispose();
+		} catch {}
+		try {
+			entry.stream.error(new Error("pre-transmission abandoned"));
+		} catch {}
+		try {
+			entry.abort.abort();
+		} catch {}
+	};
+
+	/** Abandon every member of one conversation, and the pool with it. */
+	const dropPool = (key) => {
+		for (const entry of [...membersOf(key)]) dropMember(entry);
+		prewarms.delete(key);
+	};
+
+	/** Open one held request carrying `prefix`, and put that prefix on the wire. */
+	const openMember = async (descriptor, prefix) => {
+		const encoder = createWireEncoder(descriptor.encoding);
+		let head;
+		try {
+			head = await encoder.write(prefix);
+		} catch {
+			encoder.dispose();
+			return undefined;
+		}
+		let stream;
+		const body = new ReadableStream({
+			start(controller) {
+				stream = controller;
+			}
+		});
+		const abort = new AbortController();
+		const headers = { ...descriptor.headers };
+		for (const field of Object.keys(headers)) {
+			if (field.toLowerCase() === "content-length") delete headers[field];
+		}
+		// A held member is a model request like any other, so a local proxy has to
+		// receive the same two tags: one to report the bytes it sends, one to carry
+		// this route's compression decision. Without them the proxy would decide for
+		// itself and the row could not say what actually left the machine.
+		const biliRid = (await biliOriginFor(descriptor.url)) === undefined ? undefined : randomUUID();
+		if (biliRid !== undefined) {
+			headers["x-accel-rid"] = biliRid;
+			const directive = biliCompressDirective(descriptor.url, { provider: descriptor.provider }, undefined);
+			if (directive !== undefined) headers["x-accel-compress"] = directive;
+		}
+		const entry = {
+			url: descriptor.url,
+			headers: descriptor.headers,
+			encoding: descriptor.encoding,
+			prefix,
+			encoder,
+			stream,
+			abort,
+			dropped: false,
+			settled: false,
+			wireBytes: 0,
+			biliRid,
+			createdAt: performance.now(),
+			// When its last bytes went out. A member nobody has written to for a long time is
+			// the one a gateway abandons first, so the claim path reads this.
+			lastWriteAt: performance.now()
+		};
+		openingMember = entry;
+		const init = { method: "POST", headers, body, duplex: "half", signal: abort.signal };
+		try {
+			// A held request is a model request like any other, so it has to be offered
+			// the same transport. Opening it on the built-in `fetch` instead — which is
+			// what this did — left the entire pool on HTTP/1.1 while the requests that
+			// later claimed those members travelled over h2, which silently gave up the
+			// header compression and multiplexing that pre-transmission is the one thing
+			// h2 actually pays for. It went unnoticed because a gateway that speaks both
+			// answers http/1.1 happily; against an h2-only endpoint the handover failed
+			// outright.
+			const http2 = planHttp2(descriptor.url, { provider: descriptor.provider });
+			entry.response = http2
+				? transport.execute(descriptor.url, init, { signal: abort.signal, allowInsecure: state.allowInsecureH2c === true, pool: "held" })
+					.then((outcome) => (outcome.sent === true ? outcome.response : realFetch(descriptor.url, init)))
+				: realFetch(descriptor.url, init);
+		} finally {
+			openingMember = undefined;
+		}
+		entry.response.then(() => {
+			entry.settled = true;
+		}, () => {
+			entry.settled = true;
+		});
+		try {
+			entry.wireBytes = head.length;
+			stream.enqueue(head);
+		} catch {
+			dropMember(entry);
+			return undefined;
+		}
+		refreshHold(entry);
+		return entry;
+	};
+
+	/** Extend one member by `text`, which must be the bytes that follow its prefix. */
+	const appendMember = async (entry, text) => {
+		if (entry.dropped === true) return false;
+		if (text.length === 0) return true;
+		try {
+			const encoded = await entry.encoder.write(text);
+			entry.wireBytes += encoded.length;
+			entry.stream.enqueue(encoded);
+			entry.lastWriteAt = performance.now();
+			return true;
+		} catch {
+			return false;
+		}
+	};
+
+	/**
+	 * Bring a conversation's pool up to date after a request was captured: advance
+	 * every member to the newly known prefix — with bytes taken verbatim from that
+	 * request, never reconstructed — drop the ones that no longer continue it, and
+	 * open members until the pool is full.
+	 * @param scope - the stream scope the captured request ran in.
+	 * @param capture - that request's URL, headers, body and gzip decision.
+	 */
+	const syncPrewarm = (scope, capture) => {
+		if (prewarmDisposed) return Promise.resolve();
+		const key = prewarmKey(scope);
+		if (key === undefined || prewarmBlocked.has(capture.url)) return Promise.resolve();
+		return withPoolLock(key, () => syncPrewarmLocked(key, scope, capture));
+	};
+
+	/** The sync itself, called only while holding the conversation's lock. */
+	const syncPrewarmLocked = async (key, scope, capture) => {
+		if (prewarmDisposed) return;
+		const frontier = prewarmPrefix(capture.body);
+		if (frontier === undefined) {
+			dropPool(key);
+			return;
+		}
+		// The provider travels with the descriptor because a member's connection is
+		// opened from here, in the *previous* step's async scope, where there is no
+		// ambient attribution to resolve a policy from — so `planHttp2` would fall back
+		// to endpoint matching, which does not know a route's `http2` setting.
+		const descriptor = { url: capture.url, headers: capture.headers, encoding: capture.encoding, provider: scope.provider };
+		const kept = [];
+		for (const member of membersOf(key)) {
+			if (member.url !== descriptor.url || member.settled === true || !frontier.startsWith(member.prefix)) {
+				dropMember(member);
+				continue;
+			}
+			if (!(await appendMember(member, frontier.slice(member.prefix.length)))) {
+				dropMember(member);
+				continue;
+			}
+			member.prefix = frontier;
+			refreshHold(member);
+			kept.push(member);
+		}
+		while (!prewarmDisposed && kept.length < state.prewarmPoolSize) {
+			const opened = await openMember(descriptor, frontier);
+			if (opened === undefined) break;
+			kept.push(opened);
+		}
+		if (prewarmDisposed) {
+			for (const member of kept) dropMember(member);
+			return;
+		}
+		if (kept.length === 0) prewarms.delete(key);
+		else prewarms.set(key, kept);
+		// After filing this conversation's pool, so the cap counts it too — running it
+		// before the write let the total settle one pool above the bound.
+		enforceTotalCap();
+	};
+
+
+	/**
+	 * Claim a held request for an arriving model request: the member whose bytes
+	 * the arriving body continues **furthest** — members sit at different depths,
+	 * and the deepest one leaves the least to write — whose headers still agree,
+	 * and whose endpoint is the same. Anything else abandons the pool and lets the
+	 * request go out normally.
+	 * @returns the entry plus the bytes still to write, or `undefined`.
+	 */
+	const claimPrewarm = (scope, input, init) => {
+		const key = prewarmKey(scope);
+		if (key === undefined) return undefined;
+		return withPoolLock(key, () => claimPrewarmLocked(key, scope, input, init));
+	};
+
+	/** The claim itself, called only while holding the conversation's lock. */
+	const claimPrewarmLocked = (key, scope, input, init) => {
+		const miss = (reason) => {
+			scope.prewarmMiss = reason;
+			return undefined;
+		};
+		const members = membersOf(key);
+		if (members.length === 0) {
+			// A protocol whose body carries no conversation array can never be served,
+			// and reporting "pool empty" for it every step would read as a fault.
+			return miss(typeof init.body === "string" && messagesPrefixEnd(init.body) === undefined ? "unsupported" : "empty");
+		}
+		const url = typeof input === "string" ? input : input instanceof URL ? input.href : undefined;
+		if (init === null || typeof init !== "object" || typeof init.body !== "string") return miss("shape");
+		const staleMs = staleClaimMs(state.prewarmHoldMs);
+		const claimed = choosePrewarmMember(members, {
+			url,
+			body: init.body,
+			headers: init.headers,
+			now: performance.now(),
+			staleMs
+		});
+		const chosen = claimed.member;
+		if (chosen === undefined && claimed.staleIdleMs > 0) {
+			// The bytes would have lined up, but the member has been idle long enough that the
+			// far end is close to abandoning its half-written body. Writing the increment onto it
+			// risks blocking the send phase for a minute to save a few milliseconds, so the pool
+			// is released and this request goes out on its own.
+			scope.prewarmMissDetail = { idleMs: Math.round(claimed.staleIdleMs), thresholdMs: staleMs };
+			dropPool(key);
+			return miss("stale");
+		}
+		if (chosen === undefined) {
+			// Record how far the arriving body agrees with the best member. That one
+			// number says where the bytes parted company — in the fixed fields, deep in
+			// the history, or in the last message — rather than leaving it to be
+			// inferred from unrelated evidence.
+			let agreed = 0;
+			let member = 0;
+			for (const candidate of members) {
+				member = Math.max(member, candidate.prefix.length);
+				agreed = Math.max(agreed, sharedBytes(init.body, candidate.prefix));
+			}
+			scope.prewarmMissDetail = {
+				agreed,
+				member,
+				body: typeof init.body === "string" ? init.body.length : null,
+				messagesAt: typeof init.body === "string" ? init.body.indexOf(String.fromCharCode(34) + "messages" + String.fromCharCode(34) + ":[") : -1
+			};
+			dropPool(key);
+			return miss("mismatch");
+		}
+		clearTimeout(chosen.timer);
+		prewarms.set(key, members.filter((member) => member !== chosen));
+		return { entry: chosen, delta: init.body.slice(chosen.prefix.length) };
+	};
+
+	/**
+	 * Finish a claimed request and hand its response to the adapter.
+	 * @returns the response, or `undefined` when the request must be sent again.
+	 */
+	const completePrewarm = async (claimed, init, scope) => {
+		const { entry, delta } = claimed;
+		if (init.signal !== undefined && init.signal !== null) {
+			if (init.signal.aborted === true) {
+				dropMember(entry);
+				scope.prewarmMiss = "aborted";
+				return undefined;
+			}
+			init.signal.addEventListener("abort", () => entry.abort.abort(), { once: true });
+		}
+		let response;
+		/** The compressed size of the increment, once it has been written. */
+		let deltaWireBytes = 0;
+		try {
+			// From here the member is this step's request, so its transport
+			// diagnostics belong to this step's row.
+			if (entry.request !== undefined && scope.record !== undefined && scope.record !== null) requestOwner.set(entry.request, scope.record);
+			const tail = await entry.encoder.finish(delta);
+			deltaWireBytes = tail.length;
+			entry.wireBytes += tail.length;
+			entry.stream.enqueue(tail);
+			entry.stream.close();
+			// The body is complete here, and this is where the send phase ends. Waiting for
+			// the response before saying so folded the server's think time into `sendMs` and
+			// stamped it after the first token, which read as a negative `ttftMs` and as a send
+			// longer than the whole request. A member opened before this step began cannot rely
+			// on a transport diagnostic to mark the phase either, so it is stamped here.
+			if (scope.record !== undefined && scope.record !== null) timing.noteSent(scope.record, entry.wireBytes, entry.encoding);
+			response = await entry.response;
+			// Headers land when the far end answers, which for a claimed member is the only
+			// moment the row can learn when the server phase started.
+			if (scope.record !== undefined && scope.record !== null) timing.notePhase(scope.record, "headers", performance.now());
+		} catch (error) {
+			// A member can look alive when it is claimed and still die during the
+			// handover — a racing sync could abort it out from under the handover
+			// before the pool lock was introduced. That costs the whole upload, so it
+			// is recorded on the row instead of looking like an ordinary request.
+			dropMember(entry);
+			scope.prewarmMiss = "failed";
+			ctx.logger?.warn?.("model-request-accelerator: pre-transmission failed; sending the request normally");
+			ctx.logger?.warn?.(error);
+			return undefined;
+		}
+		// The member was the request, so the proxy's report for its tag is this
+		// row's byte count — the same read the ordinary path does after sending.
+		if (entry.biliRid !== undefined) void noteBiliStats(entry.biliRid, entry.url, scope.record);
+		if (response.ok) endpointFailures.delete(entry.url);
+		else {
+			noteEndpointFailure(entry.url, response.status);
+			if (isShapeRejection(response.status)) {
+				scope.prewarmMiss = "rejected";
+				return undefined;
+			}
+		}
+		if (scope.record !== undefined && scope.record !== null) {
+			// The member was compressed as it was written, and this path deliberately
+			// skips compressing the body again — the wire size and the send phase were
+			// reported above, while the body was being closed.
+			// Report what actually went over the wire as well as what the delta is
+			// made of. `prefixBytes` and `deltaBytes` are text; `deltaWireBytes` is the
+			// compressed increment, and `tailBytes` is what remains after the messages
+			// array — normally just `]}` now that the fixed fields, tool schemas
+			// included, are moved ahead of it and travel inside the prefix. Before the
+			// reorder this was the tool schemas themselves, and no prefix could reach
+			// them.
+			const messagesEnd = messagesPrefixEnd(init.body);
+			timing.notePrewarm(scope.record, {
+				prefixBytes: entry.prefix.length,
+				deltaBytes: delta.length,
+				deltaWireBytes,
+				tailBytes: messagesEnd === undefined ? null : init.body.length - messagesEnd,
+				holdMs: Math.round(performance.now() - entry.createdAt)
+			});
+			// The protocol cannot come from a connection event here: this member's
+			// connection was negotiated when the member was *opened*, in another async
+			// scope entirely, and no event will fire again for the connection it is
+			// reusing. So it is asked of the transport instead — otherwise every
+			// pre-transmitted row reports nothing while the member really did travel over
+			// h2, which is the state this was found in.
+			timing.noteProtocol(scope.record, transport.protocolFor(originOf(entry.url)));
+		}
+		return response;
+	};
+
+	// Every held request belongs to this plugin's fiber.
+	ctx.effect(() => () => {
+		prewarmDisposed = true;
+		for (const key of [...prewarms.keys()]) dropPool(key);
+	});
+
+	//#endregion
+
+	/**
+	 * Tag every streaming model call with its provider for the duration of that
+	 * call, so the `fetch` patch can tell two routes on one endpoint apart, and
+	 * open one timing measurement for it. Each iterator resumption runs inside
+	 * the scope, because the adapters await (image serialization, file upload)
+	 * before they reach `fetch`.
+	 */
+	ctx.on("llm/stream", (options, next) => {
+		const inner = next();
+		const call = options === null || typeof options !== "object" ? {} : options;
+		const provider = call.provider;
+		if (typeof provider !== "string" || provider.length === 0) return inner;
+		if (inner === null || typeof inner !== "object" || typeof inner[Symbol.asyncIterator] !== "function") return inner;
+		// Attribution is needed for compression either way; a measurement is opened only
+		// while the Request timing feature is on, so a deployment that hides the
+		// view pays nothing for it.
+		// A session's stored history is loaded before its first record is numbered,
+		// so restored ids and live ids cannot collide.
+		consultLedger(call.sessionId === undefined ? null : String(call.sessionId));
+		const record = state.timing
+			? timing.begin({
+				provider,
+				model: typeof call.model === "string" ? call.model : null,
+				sessionId: call.sessionId === undefined ? null : String(call.sessionId),
+				purpose: call.purpose ?? null
+			})
+			: null;
+		const policy = state.policies.get(provider);
+		const scope = {
+			provider,
+			model: typeof call.model === "string" ? call.model : null,
+			sessionId: call.sessionId === undefined ? null : String(call.sessionId),
+			purpose: call.purpose ?? null,
+			prewarm: policy !== undefined && policy.prewarm === true,
+			prewarmMiss: undefined,
+			record,
+			capture: undefined
+		};
+		const note = (act) => {
+			if (record !== null) act();
+		};
+		/**
+		 * The kind of ending this step reports. `tool-calls` means another step
+		 * follows; anything else ends the turn. Neither changes what the pool does —
+		 * the hold timer owns it either way.
+		 */
+		let finishKind;
+		// Nothing to do at a turn boundary any more.
+		//
+		// The pool used to be destroyed here when nothing was queued, on the theory
+		// that a finished conversation had nothing left to serve. But a finished
+		// conversation is often just a pause — the next question repeats the same
+		// history, so the members would have been reused verbatim — and they are
+		// already in flight by now. The hold timer owns their lifetime instead, and it
+		// measures idleness: it restarts on every advance, so a member expires only
+		// after `prewarmHoldMs` with nothing happening. Nothing reconnects while a
+		// conversation sits idle either, because members are opened by a captured
+		// request and by nothing else.
+		return {
+			[Symbol.asyncIterator]() {
+				const iterator = inner[Symbol.asyncIterator]();
+				const scoped = (run) => attribution.run(scope, run);
+				return {
+					next: async (...args) => {
+						let result;
+						try {
+							result = await scoped(() => iterator.next(...args));
+						} catch (error) {
+							note(() => timing.finish(record, performance.now(), "error"));
+							throw error;
+						}
+						if (result.value !== null && typeof result.value === "object" && result.value.type === "finish") finishKind = result.value.reason?.kind;
+						note(() => timing.observeChunk(record, result.value, performance.now()));
+						if (result.done === true) {
+							note(() => timing.finish(record, performance.now()));
+							scheduleSave(scope.sessionId);
+						}
+						return result;
+					},
+					return: (value) => {
+						note(() => timing.finish(record, performance.now()));
+						scheduleSave(scope.sessionId);
+						return typeof iterator.return === "function" ? scoped(() => iterator.return(value)) : Promise.resolve({ done: true, value });
+					},
+					throw: (error) => {
+						note(() => timing.finish(record, performance.now(), "error"));
+						// The pool is deliberately left alone: a failed step is often
+						// retried with the same history, and the next capture advances
+						// the members anyway. The row, though, is worth persisting.
+						scheduleSave(scope.sessionId);
+						return typeof iterator.throw === "function" ? scoped(() => iterator.throw(error)) : Promise.reject(error);
+					}
+				};
+			}
+		};
+	});
+
+	/**
+	 * Consume undici's own transport diagnostics.
+	 *
+	 * The channels are process-wide, and — decisively — on a pooled keep-alive
+	 * connection the response-side diagnostics run inside the async context of
+	 * whichever request first opened that socket. Reading the ambient
+	 * measurement there would attribute `headers` back to an older, already
+	 * finished request, which is why the server phase would go missing on every
+	 * request but the first.
+	 *
+	 * `undici:request:create` still runs in the caller's own context, so the
+	 * measurement is paired with the request object once, by identity, and every
+	 * later diagnostic is looked up through that pairing.
+	 */
+	ctx.effect(() => {
+		const onCreated = (message) => {
+			const request = message === null || typeof message !== "object" ? undefined : message.request;
+			if (request === undefined) return;
+			// A held member belongs to whichever step later claims it, not to the
+			// step whose stream happens to be running when it is opened.
+			if (openingMember !== undefined) {
+				openingMember.request = request;
+				return;
+			}
+			const record = attribution.getStore()?.record;
+			if (record === undefined || record === null) return;
+			if (!timing.claimsRequest(record, request)) return;
+			requestOwner.set(request, record);
+		};
+
+		const onTransport = (sink) => (message) => {
+			const request = message === null || typeof message !== "object" ? undefined : message.request;
+			const record = request === undefined ? undefined : requestOwner.get(request);
+			if (record === undefined) return;
+			if (sink === "response-bytes") {
+				timing.noteResponseBytes(record, message.chunk?.byteLength);
+				return;
+			}
+			timing.notePhase(record, sink.slice("phase:".length), performance.now());
+			if (sink === "phase:headers") timing.noteResponseEncoding(record, diagnosticHeader(message.response?.headers, "content-encoding"));
+		};
+
+		const pairs = [[REQUEST_CREATED_CHANNEL, onCreated], ...TRANSPORT_CHANNELS.map(([channel, sink]) => [channel, onTransport(sink)])];
+		const unsubscribes = pairs.map(([channel, listener]) => {
+			diagnosticsChannel.subscribe(channel, listener);
+			return () => diagnosticsChannel.unsubscribe(channel, listener);
+		});
+		return () => {
+			for (const unsubscribe of unsubscribes) unsubscribe();
+		};
+	});
+
+	/**
+	 * What the timing ledger currently holds. The durable total is summed from the
+	 * stored documents, so it covers sessions this process never loaded; the memory
+	 * figures are what the running process is holding.
+	 */
+	const ledgerStats = () => {
+		let bytes = 0;
+		let durableSessions = 0;
+		try {
+			const stored = ledger?.stats?.();
+			if (stored !== undefined) {
+				bytes = stored.bytes;
+				durableSessions = stored.sessions;
+			}
+		} catch (error) {
+			ctx.logger?.warn?.("model-request-accelerator: could not size the durable timing store");
+			ctx.logger?.warn?.(error);
+		}
+		const memory = timing.stats();
+		// The held requests are the connections this plugin owns; anything beyond
+		// them belongs to undici's pool or to the operating system.
+		let held = 0;
+		const conversations = new Set();
+		for (const [key, members] of prewarms) {
+			if (members.length === 0) continue;
+			held += members.length;
+			conversations.add(key);
+		}
+		return {
+			bytes,
+			durableSessions,
+			memorySessions: memory.sessions,
+			memoryRows: memory.rows,
+			durable: ledger !== undefined,
+			heldRequests: held,
+			heldConversations: conversations.size
+		};
+	};
+
+	/** The version this installation is running, read from its own manifest. */
+	const readLocalVersion = async () => {
+		try {
+			return versionFromPackage(await readFile(join(PLUGIN_ROOT, "package.json"), "utf8"));
+		} catch {
+			return undefined;
+		}
+	};
+
+	/** Where this plugin was installed from, taken from its own manifest. */
+	const readOrigin = async () => {
+		try {
+			const parsed = JSON.parse(await readFile(join(PLUGIN_ROOT, "package.json"), "utf8"));
+			const url = typeof parsed?.repository === "string" ? parsed.repository : parsed?.repository?.url;
+			if (typeof url !== "string") return undefined;
+			// git+https://github.com/o/r.git → https://raw.githubusercontent.com/o/r/main
+			const match = /github\.com[/:]([^/]+)\/([^/.]+)/u.exec(url);
+			return match === null ? undefined : `https://raw.githubusercontent.com/${match[1]}/${match[2]}/main`;
+		} catch {
+			return undefined;
+		}
+	};
+
+	/** The version the origin publishes, or `undefined` when it cannot be read. */
+	const readPublishedVersion = async () => {
+		const origin = await readOrigin();
+		if (origin === undefined) return undefined;
+		try {
+			const response = await realFetch(`${origin}/package.json`, { signal: AbortSignal.timeout(UPDATE_FETCH_TIMEOUT_MS) });
+			if (!response.ok) return undefined;
+			return versionFromPackage(await response.text());
+		} catch {
+			return undefined;
+		}
+	};
+
+	/** Fast-forward this checkout, the way the installer's own pull would. */
+	const pullUpdate = () => new Promise((resolve) => {
+		execFile("git", ["pull", "--ff-only"], { cwd: PLUGIN_ROOT, timeout: UPDATE_PULL_TIMEOUT_MS }, (error, stdout, stderr) => {
+			resolve({ ok: error === null, output: `${stdout ?? ""}${stderr ?? ""}`.trim() });
+		});
+	});
+
+	ctx.inject(["connection"], (connectionCtx) => {
+		connectionCtx.connection.fetch.register({
+			path: ENDPOINTS_PATH,
+			methods: ["GET"],
+			requestBody: "buffered",
+			// Only what was observed: a refusal that was recorded, and how many
+			// consecutive failures an endpoint has answered. Nothing here is a probe.
+			fetch: async () => Response.json({
+				endpoints: Object.fromEntries([...new Set([...brotliRefused, ...prewarmBlocked, ...endpointFailures.keys()])].map((url) => [url, {
+					brotliRefused: brotliRefused.has(url),
+					prewarmBlocked: prewarmBlocked.has(url),
+					// Whether h2 was abandoned for this endpoint's origin — a fact only
+					// real traffic could establish, like the other two.
+					http2Blocked: transport.blockedOrigins().includes(originOf(url)),
+					failures: endpointFailures.get(url) ?? 0
+				}]))
+			})
+		});
+		connectionCtx.connection.fetch.register({
+			path: VERSION_PATH,
+			methods: ["GET", "POST"],
+			requestBody: "buffered",
+			fetch: async (request) => {
+				const action = new URL(request.url).searchParams.get("action") ?? "status";
+				if (request.method === "GET") {
+					const version = await readLocalVersion();
+					const latest = await readPublishedVersion();
+					return Response.json({
+						version: version ?? null,
+						latest: latest ?? null,
+						// Only three-part versions on both sides can be compared, and
+						// anything unreadable is reported as-is rather than guessed at.
+						updateAvailable: version !== undefined && latest !== undefined && isNewer(version, latest)
+					});
+				}
+				if (action !== "update") return Response.json({ error: "unknown action" }, { status: 400 });
+				const from = await readLocalVersion();
+				const result = await pullUpdate();
+				const to = await readLocalVersion();
+				ctx.logger?.info?.(`model-request-accelerator: update ${result.ok ? "pulled" : "failed"} ${from ?? "?"} -> ${to ?? "?"}`);
+				return Response.json({ ok: result.ok, from: from ?? null, to: to ?? null, output: result.output });
+			}
+		});
+	});
+
+	ctx.inject(["connection"], (connectionCtx) => {
+		connectionCtx.connection.fetch.register({
+			path: TIMINGS_PATH,
+			methods: ["GET"],
+			requestBody: "buffered",
+			fetch: async (request) => {
+				const sessionId = new URL(request.url).searchParams.get("sessionId");
+				// Nothing known about this session yet, so it may have history on disk.
+				// A store that will not read must not turn the panel into an error —
+				// this is the panel for a session that has simply not run anything yet,
+				// which is the most ordinary state there is.
+				if (ledger !== undefined && !consulted.has(sessionId)) {
+					consulted.add(sessionId);
+					try {
+						timing.seed(sessionId, ledger.read(sessionId));
+					} catch (error) {
+						ledger = undefined;
+						ctx.logger?.warn?.("model-request-accelerator: the durable timing store could not be read; showing only this run");
+						ctx.logger?.warn?.(error);
+					}
+				}
+				return Response.json({ measurements: timing.snapshot(sessionId) });
+			}
+		});
+		connectionCtx.connection.fetch.register({
+			path: LEDGER_PATH,
+			methods: ["GET", "POST"],
+			requestBody: "buffered",
+			fetch: async (request) => {
+				const action = new URL(request.url).searchParams.get("action") ?? "stats";
+				if (request.method === "POST" && action === "clear") {
+					// Both halves: the documents on disk, and what this process holds.
+					let removed = 0;
+					try {
+						if (ledger !== undefined) removed = await ledger.clear();
+					} catch (error) {
+						ctx.logger?.warn?.("model-request-accelerator: could not clear the durable timing store");
+						ctx.logger?.warn?.(error);
+					}
+					timing.clear();
+					consulted.clear();
+					ctx.logger?.info?.(`model-request-accelerator: cleared the timing ledger (${removed} stored session(s))`);
+				}
+				return Response.json(ledgerStats());
+			}
+		});
+	});
+
+	/** The original transport, captured before this plugin replaces it. */
+	const realFetch = globalThis.fetch;
+
+	/**
+	 * How long a local-proxy probe result stays good, and how long a failed one
+	 * does. A miss is remembered briefly so a plain loopback endpoint is not
+	 * probed on every request.
+	 */
+	const BILI_PROBE_TTL_MS = 60_000;
+	const BILI_PROBE_MISS_TTL_MS = 15_000;
+
+	/** origin -> { ok, at }, the remembered probe result. */
+	const biliOrigins = new Map();
+
+	/** Endpoints that can host the proxy: the loopback names, nothing routable. */
+	const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+	/**
+	 * Whether this request is going to a local billion-context proxy.
+	 *
+	 * That proxy decompresses whatever this plugin would have compressed, folds the
+	 * history, and compresses the folded body itself — a second compression here
+	 * would only be undone one hop later. So the body is left alone and tagged
+	 * instead, and the proxy's own byte count is what the timing panel reports.
+	 * Detection is a health probe on the origin, remembered per origin: an ordinary
+	 * loopback endpoint fails it and keeps the normal path untouched.
+	 * @param url - the absolute request URL.
+	 * @returns the proxy origin, or undefined when this is not one.
+	 */
+	const biliOriginFor = async (url) => {
+		let parsed;
+		try {
+			parsed = new URL(url);
+		} catch {
+			return undefined;
+		}
+		if (parsed.protocol !== "http:" || !LOOPBACK_HOSTS.has(parsed.hostname)) return undefined;
+		const origin = parsed.origin;
+		const nowMs = Date.now();
+		const cached = biliOrigins.get(origin);
+		if (cached !== undefined && nowMs - cached.at < (cached.ok ? BILI_PROBE_TTL_MS : BILI_PROBE_MISS_TTL_MS)) {
+			return cached.ok ? origin : undefined;
+		}
+		let ok = false;
+		try {
+			const response = await realFetch(origin + "/__bili/health", { signal: AbortSignal.timeout(1200) });
+			ok = response.ok === true;
+			try {
+				await response.body?.cancel();
+			} catch {}
+		} catch {
+			ok = false;
+		}
+		biliOrigins.set(origin, { ok, at: nowMs });
+		return ok ? origin : undefined;
+	};
+
+	/**
+	 * What the proxy should do with this body, when this plugin has an opinion.
+	 *
+	 * The route's own switch is the opinion: on means compress, off means leave the
+	 * body alone, and an explicit gzip is passed through as-is. "on" rather than a
+	 * fixed algorithm for the automatic case, because the proxy still knows which
+	 * algorithm it is willing to use upstream. A route with no configuration at all
+	 * sends nothing, so a proxy that also serves other clients keeps its own setting
+	 * for those requests.
+	 * @param url - the request URL.
+	 * @param scope - the attribution scope, which names the provider.
+	 * @param body - the body about to be sent, when its size is known already.
+	 * @returns the directive to send, or undefined to leave the proxy alone.
+	 */
+	const biliCompressDirective = (url, scope, body) => {
+		const policy = resolvePolicy({ url, provider: scope?.provider, policies: state.policies, byEndpoint: state.byEndpoint });
+		if (policy === undefined) return undefined;
+		if (policy.enabled !== true) return "off";
+		// The route's own threshold still decides: below it a standalone plugin would
+		// send the body as-is, so the proxy has to be told to do the same. A body that
+		// is not known yet — a pre-transmitted member, whose bytes are still being
+		// written — is left to the proxy's own size check.
+		if (body !== undefined) {
+			if (typeof body !== "string") return "off";
+			if (Buffer.byteLength(body, "utf8") < policy.minBytes) return "off";
+		}
+		// Same preference the local path uses: gzip only when it was asked for by
+		// name, brotli otherwise. Leaving it as "on" would let the proxy fall back
+		// to gzip and quietly cost the few percent brotli wins on JSON.
+		return policy.encoding === "gzip" ? "gzip" : "br";
+	};
+
+
+	/**
+	 * Ask the proxy what it really put on the wire for one tagged request.
+	 * @param rid - the tag this plugin put on the request.
+	 * @param url - the request URL, for the proxy origin.
+	 * @param record - the timing record to fill in.
+	 */
+	const noteBiliStats = async (rid, url, record) => {
+		if (record === undefined || record === null || url === undefined) return;
+		try {
+			const origin = new URL(url).origin;
+			const response = await realFetch(origin + "/__bili/encode-stats?rid=" + encodeURIComponent(rid), { signal: AbortSignal.timeout(1500) });
+			const body = await response.json();
+			const rows = Array.isArray(body?.records) ? body.records : [];
+			// A retried request appears once per attempt; the last row is the attempt
+			// whose response is the one this record measures.
+			let row;
+			for (const candidate of rows) if (candidate?.rid === rid) row = candidate;
+			if (row !== undefined) timing.noteBili(record, row);
+		} catch {}
+	};
+
+	/**
+	 * Put the fixed fields after the conversation, for a provider that
+	 * pre-transmits — `messages` for chat-completions and Anthropic bodies,
+	 * `input` for Responses-shaped ones.
+	 *
+	 * Idempotent — a body already in that order is left alone — and refused
+	 * whenever the reorder cannot be proven byte-safe. It has to be applied to the
+	 * *incoming* body before anything compares it with a held member, because the
+	 * member already carries bytes in this order; without that, no claim would ever
+	 * match, and the reorder would quietly do nothing at all.
+	 *
+	 * @param url - the request URL.
+	 * @param provider - the attributed provider, when there is one.
+	 * @param init - the `fetch` init whose body may be reordered.
+	 * @returns the rewritten init and the body it replaced, or `undefined`.
+	 */
+	const canonicalInit = (url, provider, init) => {
+		if (init === null || typeof init !== "object" || typeof init.body !== "string") return undefined;
+		const policy = resolvePolicy({ url, provider, policies: state.policies, byEndpoint: state.byEndpoint });
+		if (policy?.prewarm !== true || reorderRefused.has(url)) return undefined;
+		const canonical = moveMessagesLast(init.body);
+		return canonical === undefined ? undefined : { init: { ...init, body: canonical }, original: init.body };
+	};
+
+	/**
+	 * Decide whether this one call is in scope, and rewrite it if so.
+	 *
+	 * Timing is bookkept before the rewrite, on the caller's original body: the
+	 * model request is the string-bodied call made inside the stream's own async
+	 * scope, which is exactly what distinguishes it from the `FormData` Files API
+	 * upload that may precede it.
+	 *
+	 * @param input - the `fetch` first argument.
+	 * @param init - the `fetch` second argument.
+	 * @returns the rewritten call, or `undefined` to pass the call through.
+	 */
+	const planRequest = (input, init, options = {}) => {
+		if (init === null || typeof init !== "object") return undefined;
+		if (typeof input !== "string" && !(input instanceof URL)) return undefined;
+		const url = typeof input === "string" ? input : input.href;
+		const store = attribution.getStore();
+		const record = store?.record;
+		const measured = record !== undefined && record !== null && typeof init.body === "string";
+		// Recorded after the compression below, so the preparation phase includes
+		// it instead of quietly charging it to the upload.
+		const isModelBody = typeof init.body === "string";
+		const headers = init.headers;
+		if (readHeader(headers, CONTENT_ENCODING) !== undefined) return undefined;
+		// A signed body cannot be rewritten: compressing it invalidates the signature,
+		// and the failure that follows is an authorization error, which is not a shape
+		// rejection and so would never fall back. AWS-style signing is recognised by
+		// the header that carries the body's own hash.
+		if (readHeader(headers, "x-amz-content-sha256") !== undefined) return undefined;
+		const policy = resolvePolicy({
+			url,
+			provider: store?.provider,
+			policies: state.policies,
+			byEndpoint: state.byEndpoint
+		});
+		// For a provider that pre-transmits, the fixed fields go to the end so the
+		// prefix can cover them — done before the capture and the compression, since
+		// all three have to be looking at the same bytes.
+		const body = init.body;
+		const originalBody = options.originalBody;
+		// Remember what this request looked like, so the next one for the same
+		// conversation can have its shared history put on the wire early.
+		if (store !== undefined && store !== null && isModelBody && store.capture === undefined) {
+			store.capture = { body, headers: plainHeaders(headers), url, encoding: undefined };
+		}
+		// Prefer brotli, but only where it can actually be used: the runtime must
+		// have it, and this endpoint must not have already refused it.
+		const preferred = policy?.encoding === "gzip" ? "gzip" : BROTLI_AVAILABLE && !brotliRefused.has(url) ? "br" : "gzip";
+		const plan = options.compress === false || options.bili !== undefined ? undefined : planCompression({
+			body,
+			policy: policy === undefined ? undefined : { ...policy, encoding: preferred },
+			hasContentEncoding: undefined,
+			byteLength: (text) => Buffer.byteLength(text, "utf8"),
+			encode: (text, encoding) => encodeBody(text, encoding)
+		});
+		if (isModelBody && store?.capture !== undefined && store.capture.body === body) {
+			// A claimed request deliberately skips compressing the body — the member
+			// already carries compressed bytes — but the members opened from *its*
+			// capture still have to be compressed, so the preference is recorded
+			// rather than left as "this request had no plan".
+			store.capture.encoding = plan !== undefined ? plan.encoding : options.compress === false ? preferred : undefined;
+		}
+		if (measured) timing.noteFetch(record, url, Buffer.byteLength(body, "utf8"));
+		// A reordered body is itself a rewrite worth making, even when there is
+		// nothing to compress.
+		if (plan === undefined && originalBody === undefined && options.bili === undefined) return undefined;
+		// What a compressed body actually weighs. A string body is measured as UTF-8
+		// here, and any other body — a Buffer from an earlier encode, or a stream —
+		// reports its own length when it has one of its own to report.
+		const sentBytes = plan !== undefined
+			? plan.compressedBytes
+			: typeof body === "string" ? Buffer.byteLength(body, "utf8") : typeof body?.length === "number" ? body.length : body?.byteLength;
+		if (measured) timing.noteSent(record, sentBytes, plan?.encoding);
+		return {
+			...(plan ?? {}),
+			encoding: plan === undefined ? undefined : plan.encoding,
+			reordered: originalBody !== undefined,
+			originalBody,
+			sentBytes,
+			biliRid: options.bili,
+			provider: store?.provider,
+			url,
+			request: { input, init },
+			init: {
+				...init,
+				...(plan === undefined ? {} : { headers: withEncodingHeader(headers, plan.encoding) }),
+				body: plan === undefined ? body : plan.body
+			}
+		};
+	};
+
+	/**
+	 * Whether this request should go out over HTTP/2, and nothing more: the policy
+	 * lookup and the transport's own availability check are both answered here so
+	 * the send path stays one branch.
+	 * @param url - the request URL.
+	 * @param scope - the stream scope, for the attributed provider.
+	 * @returns true when the caller should route through the h2 transport.
+	 */
+	const planHttp2 = (url, scope) => {
+		if (state.http2 !== true) return false;
+		const policy = resolvePolicy({ url, provider: scope?.provider, policies: state.policies, byEndpoint: state.byEndpoint });
+		return transport.enabled({
+			provider: scope?.provider,
+			policy,
+			url,
+			allowInsecure: state.allowInsecureH2c === true
+		});
+	};
+
+	/**
+	 * Hand one model request to the transport it belongs on.
+	 *
+	 * HTTP/2 is offered where the provider asked for it, and every way that offer
+	 * can go wrong ends in the same place: the built-in transport, with the same
+	 * init. An origin that fails once is condemned by the transport itself, so the
+	 * cost of a failure is one extra round trip ever, not one per request.
+	 *
+	 * @param receiver - the `this` the caller invoked `fetch` with.
+	 * @param useHttp2 - whether this request is in scope for h2.
+	 * @param input - the `fetch` first argument.
+	 * @param init - the init to send.
+	 * @param planned - the rewrite, when there was one, for the protocol record.
+	 * @returns the response.
+	 */
+	const sendRequest = async (receiver, useHttp2, input, init, planned) => {
+		if (useHttp2 === true) {
+			const record = attribution.getStore()?.record;
+				const outcome = await transport.execute(input, init, {
+				signal: init?.signal,
+				allowInsecure: state.allowInsecureH2c === true,
+				// Reported while the request is in flight, which is when the connection
+				// is established and therefore the only moment the protocol is knowable.
+				onConnected: (protocol) => {
+					if (record !== undefined && record !== null) timing.noteProtocol(record, protocol);
+				}
+			});
+			if (outcome.sent === true) {
+				if (planned !== undefined) {
+					ctx.logger?.info?.(`model-request-accelerator: ${planned.provider ?? "endpoint-matched"} request compressed with ${planned.encoding} ${planned.originalBytes} -> ${planned.compressedBytes} bytes`);
+				}
+				return outcome.response;
+			}
+			// A request the caller cancelled is the caller's business: report it the way
+			// the transport would have, rather than sending it a second time.
+			if (outcome.reason === "aborted") throw outcome.error;
+		}
+		if (planned?.encoding !== undefined) ctx.logger?.info?.(`model-request-accelerator: ${planned.provider ?? "endpoint-matched"} request compressed with ${planned.encoding} ${planned.originalBytes} -> ${planned.compressedBytes} bytes`);
+		if (receiver === undefined) return realFetch.call(globalThis, input, init);
+		return realFetch.call(receiver, input, init);
+	};
+
+	/**
+	 * The patched transport. Any failure inside the rewrite falls back to the
+	 * untouched call: this plugin must never be able to break model requests.
+	 */
+	const patchedFetch = async function patchedFetch(input, init) {
+		// The protocol is chosen before anything is rewritten: the decision belongs to
+		// the provider's policy and the endpoint's scheme, and neither the reorder nor
+		// the compression below changes either of them.
+		const scope = attribution.getStore();
+		const calledUrl = typeof input === "string" ? input : input instanceof URL ? input.href : undefined;
+		const useHttp2 = calledUrl !== undefined && planHttp2(calledUrl, scope);
+		// A local billion-context proxy folds the history and compresses the body on
+		// its own way out, so compressing here would be undone one hop later. Tag the
+		// request instead and read back what the proxy actually sent.
+		const biliOrigin = calledUrl === undefined ? undefined : await biliOriginFor(calledUrl);
+		const biliRid = biliOrigin === undefined ? undefined : randomUUID();
+		if (biliRid !== undefined && init !== null && typeof init === "object") {
+			init = { ...init, headers: withExtraHeader(init.headers, "x-accel-rid", biliRid) };
+			// Tell the proxy what to do rather than letting its own setting win: the
+			// provider's switch is the one the operator just flipped.
+			const directive = biliCompressDirective(calledUrl, scope, init.body);
+			if (directive !== undefined) init = { ...init, headers: withExtraHeader(init.headers, "x-accel-compress", directive) };
+		}
+		let planned;
+		try {
+			// A held request for this very conversation may already be open with the
+			// shared history written. Claim it, finish it with the increment, and
+			// hand its response straight to the adapter.
+			const incoming = calledUrl;
+			// Reordered once, here, before anything reads the body: a held member's
+			// bytes are already canonical, so the body compared with them has to be
+			// too — and the fact that it happened has to outlive this call, or the
+			// fallback below could not tell that this request was reordered at all.
+			const canonical = incoming === undefined ? undefined : canonicalInit(incoming, scope?.provider, init);
+			if (canonical !== undefined) init = canonical.init;
+			if (scope !== undefined && scope.prewarm === true) {
+				const claimed = await claimPrewarm(scope, input, init);
+				if (claimed !== undefined) {
+					// Record the request first: the measurement must be anchored at the
+					// moment it is issued — the claim — and not after its response has
+					// already arrived, or every phase would come out negative.
+					planRequest(input, init, { compress: false, originalBody: canonical?.original });
+					const response = await completePrewarm(claimed, init, scope);
+					if (response !== undefined) {
+						// Served from a held member, so nothing was sent — but the pool
+						// still has to be brought up to date for the step after.
+						if (scope.capture !== undefined) syncPrewarm(scope, scope.capture).catch(() => {});
+						return response;
+					}
+				}
+			}
+			planned = planRequest(input, init, { originalBody: canonical?.original, bili: biliRid });
+			if (scope !== undefined && scope.prewarmMiss !== undefined && scope.record !== undefined && scope.record !== null) {
+				timing.notePrewarmMiss(scope.record, scope.prewarmMiss, scope.prewarmMissDetail);
+			}
+			// The shared history this request carries is exactly the history the next
+			// one will repeat, and it is known the moment this request goes out — so
+			// the next request is opened now and the upload overlaps the model call
+			// itself, not just the tools that follow it.
+			if (scope !== undefined && scope.prewarm === true && scope.capture !== undefined) {
+				syncPrewarm(scope, scope.capture).catch(() => {});
+			}
+		} catch (error) {
+			ctx.logger?.warn?.("model-request-accelerator: skipped compression after an error; sending the request uncompressed");
+			ctx.logger?.warn?.(error);
+			planned = undefined;
+		}
+		if (planned === undefined) return sendRequest(this, useHttp2, input, init);
+		const response = await sendRequest(this, useHttp2, input, planned.init, planned);
+		if (planned.biliRid !== undefined) void noteBiliStats(planned.biliRid, planned.url, attribution.getStore()?.record);
+		// A relay that matches on the body's shape rejects the reordered body. Send
+		// the original — exactly once — and leave that endpoint's field order alone.
+		if (planned.reordered === true && (response.status === 400 || response.status === 422)) {
+			reorderRefused.add(planned.url);
+			// Held members carry the reordered bytes, so they can never serve a
+			// request that must keep its own order. Other conversations recover on
+			// their next request, which will find no member it can continue.
+			for (const key of [...prewarms.keys()]) dropPool(key);
+			ctx.logger?.warn?.(`model-request-accelerator: ${planned.url} rejected a request with its conversation last; leaving its field order alone`);
+			ctx.logger?.warn?.("model-request-accelerator: released the pools built in that order");
+			try {
+				await response.body?.cancel?.();
+			} catch {}
+			return sendRequest(this, useHttp2, input, {
+				...init,
+				...(planned.encoding === undefined ? {} : { headers: withEncodingHeader(init.headers, planned.encoding) }),
+				body: planned.encoding === undefined ? planned.originalBody : encodeBody(planned.originalBody, planned.encoding)
+			});
+		}
+		if (planned.encoding !== "br" || !isShapeRejection(response.status)) return response;
+
+		// The endpoint would not take the brotli body. Retry the same request as
+		// gzip so the adapter never sees a failure it would not have seen
+		// uncompressed, and remember the endpoint so this happens once.
+		const url = planned.url ?? (typeof input === "string" ? input : input instanceof URL ? input.href : undefined);
+		if (url !== undefined) brotliRefused.add(url);
+		ctx.logger?.warn?.(`model-request-accelerator: ${url} answered ${response.status} to a brotli body; using gzip for it from now on`);
+		try {
+			await response.body?.cancel?.();
+		} catch {}
+		const gzipPlan = planCompression({
+			body: planned.original,
+			policy: { enabled: true, minBytes: 0, prewarm: false, encoding: "gzip" },
+			hasContentEncoding: undefined,
+			byteLength: (text) => Buffer.byteLength(text, "utf8"),
+			encode: (text, encoding) => encodeBody(text, encoding)
+		});
+		if (gzipPlan === undefined) return sendRequest(this, useHttp2, input, init);
+		const record = attribution.getStore()?.record;
+		if (record !== undefined && record !== null) timing.noteSent(record, gzipPlan.compressedBytes, "gzip");
+		return sendRequest(this, useHttp2, input, { ...init, headers: withEncodingHeader(init.headers, "gzip"), body: gzipPlan.body });
+	};
+
+	ctx.effect(() => {
+		globalThis.fetch = patchedFetch;
+		return () => {
+			if (globalThis.fetch === patchedFetch) globalThis.fetch = realFetch;
+			// The Agents h2 opened belong to this fiber, like the held requests do.
+			transport.dispose();
+		};
+	});
+}
