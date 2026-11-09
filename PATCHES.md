@@ -156,3 +156,9 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 `install.mjs` 在覆盖 `dist/index.js` 之前跑它，失败就退出、不动已装文件；跑在将要运行代理的那个 Node 上（更新接口走 Electron 的 Node，会带上 `ELECTRON_RUN_AS_NODE=1`）。
 
 **重启脚本**（`scripts/restart.mjs`）：成功不再是「端口上有人答应 health」，而是「答应的那个 `instanceId` 和关停前不同」。旧进程优雅退出期间会继续应答，旧脚本把这段当成重启成功，等旧进程真正退出后服务就没了。
+
+**同一批顺手修的三处**：
+
+- 渠道开关不再被重装覆盖：安装脚本只补缺失的 `enabled` / `encoding` 键，已有的值原样保留——在设置页关掉的渠道，重跑脚本不会又被打开。
+- `dist/index.js` 的覆盖挪到合并产物生成之后：上游 bundle 改了封装格式、合并在中途退出时，不会留下「新 dist + 旧包装包」的半成品。
+- `scripts/restart.mjs` 的探针改成一次性连接（`agent: false`）：旧版用 keep-alive 轮询 health，自己的连接正是代理 drain 时要等的 live conns，关停被拖长；现在探针不占连接。

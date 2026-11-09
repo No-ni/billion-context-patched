@@ -106,7 +106,7 @@ const writeWithBackup = (file, content) => {
   return backup;
 };
 
-// ── 1. the patched build ────────────────────────────────────────────────────
+// ── 1. the patched build: checked here, written after the merge ─────────────
 const installedBuild = join(target, "dist", "index.js");
 const candidateBuild = join(here, "..", "dist", "index.js");
 // A build that fails its own smoke test never replaces a working one. The call
@@ -124,9 +124,13 @@ if (!dryRun && !argv.includes("--skip-smoke")) {
     fail("smoke test failed; " + installedBuild + " was left untouched");
   }
 }
-if (dryRun) {
-  say("would install " + candidateBuild + " into " + installedBuild);
-} else {
+// The copy waits for the merge below: writing dist first would leave a new build
+// beside an old wrapper if the merge aborts on a reshaped upstream bundle.
+const installBuild = () => {
+  if (dryRun) {
+    say("would install " + candidateBuild + " into " + installedBuild);
+    return;
+  }
   const buildBackup = backupOf(installedBuild);
   copyFileSync(candidateBuild, installedBuild);
   try {
@@ -134,9 +138,10 @@ if (dryRun) {
   } catch {}
   say("installed into " + target);
   say("build backup: " + buildBackup);
-}
+};
 
 if (compressionOnly) {
+  installBuild();
   say("compression only: skipped the accelerator merge (--compression-only)");
   say("restart the bili proxy to activate: node scripts/restart.mjs");
   process.exit(0);
@@ -249,6 +254,10 @@ const acceleratorRebuilt = hintRewrite.text;
 const mergedClient = template
   .replace("/*__BILI_FACTORY__*/", () => biliClientBody)
   .replace("/*__ACCELERATOR_FACTORY__*/", () => acceleratorRebuilt);
+
+// Both halves extracted and parsed, so the build can go in now: an abort above
+// leaves the installed dist exactly as it was.
+installBuild();
 
 // ── 4. the wrapper's bundle layer ───────────────────────────────────────────
 // billion-context's own layer supplies the compaction gate wiring that the host
@@ -606,12 +615,12 @@ const rewritePatch = (text, wrapperId, channels = []) => {
               break;
             }
           }
+          // Only a missing key is filled in. An explicit true/false is the user's
+          // answer, and a reinstall that flipped it back would be a bug, not a
+          // default: turn a channel off in the settings page and it stays off.
           if (at === -1) {
             body.splice(fieldEnd, 0, "        " + key + ": " + value);
             fieldEnd += 1;
-            local = true;
-          } else if (body[at].trim() !== key + ": " + value) {
-            body[at] = "        " + key + ": " + value;
             local = true;
           }
         }
@@ -634,7 +643,7 @@ const channels = channelsToCompress([
   patchBefore ?? "",
   existsSync(cordisMain) ? readFileSync(cordisMain, "utf8") : "",
 ]);
-if (channels.length > 0) say("relay channels: " + channels.join(", ") + " -> compression on, brotli-first");
+if (channels.length > 0) say("relay channels: " + channels.join(", ") + " -> compression defaults (missing keys only)");
 
 if (patchBefore !== null) {
   const rewritten = rewritePatch(patchBefore, WRAPPER, channels);

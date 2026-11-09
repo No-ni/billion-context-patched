@@ -61,7 +61,7 @@ node scripts/restart.mjs                       # 重启 bili 代理，让新的 
 
 `install.mjs` 依次做这些事，每步都打印结果，每个被改的文件都留 `<文件>.bak-<时间戳>` 备份：
 
-1. 先拿候选构建跑冒烟测试（`scripts/smoke.mjs`：本机起一个模拟上游，分不压缩 / brotli / gzip 三路，验证到达上游的 `content-length` 只有一个、是个数字、且等于实际字节数，身体解压后与原文一致，重试不会二次压缩）；通过才备份并覆盖 `dist/index.js`，不通过就停在这里，已装的构建原样不动（`--skip-smoke` 可跳过）；
+1. 先拿候选构建跑冒烟测试（`scripts/smoke.mjs`：本机起一个模拟上游，分不压缩 / brotli / gzip 三路，验证到达上游的 `content-length` 只有一个、是个数字、且等于实际字节数，身体解压后与原文一致，重试不会二次压缩）；**合并产物也生成好之后**才备份并覆盖 `dist/index.js`，任何一步失败都停在那里，已装的构建和包装包原样不动（`--skip-smoke` 可跳过冒烟）；
 2. 确保加速器在 `<profile>/plugins/model-request-accelerator`（缺失时 `git clone`，也可用 `--accelerator` 指定）；
 3. 生成 `<profile>/plugins/bili-context-patch`：manifest、主机入口、合并后的 `lib/client.js`、以及从 bili 复制并删掉 insert 的 `dsh.bundle.patch.yml`；
 4. 把它链进 `node_modules`（加速器同样）；
