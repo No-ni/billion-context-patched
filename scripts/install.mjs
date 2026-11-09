@@ -24,6 +24,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -114,6 +115,26 @@ const backupOf = (file) => {
   return to;
 };
 
+// This script rewrites the same two files on every run, so the safety copies pile
+// up in a directory the user reads. Keep the newest few and clear the rest; only
+// names this script mints (<file>.bak-YYYYMMDD-HHmmss) are touched, so backups
+// made by hand or by other tools stay.
+const BACKUP_STAMP = /^\d{8}-\d{6}$/;
+const pruneBackups = (file, keep = 3) => {
+  try {
+    const dir = dirname(file);
+    const prefix = file.slice(dir.length + 1) + ".bak-";
+    const old = readdirSync(dir)
+      .filter((name) => name.startsWith(prefix) && BACKUP_STAMP.test(name.slice(prefix.length)))
+      .sort();
+    const doomed = old.slice(0, Math.max(0, old.length - keep));
+    for (const name of doomed) rmSync(join(dir, name), { force: true });
+    return doomed.length;
+  } catch {
+    return 0;
+  }
+};
+
 const writeWithBackup = (file, content) => {
   const backup = existsSync(file) ? backupOf(file) : null;
   writeFileSync(file, content);
@@ -147,13 +168,19 @@ const installBuild = () => {
     return;
   }
   mkdirSync(dirname(installedBuild), { recursive: true });
-  const buildBackup = existsSync(installedBuild) ? backupOf(installedBuild) : null;
   copyFileSync(candidateBuild, installedBuild);
   try {
     chmodSync(installedBuild, 0o755);
   } catch {}
+  // The vendored tree is derived and rebuilt on every run, so a backup of it is
+  // ballast (5.8 MB each). Earlier versions left some behind; clear them.
+  try {
+    const distDir = dirname(installedBuild);
+    for (const name of readdirSync(distDir)) {
+      if (name.startsWith("index.js.bak-")) rmSync(join(distDir, name), { force: true });
+    }
+  } catch {}
   say("installed into " + vendorBili);
-  if (buildBackup !== null) say("build backup: " + buildBackup);
 };
 
 // ── 2. the accelerator package ──────────────────────────────────────────────
@@ -478,6 +505,7 @@ if (JSON.stringify(manifest.dependencies) !== JSON.stringify(dependencies)) {
 if (changes.length > 0 && !dryRun) {
   const manifestBackup = backupOf(manifestPath);
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+  pruneBackups(manifestPath);
   say("profile: " + changes.join("; ") + " (backup " + manifestBackup + ")");
 } else if (changes.length > 0) {
   say("would update profile: " + changes.join("; "));
@@ -722,6 +750,7 @@ if (patchBefore !== null) {
     } else {
       const patchBackup = backupOf(patchPath);
       writeFileSync(patchPath, rewritten.text);
+      pruneBackups(patchPath);
       say("profile patch: " + rewritten.notes.join("; ") + " (backup " + patchBackup + ")");
     }
   } else {
