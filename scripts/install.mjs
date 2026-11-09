@@ -161,11 +161,15 @@ const installedBuild = join(vendorBili, "dist", "index.js");
 const repoBuild = join(here, "..", "dist", "index.js");
 const sourceBuild = join(target, "dist", "index.js");
 // A stock billion-context has an unpatched build to offer, and copying that over
-// the vendored one would silently ship a proxy without the compression fixes.
-// Only a build that carries the patched encoder may come in from outside.
+// the vendored one would silently ship a proxy without our changes. A build is
+// ours only when it carries the plugin-lane guard that
+// scripts/patch-bili-build.mjs writes; the build script also writes the
+// __biliEncZlib encoder block, so either marker identifies a patched build.
+const BUILD_MARKERS = ["__biliPluginLaneSnapshot", "__biliEncZlib"];
 const isPatchedBuild = (file) => {
   try {
-    return readFileSync(file, "latin1").includes("__biliEncZlib");
+    const text = readFileSync(file, "latin1");
+    return BUILD_MARKERS.some((marker) => text.includes(marker));
   } catch {
     return false;
   }
@@ -391,7 +395,7 @@ installBuild();
 // outside (--build) does not have it, so it is re-asserted here rather than
 // trusted to whoever refreshed the vendor tree.
 if (!dryRun) {
-  execFileSync(process.execPath, [join(here, "patch-plugin-lane-snapshot.mjs"), join(vendorBili, "dist", "index.js")], {
+  execFileSync(process.execPath, [join(here, "patch-bili-build.mjs"), join(vendorBili, "dist", "index.js")], {
     stdio: ["ignore", "ignore", "inherit"],
   });
 }

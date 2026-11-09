@@ -1,6 +1,6 @@
 # bili-context-patch
 
-[billion-context](https://github.com/ranxianglei/billion-context)（命令名 `bili`）的自维护构建，基线 **v0.1.213**，MIT 许可。
+[billion-context](https://github.com/ranxianglei/billion-context)（命令名 `bili`）的自维护构建，代码取自上游 master `406193b2`（上游版本号仍是 0.1.213，但比 0.1.213 那次发版多 155 个提交），MIT 许可。
 
 相对上游，这个包多带一个[模型请求加速](https://github.com/No-ni/dsh-plugin-model-request-accelerator)插件：压缩请求体、预传输共享对话历史，并给出每次请求的耗时面板。两样东西装在一起，所以「设置 → 插件」里只有一张 `bili-context-patch`；bili 面板与「模型请求加速」两个设置页照旧各管各的。
 
@@ -38,8 +38,8 @@ dsh plugin --profile desktop remove bili-context-patch
 - `lib/` —— 主机入口 `index.js`、fork 血缘补丁 `fork-lineage.js`、客户端合并包 `client.js`、上游转发 `upstream.js`
 - `vendor/` —— 两个上游的源码副本，自包含，不依赖 profile 里的其他包；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
 - `dsh.bundle.patch.yml` —— 组合层
-- `patches/` —— 相对上游 v0.1.213 的 diff
-- `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`patch-plugin-lane-snapshot.mjs`（给 bili 构建打两处补丁：快照渲染开关、fork 首轮借用父会话记录）、`restart.mjs`、`smoke.mjs`
+- `patches/` —— 我们对 bili 构建做的改动：`outbound-encoding.block.js` 是请求体压缩那一整块代码，其余由脚本按锚点插入
+- `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`patch-bili-build.mjs`（给 bili 构建打三处补丁：请求体压缩、快照渲染开关、fork 首轮借用父会话记录）、`restart.mjs`、`smoke.mjs`
 
 `vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` 是 `node scripts/install.mjs --build` 生成的，不要手改。补丁本身改了什么，见 [PATCHES.md](PATCHES.md)。
 
@@ -60,18 +60,46 @@ dsh 这条道每轮整份重发历史，而 billion-context 的插件道默认�
 
 细节见 [PATCHES.md](PATCHES.md) 第 13、14 节。
 
-## 维护：上游发新版
+## 0.5.0：跟上上游主线
 
-1. 按 `patches/` 里的 diff 把改动落到新版 bili 的 `dist/index.js` 上（锚点位置见 PATCHES.md）。
-2. 把打好补丁的 bili 目录指给脚本重建：
+0.1.213 之后上游又走了 155 个提交，这一版把它们全部吸收进来，我们的三处改动（请求体压缩、快照渲染开关、fork 首轮借用父会话记录）改成脚本对构建产物按锚点重打，不再是一份手改的二进制。
+
+用户能感觉到的变化：
+
+| 变化 | 说明 |
+| --- | --- |
+| fork 继承的折叠块不再丢 | 从父会话分出来时，父会话里已经折叠的段落一起带过来 |
+| 折叠摘要挪到折叠处 | 摘要落在它替代的那段内容的位置，原位留一个指针，前缀更稳 |
+| 出站不以 assistant 结尾 | 历史尾部是助手消息时自动补齐，避免上游不认这条前缀 |
+| 被切断的重放更聪明 | 只被切断的推理内容可以原样重放，不必整轮重来 |
+| 请求体上限 | 新增单条会话消息上限开关（默认关闭）＋ 32MiB 解码准入 |
+| 端口被占会强接管 | bili 进程端口卡死时直接接管，不用手杀 |
+
+## 维护：上游再发新版
+
+1. 取上游源码构建一份（版本对齐上游 master）：
 
    ```sh
-   node scripts/install.mjs --build --bili /path/to/billion-context
+   git clone --depth 1 https://github.com/ranxianglei/billion-context.git /tmp/bili-src
+   cd /tmp/bili-src && npm ci && npm run build
    ```
 
-3. 看 `git diff`、改 `package.json` 版本号、提交。
+2. 打我们的补丁并冒烟。脚本按锚点定位，上游挪了代码会直接报错停下，不会静默丢改动：
 
-`--build` 只接受打过补丁的构建（认 `__biliEncZlib`），没打补丁的 bili 不会被拷进来顶掉现有的；覆盖之前还会先跑一遍冒烟测试。
+   ```sh
+   node scripts/patch-bili-build.mjs /tmp/bili-src/dist/index.js
+   node scripts/smoke.mjs /tmp/bili-src/dist/index.js
+   ```
+
+3. 把构建和源码收进仓库，重生成包装包：
+
+   ```sh
+   node scripts/install.mjs --build --bili /tmp/bili-src
+   ```
+
+4. 看 `git diff`、改 `package.json` 版本号、提交。
+
+`--build` 只接受打过补丁的构建（认 `__biliPluginLaneSnapshot` 或 `__biliEncZlib`），没打补丁的 bili 不会被拷进来顶掉现有的；覆盖之前还会先跑一遍冒烟测试。
 
 ## 许可
 

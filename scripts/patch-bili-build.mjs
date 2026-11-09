@@ -1,18 +1,24 @@
 #!/usr/bin/env node
-// Two written-in changes on the vendored billion-context build. Both are
-// re-applied by install.mjs after any build lands, so an upstream refresh
-// cannot quietly drop them.
+// The changes we make to a billion-context build. Every one of them is
+// re-applied by install.mjs after a build lands, so an upstream refresh cannot
+// quietly drop them; each step checks its own anchors and stops with a message
+// when upstream moved the code it edits.
 //
-//   1. plugin-lane snapshot render  — the dsh shim resends the whole history
+//   1. outbound request-body compression — gzip/brotli before the body leaves
+//      the machine, the x-accel-compress directive, the per-request receipt
+//      ring and GET /__bili/encode-stats. The block itself lives in
+//      patches/outbound-encoding.block.js because it is a single long line.
+//
+//   2. plugin-lane snapshot render — the dsh shim resends the whole history
 //      every turn; snapshot render is skipped on plugin lanes by design, so the
 //      outbound prefix was re-derived (and re-folded) each round and the cache
 //      seam landed mid-body. The guard now asks a marker file.
 //
-//   2. fork child renders the parent transcript on its first request — the
+//   3. fork child renders the parent transcript on its first request — the
 //      child has no unified rows until its first save, which is exactly the
 //      turn that could have reused the parent's cached prefix.
 //
-// Usage: node scripts/patch-plugin-lane-snapshot.mjs [dist/index.js]
+// Usage: node scripts/patch-bili-build.mjs [dist/index.js]
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -22,7 +28,40 @@ const target = process.argv[2] ?? join(here, "vendor", "billion-context", "dist"
 let text = readFileSync(target, "latin1");
 let changed = false;
 
-// ── 1. the plugin-lane guard ────────────────────────────────────────────────
+const replaceOnce = (label, find, replacement) => {
+  const hits = text.split(find).length - 1;
+  if (hits !== 1) {
+    console.error(label + ': "' + find + '" matched ' + hits + " times, expected 1 — upstream changed, re-derive the patch");
+    process.exit(1);
+  }
+  text = text.replace(find, replacement);
+  changed = true;
+};
+
+// ── 1. outbound request-body compression ────────────────────────────────────
+const BLOCK = readFileSync(join(here, "patches", "outbound-encoding.block.js"), "latin1").replace(/\s+$/, "");
+const FETCH_ANCHOR = "async function fetchWithTimeout(";
+const ENTER = "checkOutboundBody(opts.body);";
+const LOGS_ROUTE = "return sendWebLogs(res,req);";
+
+if (text.includes("var __biliEncZlib=")) {
+  console.log("outbound encoding: already patched");
+} else {
+  if (!text.includes("const require = __biliCreateRequire(import.meta.url);")) {
+    console.error("outbound encoding: this build has no module-level require — the block would not resolve node:zlib");
+    process.exit(1);
+  }
+  replaceOnce("outbound encoding", FETCH_ANCHOR, BLOCK + "\n" + FETCH_ANCHOR);
+  replaceOnce("outbound encoding", ENTER, ENTER + "__biliEncodeOutbound(opts,url);");
+  replaceOnce(
+    "outbound encoding",
+    LOGS_ROUTE,
+    LOGS_ROUTE + 'if(req.method==="GET"&&req.url?.startsWith("/__bili/encode-stats"))return __biliSendEncStats(res,req);',
+  );
+  console.log("outbound encoding: patched");
+}
+
+// ── 2. the plugin-lane guard ────────────────────────────────────────────────
 const ORIGINAL = "if(deps.pluginMode)return clientMsgs;";
 const PATCHED = "if(deps.pluginMode&&!__biliPluginLaneSnapshot())return clientMsgs;";
 const VIEW_ANCHOR = "function maybeSnapshotView(session,clientMsgs,deps){";
@@ -32,9 +71,8 @@ const HELPER_LANE =
 if (text.includes(PATCHED) && text.includes("function __biliPluginLaneSnapshot()")) {
   console.log("plugin-lane snapshot: already patched");
 } else {
-  const hits = text.split(ORIGINAL).length - 1;
-  if (hits !== 1) {
-    console.error("plugin-lane snapshot: expected exactly one guard, found " + hits + " — upstream changed, re-derive the patch");
+  if (text.split(ORIGINAL).length !== 2) {
+    console.error("plugin-lane snapshot: expected exactly one guard, found " + (text.split(ORIGINAL).length - 1) + " — upstream changed, re-derive the patch");
     process.exit(1);
   }
   if (text.split(VIEW_ANCHOR).length !== 2) {
@@ -46,7 +84,7 @@ if (text.includes(PATCHED) && text.includes("function __biliPluginLaneSnapshot()
   console.log("plugin-lane snapshot: patched");
 }
 
-// ── 2. a fork child renders the parent transcript on its first request ──────
+// ── 3. a fork child renders the parent transcript on its first request ──────
 const CHILD_ANCHOR = "function loadTranscriptBase(session){";
 const FUNCTION_END = "function assembleView(rows,blockSeeds,coveredSeqUnion,d,tailMsgs){";
 const HELPER_FORK =
@@ -74,7 +112,7 @@ if (text.includes("function __biliForkTranscriptSource(session,store)")) {
   for (const [find, repl] of swaps) {
     const n = next.split(find).length - 1;
     if (n !== 1) {
-      console.error('fork transcript source: "' + find + '" matched ' + n + ' times inside loadTranscriptBase, expected 1');
+      console.error('fork transcript source: "' + find + '" matched ' + n + " times inside loadTranscriptBase, expected 1");
       process.exit(1);
     }
     next = next.replace(find, repl);

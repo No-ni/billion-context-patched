@@ -177,9 +177,9 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 - `lib/index.js`、`lib/fork-lineage.js`、`lib/client.template.js`、`package.json` —— 手写的部分
 - `vendor/` —— 两个上游的副本，**直接提交**，安装时不再需要网络或先装上游
 - `lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` —— `install.mjs --build` 生成的产物，也提交，装下来即可运行
-- `patches/` —— 相对上游的 diff，供维护者核对与重做补丁
+- `patches/` —— 我们对构建做的改动，`outbound-encoding.block.js` 是第 1–4 节那一整块代码，其余由 `scripts/patch-bili-build.mjs` 按锚点插入
 
-补丁版构建在仓库里只有一份：`vendor/billion-context/dist/index.js`（旧版在仓库根另存过一份 `dist/`，两份内容相同，已合并）。脚本允许用 `--bili <目录>` 从外部更新它，但只接受带 `__biliEncZlib` 的构建，没打过补丁的 bili 不会顶掉现有构建。
+补丁版构建在仓库里只有一份：`vendor/billion-context/dist/index.js`（旧版在仓库根另存过一份 `dist/`，两份内容相同，已合并）。脚本允许用 `--bili <目录>` 从外部更新它，但只接受带 `__biliPluginLaneSnapshot` 或 `__biliEncZlib` 的构建，没打过补丁的 bili 不会顶掉现有构建。
 
 取源顺序（0.4.2 起）：显式 `--bili` → 本包自带的 `vendor/billion-context` → profile 里已装的 billion-context → 上次装进 profile 的 vendor 副本。自带副本排在最前，是因为它自洽（清单、层、agent 文件、补丁构建来自同一个上游版本）；否则在已经装过旧版的机器上再跑一次脚本，会继续沿用 profile 里的旧上游，静默不升级。包管理器安装时前两项是同一个路径，等于没有复制。
 
@@ -280,7 +280,7 @@ if(deps.pluginMode&&!__biliPluginLaneSnapshot())return clientMsgs;
 
 **回退**：删掉标记文件并重启 bili 进程，即回到「每轮重新推导」。灰度改回 `false` 则只保留观测。
 
-**重打补丁**：`node scripts/patch-plugin-lane-snapshot.mjs [dist/index.js]`，脚本按 `if(deps.pluginMode)return clientMsgs;` 定位、要求唯一命中、已打过就跳过；`install.mjs` 在安装完构建后自动跑一次，上游换版不会静默丢掉。
+**重打补丁**：`node scripts/patch-bili-build.mjs [dist/index.js]`（第 2 步），脚本按 `if(deps.pluginMode)return clientMsgs;` 定位、要求唯一命中、已打过就跳过；`install.mjs` 在安装完构建后自动跑一次，上游换版不会静默丢掉。
 
 **边界**：快照渲染有大量降级门（锚点校验失败、尾部接不上、行不可解析都会退回旧路径，退回时出站字节与改动前一致）；服务端对前缀有最终解释权，客户端改写头部（检查点、删除）不再复活被丢的行。
 
@@ -311,3 +311,28 @@ function __biliForkTranscriptSource(session,store){
 
 **验证方法**：新建一个 fork 会话发第一句，看日志首轮是否出现 `[snapshot-render] active`，以及 `[acp-usage]` 的 cached 是否不为 0。
 
+## 15. 基线升到上游 master（0.5.0）
+
+**为什么**：0.4.x 的构建是从官方发布的 0.1.213 成品上手工改出来的，改动以 diff 的形式存在（旧文件 `patches/upstream-0.1.213.diff`，已删）。成品本身没有源码，上游再往前走了 155 个提交就吸收不进来。
+
+**现在**：构建来自上游源码（默认分支是 `master`，不是 `main`），取到的提交 `406193b2`。构建命令就是上游自己的：`npm ci && npm run build`。我们对构建的三组改动由 `scripts/patch-bili-build.mjs` 按锚点重打，每一组要求锚点在文件里唯一命中，对不上就报错退出：
+
+| 步骤 | 锚点 | 改动 |
+| --- | --- | --- |
+| 1. 请求体压缩（第 1–4 节） | `async function fetchWithTimeout(`、`checkOutboundBody(opts.body);`、`return sendWebLogs(res,req);` | 插入 `patches/outbound-encoding.block.js` 整块、在转发前调用 `__biliEncodeOutbound`、注册 `GET /__bili/encode-stats` |
+| 2. 快照渲染开关（第 13 节） | `if(deps.pluginMode)return clientMsgs;`、`function maybeSnapshotView(session,clientMsgs,deps){` | 改成先问标记文件，再决定是否跳过 |
+| 3. fork 首轮借用父会话（第 14 节） | `function loadTranscriptBase(session){` … `function assembleView(` | 插入 `__biliForkTranscriptSource`，函数体内四处读表改写 |
+
+**吸收进来的上游改动**（用户可感）：
+
+- `#5970`（`4f807020`）fork 时父会话已折叠的段落一起继承：`if (b.expanded || consumed.has(b.blockId)) continue;`
+- `#5470`（`cc1e2408`+`ad242bf6`）折叠摘要落在折叠点，原位留指针
+- `#5604`（`8c98898e`）出站历史不得以 assistant 结尾
+- `#5951`（`2fa4def4`）只被切断推理内容时可以原样重放
+- `#5981`（`adc863af`）压缩参数被截断时提示重发
+- `#5000`/`#5794`（`d1b2d8fa`）新增 `maxMessages`（默认 0 关闭）、`DEFAULT_INGEST_BODY_BYTES` 32MiB
+- `#5955`（`33bec442`）端口卡死强制接管
+
+**上游这几处没动过**：`src/server/snapshot-render.ts` 在这 155 个提交里一行未改，所以第 2 步的锚点仍然成立；第 3 步锚在 `loadTranscriptBase`，上游也没碰。
+
+**复核方法**：`node scripts/smoke.mjs vendor/billion-context/dist/index.js` 打三路请求，断言出站字节被压缩且没有自己写 content-length；`dist/build-info.json` 记录当前构建对应的上游提交。
