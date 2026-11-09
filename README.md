@@ -39,7 +39,7 @@ dsh plugin --profile desktop remove bili-context-patch
 - `vendor/` —— 两个上游的源码副本，自包含，不依赖 profile 里的其他包；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
 - `dsh.bundle.patch.yml` —— 组合层
 - `patches/` —— 相对上游 v0.1.213 的 diff
-- `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`patch-plugin-lane-snapshot.mjs`（给 bili 构建打快照渲染开关）、`restart.mjs`、`smoke.mjs`
+- `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`patch-plugin-lane-snapshot.mjs`（给 bili 构建打两处补丁：快照渲染开关、fork 首轮借用父会话记录）、`restart.mjs`、`smoke.mjs`
 
 `vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` 是 `node scripts/install.mjs --build` 生成的，不要手改。补丁本身改了什么，见 [PATCHES.md](PATCHES.md)。
 
@@ -56,7 +56,9 @@ dsh 这条道每轮整份重发历史，而 billion-context 的插件道默认�
 | 标记文件 | `~/.config/billion-context/plugin-lane-snapshot.on` | 允许这条道走快照渲染；删掉即回退 |
 | 灰度 | `billion-context.json` 的 `rollout.features.snapshotRender` | 打开才真正改变出站字节；关着只做影子观测 |
 
-细节见 [PATCHES.md](PATCHES.md) 第 13 节。
+**fork 出来的会话第一轮也走这条路**（0.4.4）：子会话在第一次保存前没有自己的记录，会退回旧路径整段重推；现在改成先借用父会话的记录。实测新建 fork 第一轮命中 69%（改动前是 0%，输入 26.5 万），第二轮起 99–100%。
+
+细节见 [PATCHES.md](PATCHES.md) 第 13、14 节。
 
 ## 维护：上游发新版
 
