@@ -249,6 +249,23 @@ if (text.includes(STICKY_MARK)) {
   replaceOnce("sticky-view", STICKY_CALL_ANCHOR, STICKY_CALL);
   console.log("sticky-view: patched");
 }
+// 9. an unanchored newest block must not sink the whole render ----------------------
+// A block is committed before the ingest that writes its message rows, so for a moment
+// the newest block matches no row. loadTranscriptBase used to give up there, which on a
+// plugin lane means shipping the client's raw history and being refused as over-window.
+// The newest block's messages are exactly the ones still arriving in the client's tail,
+// so dropping it from this render costs nothing: they go out raw and the rest of the view
+// stays compressed. An older block stays fatal — its messages would silently vanish.
+const UNANCHORED_MARK = 'newest block "+block.blockId+" is not in the transcript yet';
+const UNANCHORED_ANCHOR = 'if(blockSeqs.size===0)return{reason:"block-unanchored"};';
+const UNANCHORED_REPL = 'if(blockSeqs.size===0){if(block!==activeBlocks2[activeBlocks2.length-1]||blockSeeds.length===0)return{reason:"block-unanchored"};try{console.warn("[snapshot-render] newest block "+block.blockId+" is not in the transcript yet, rendered raw this turn")}catch{}continue}';
+
+if (text.includes(UNANCHORED_MARK)) {
+  console.log("unanchored-newest: already patched");
+} else {
+  replaceOnce("unanchored-newest", UNANCHORED_ANCHOR, UNANCHORED_REPL);
+  console.log("unanchored-newest: patched");
+}
 if (changed) {
   writeFileSync(target, text, "latin1");
   console.log("written " + target);

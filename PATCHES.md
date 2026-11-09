@@ -387,6 +387,7 @@ function __biliForkTranscriptSource(session,store){
 | 6. fork 沿用父会话的缓存钥匙（第 16 节） | `if(pckDecision==="stamp"){rebuilt.prompt_cache_key=session.id}` | 改成 `__biliForkPck(session)`，沿血缘取父会话实际用的那把钥匙 |
 | 7. fork 沿用父会话的消息时刻（第 16 节） | `child.state.nextRunId=parent.state.nextRunId;` | 插入一行：把父会话 `state.tsStamps` 里属于本次前缀的时刻抄给子会话 |
 | 8. 取不到统一记录时沿用上一轮画面（第 17 节） | `function legacyFor(session,deps,clientMsgs,reason){`、`session.metadata["snapshotRenderDegradeReason"]=reason;` | 插入 `__biliStickyView`，退化前先试着沿用本会话上一轮的渲染结果 |
+| 9. 最新的块还没落行时只丢它自己（第 17 节） | `if(blockSeqs.size===0)return{reason:"block-unanchored"};` | 取不到行的是最新那个块就跳过它（这一轮它的消息按原文发出，其余照旧压缩）；取不到行的是更老的块才继续判定整份视图不可用 |
 
 **吸收进来的上游改动**（用户可感）：
 
@@ -443,3 +444,9 @@ function __biliForkTranscriptSource(session,store){
 **条件与边界**：只在插件道（`deps.pluginMode`）接管；没有上一轮记录、尾部对不上、追加超过 8 条、追加段以 tool 开头时都退回原来的退化路径。日志 `[snapshot-render] sticky view (<原因>): pinned=… appended=…`。
 
 **顺带收紧**：fork-pin 命中后把子会话这一轮的渲染结果也登记成它自己的 pin（从子会话再 fork 的孙会话也能复用，sticky 也立刻可用）；pin 表上限 4 → 8；缓存钥匙链上限 512 条。
+
+**这条兜底的极限**：pin 只存在内存里，代理刚重启时一个都没有，所以「重启后的第一轮又撞上同一种瞬时缺失」时它帮不上忙——同一张错误卡片在 19:46 又被客户端显示了一次，查日志那是 19:37 那次请求的重放，19:45 重启之后没有任何新的 fail-fast。真要堵住这一类，得让缺失本身不致命。
+
+**处理（第 9 组，真正的修法）**：`loadTranscriptBase` 里块取不到消息行时，原来一律放弃整份视图。现在按块的位置分两种：取不到行的是**最新的那个块**——它的消息正是客户端尾部还没落盘的那几条，这一轮跳过它没有任何内容损失（这些消息随后按原文接在视图尾部），其余块照旧压缩；取不到行的是**更老的块**——照旧放弃，否则那些消息会从视图里静默消失。跳过还额外要求「至少已经有一个块锚住了」，避免整份视图退化成纯原文。日志 `[snapshot-render] newest block <id> is not in the transcript yet, rendered raw this turn`。
+
+两层的关系：第 9 组从源头上让这一轮能正常渲染（哪怕少折一个块），第 8 组是它之外的兜底（视图整体取不回来时才用上一轮画面）。
