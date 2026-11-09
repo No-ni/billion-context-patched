@@ -39,9 +39,24 @@ dsh plugin --profile desktop remove bili-context-patch
 - `vendor/` —— 两个上游的源码副本，自包含，不依赖 profile 里的其他包；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
 - `dsh.bundle.patch.yml` —— 组合层
 - `patches/` —— 相对上游 v0.1.213 的 diff
-- `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`restart.mjs`、`smoke.mjs`
+- `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`patch-plugin-lane-snapshot.mjs`（给 bili 构建打快照渲染开关）、`restart.mjs`、`smoke.mjs`
 
 `vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` 是 `node scripts/install.mjs --build` 生成的，不要手改。补丁本身改了什么，见 [PATCHES.md](PATCHES.md)。
+
+## 插件道的快照渲染（0.4.3，可关）
+
+dsh 这条道每轮整份重发历史，而 billion-context 的插件道默认「客户端说了算」，于是每轮出站前缀都重新推导：折叠一动中段就位移，上游缓存从中间开始对不上。同一个 fork 会话实测头两轮命中 10.0% / 11.3%。
+
+仓库里的 bili 构建让这条道也能用服务端快照渲染：前缀由服务端统一表渲染，只有尾部追加。实测同一个会话出站 963 KiB → 328–340 KiB，命中 99.4%。
+
+两层开关都在本机，不动插件代码：
+
+| 开关 | 位置 | 作用 |
+| --- | --- | --- |
+| 标记文件 | `~/.config/billion-context/plugin-lane-snapshot.on` | 允许这条道走快照渲染；删掉即回退 |
+| 灰度 | `billion-context.json` 的 `rollout.features.snapshotRender` | 打开才真正改变出站字节；关着只做影子观测 |
+
+细节见 [PATCHES.md](PATCHES.md) 第 13 节。
 
 ## 维护：上游发新版
 

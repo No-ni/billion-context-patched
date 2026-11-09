@@ -385,6 +385,17 @@ const mergedClient = template
 // leaves the installed dist exactly as it was.
 installBuild();
 
+// The vendored build carries one written-in change of its own — the guard that
+// lets billion-context's snapshot render serve plugin lanes, so the dsh shim's
+// full-resend prefix stops being re-derived every turn. A build dropped in from
+// outside (--build) does not have it, so it is re-asserted here rather than
+// trusted to whoever refreshed the vendor tree.
+if (!dryRun) {
+  execFileSync(process.execPath, [join(here, "patch-plugin-lane-snapshot.mjs"), join(vendorBili, "dist", "index.js")], {
+    stdio: ["ignore", "ignore", "inherit"],
+  });
+}
+
 // ── 4. the wrapper's bundle layer ───────────────────────────────────────────
 // billion-context's own layer supplies the compaction gate wiring that the host
 // plane needs (compaction-basic off, presets waiting on the gate, retry policy).

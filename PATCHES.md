@@ -248,3 +248,39 @@ FORK result {"sessionId":"session-9b8ba0f2-b1ae-4619-a41b-cae8c5338781"}
 - 子会话不会被当成 subagent：那条路径还要求 `header.origin === "subagent"`，fork 子会话没有 origin。
 - 会话查询/遥测里会多一个 `parent_id`，语义是对的（它确实是子会话）；`session-query` 的 parent 过滤只在显式按父会话搜索时用到。
 - DSH 改版后若服务名或 fork 实现变了，`ctx.inject` 拿不到服务就不装，行为退回「从零重压」，不会报错、不会阻断启动。
+
+
+## 13. 插件道也走服务端快照渲染（0.4.3，本地试验开关）
+
+**问题**：dsh 原生这条道是插件道，每轮把整段历史重发（实测 2474 → 2670 条、5.4–5.9 MiB）。billion-context 的插件道按设计「客户端说了算」，于是每轮的出站前缀都重新推导：折叠计划一动，中段就位移，上游缓存从中间开始对不上。fork 会话的头两轮实测命中 10.0% / 11.3%，两轮各重新计费约 19 万 token。
+
+**改法**：上游 `src/server/snapshot-render.ts` 的 `maybeSnapshotView` 第一句是
+
+```ts
+if (deps.pluginMode) return clientMsgs; // plugin lane: client-authoritative by design
+```
+
+构建产物里这一句（唯一一处）改成先问一个标记文件：
+
+```js
+if(deps.pluginMode&&!__biliPluginLaneSnapshot())return clientMsgs;
+```
+
+`__biliPluginLaneSnapshot()` 在 `maybeSnapshotView` 前面定义，读：
+
+- `$XDG_CONFIG_HOME/billion-context/plugin-lane-snapshot.on`（默认 `~/.config/billion-context/`）存在即放行；
+- 环境变量 `BILI_PLUGIN_SNAPSHOT=1|0` 覆盖文件判断。
+
+**两层开关**：
+
+1. 上面这枚标记文件只决定「这条道**允许**用快照渲染」。
+2. 真正改变出站字节的是 billion-context 自己的灰度 `snapshotRender`（`~/.config/billion-context/billion-context.json` 里 `rollout.features.snapshotRender`）。灰度关着时只喂 shadow 观测器，出站字节不变。
+
+**生效后的行为**：出站前缀由服务端统一表渲染，只有尾部追加。同一个 fork 会话实测出站 963 KiB → 328–340 KiB，每轮只长 5 KiB，缓存命中 99.4%（中位数 99.2%）。
+
+**回退**：删掉标记文件并重启 bili 进程，即回到「每轮重新推导」。灰度改回 `false` 则只保留观测。
+
+**重打补丁**：`node scripts/patch-plugin-lane-snapshot.mjs [dist/index.js]`，脚本按 `if(deps.pluginMode)return clientMsgs;` 定位、要求唯一命中、已打过就跳过；`install.mjs` 在安装完构建后自动跑一次，上游换版不会静默丢掉。
+
+**边界**：快照渲染有大量降级门（锚点校验失败、尾部接不上、行不可解析都会退回旧路径，退回时出站字节与改动前一致）；服务端对前缀有最终解释权，客户端改写头部（检查点、删除）不再复活被丢的行。
+
