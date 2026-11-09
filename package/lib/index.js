@@ -162,25 +162,66 @@ const entryStore = (ctx) => {
   }
 };
 
+/**
+ * Switch one entry off when it is one of the packages this one replaces.
+ *
+ * `update` only touches the entries in memory: it disposes the fiber, and the
+ * loader writes to disk from the tree changes it makes itself, so nothing here
+ * reaches the user's profile files. Never throws — a failed switch-off is worth
+ * a line in the log, not a broken startup.
+ */
+const suppress = (entry) => {
+  try {
+    const id = entry?.options?.id;
+    if (typeof id !== "string" || !UPSTREAM_IDS.includes(id)) return;
+    if (entry.disabled) return;
+    console.warn("bili-context-patch: switching off the standalone " + id + " entry");
+    Promise.resolve(entry.update({ ...entry.options, disabled: true })).catch((error) => {
+      console.warn("bili-context-patch: " + id + " could not be switched off: " + (error && error.message));
+    });
+  } catch (error) {
+    console.warn("bili-context-patch: could not switch off an upstream entry: " + (error && error.message));
+  }
+};
+
 export function apply(ctx, config) {
-  // Before mounting: a leftover entry still owns the services and routes these
-  // children are about to register.
-  const store = entryStore(ctx);
-  if (store !== null) {
-    for (const id of UPSTREAM_IDS) {
-      const entry = store[id];
-      if (entry === undefined || entry.disabled) continue;
-      try {
-        entry.update({ ...entry.options, disabled: true });
-      } catch (error) {
-        console.warn("bili-context-patch: " + id + " is still running: " + (error && error.message));
-      }
-    }
+  const sweep = () => {
+    const store = entryStore(ctx);
+    if (store === null) return;
+    for (const id of UPSTREAM_IDS) suppress(store[id]);
+  };
+
+  // Anything the plugin page switches on while this session runs — a card can
+  // mount an upstream entry the moment it is turned on, long after this function
+  // returned. The loader announces each entry it creates; follow the
+  // announcements and put it back to sleep.
+  try {
+    ctx.on("loader/entry-init", (entry) => queueMicrotask(() => suppress(entry)));
+  } catch (error) {
+    console.warn("bili-context-patch: cannot watch for upstream entries: " + (error && error.message));
   }
 
-  ctx.plugin(bili);
-  ctx.plugin(compactionGate);
-  ctx.plugin(acceleratorWithoutSchema, config ?? {});
+  // Mount one turn later, so the sweep sees entries that this profile creates
+  // after this one: an upstream listed after this package in dsh.profile.bundles
+  // (a reinstall of it appends its row there) would otherwise start unknown to
+  // us and claim the services and routes the children are about to register.
+  // A microtask is enough — the loader creates the whole tree in one go — and it
+  // keeps the children from starting late enough to look absent to the plugins
+  // that wait for their services.
+  let settled = false;
+  const start = () => {
+    if (settled) return;
+    settled = true;
+    try {
+      sweep();
+      ctx.plugin(bili);
+      ctx.plugin(compactionGate);
+      ctx.plugin(acceleratorWithoutSchema, config ?? {});
+    } catch (error) {
+      console.warn("bili-context-patch: startup failed: " + (error && error.message));
+    }
+  };
+  queueMicrotask(start);
 
   // The "version / check for updates" row in the settings page asks this route.
   // It reports THIS package and, on action=update, pulls the checkout that built

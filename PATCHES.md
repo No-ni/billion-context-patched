@@ -69,7 +69,7 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 2026-11-08T17:41:48.332Z encoded 481153 -> 142851 (br) rid=e79ee3c7-…
 ```
 
-## 5. 一体化层：一个包挂三样东西（0.2.0）
+## 5. 一体化层：一个包挂三样东西（0.2.0 起，0.2.1 加自检）
 
 这一处不在 `dist/index.js` 里，源码是 `package/`，由 `scripts/install.mjs` 在安装时生成到 `<profile>/plugins/bili-context-patch`。
 
@@ -86,7 +86,15 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 
 **上游两个包怎么不见的**：不是被关掉，是**不再被装**。安装脚本从 `dependencies` 删掉 `billion-context` 与 `dsh-plugin-model-request-accelerator` 两行（它们不再是运行时依赖），`dsh.profile.bundles` 里同样只留包装包。没有依赖就没有卡片，没有清单项就没有 Loader 条目。
 
-**兜底**：`package/lib/index.js` 在挂载子插件**之前**遍历 `ctx.get("loader").store.include.subtree.store`，把仍然开着的 `bili-native` / `bili-compaction-gate` / `model-request-accelerator` 条目用 `entry.update({ ...entry.options, disabled: true })` 关掉。正常安装没有这种条目，这条只在有人把上游装回来时起作用。顺序必须在挂载之前：两边注册同一批服务和 HTTP 路由，晚一步关会把已注册的接口一起带走——实测 `/api/model-request-accelerator/version` 变 404。
+**兜底：每次启动都自检一遍（0.2.1）**。正常安装没有上游条目，这三道只在有人把上游装回来、或清单里还留着旧行时才起作用。
+
+1. **启动扫描**：`apply()` 不就地挂载子插件，而是 `queueMicrotask` 一帧之后再干活——先遍历 `ctx.get("loader").store.include.subtree.store`，把仍开着的 `bili-native` / `bili-compaction-gate` / `model-request-accelerator` 用 `entry.update({ ...entry.options, disabled: true })` 关掉，再 `ctx.plugin()` 挂三个子插件。为什么必须晚一帧：条目按 `dsh.profile.bundles` 顺序创建，**上游排在包装包之后**时（把上游重新装回来，新行追加在末尾），同步扫描根本看不到它，等它启动就已经抢走同一批服务与路由。一帧足够——loader 整棵树是一口气建完的；再晚就会让等 `biliBasicCompactionPolicy` 的四个 preset 在启动摘要里报 pending。
+2. **运行期跟踪**：`ctx.on("loader/entry-init", …)` 跟着 loader 每建一个条目的事件走，在微任务里把上游条目重新关掉。插件页把那张卡点开时条目是立刻创建的，不必等重启。（该事件在条目的构造期发出，此时 `options` 还没写入，所以处理函数必须延迟到微任务里再读 `entry.options.id`。）
+3. **只在内存里改**：`entry.update` 不落盘（落盘只发生在 `EntryTree.create/remove` 调 `commit` 的时候），关掉的是运行中的条目，profile 里用户写的一个字都没动。
+
+顺序仍然必须在挂载之前：两边注册同一批服务和 HTTP 路由，晚一步关会把已注册的接口一起带走——实测 `/api/model-request-accelerator/version` 变 404。
+
+验证（`/tmp` 里的 profile 副本 + 真机启动，两个方向都跑过）：① 上游三行排在包装包**之后** → 日志三条 `switching off the standalone …`，只下发一个客户端包，`/api/bili-context-patch/version` 与 `/api/model-request-accelerator/version` 都正常，无重复域、无 `patch: entry … not found`；② 正常安装（上游不在清单里）→ 一条 `switching off` 都没有，启动摘要只剩与本改动无关的缺包提示。
 
 **profile 侧的改写**（由脚本完成、幂等、带 `.bak-<时间戳>` 备份）：
 
