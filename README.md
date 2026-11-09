@@ -39,9 +39,11 @@ dsh plugin --profile desktop remove bili-context-patch
 - `vendor/` —— 两个上游的源码副本，自包含，不依赖 profile 里的其他包；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
 - `dsh.bundle.patch.yml` —— 组合层
 - `patches/` —— 我们对 bili 构建做的改动：`outbound-encoding.block.js` 是请求体压缩那一整块代码，其余由脚本按锚点插入
-- `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`patch-bili-build.mjs`（给 bili 构建打三处补丁：请求体压缩、快照渲染开关、fork 首轮借用父会话记录）、`restart.mjs`、`smoke.mjs`
+- `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`patch-bili-build.mjs`（给 bili 构建按锚点打七处补丁，逐项见 [PATCHES.md](PATCHES.md) 第 0.2 节）、`restart.mjs`、`smoke.mjs`
 
-`vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` 是 `node scripts/install.mjs --build` 生成的，不要手改。补丁本身改了什么，见 [PATCHES.md](PATCHES.md)。
+`vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` 是 `node scripts/install.mjs --build` 生成的，不要手改。
+
+我们相对上游到底改了什么、每处在哪、合并上游时怎么核对，见 [PATCHES.md](PATCHES.md) 第 0 节：四层改动总表、七组补丁的锚点、已废弃的做法、合并清单。
 
 ## 插件道的快照渲染（0.4.3，可关）
 

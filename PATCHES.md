@@ -1,10 +1,70 @@
 # 相对上游 v0.1.213 的改动
 
 - 上游：<https://github.com/ranxianglei/billion-context>（MIT，Copyright (c) 2026 ranxianglei）
-- 本分支基线：**0.1.213**（commit `133f3525c`）
-- 完整 diff：[`patches/upstream-0.1.213.diff`](./patches/upstream-0.1.213.diff)
+- 本分支基线：上游 `master` 的 `406193b2`（上游版本号仍是 0.1.213，比那次发版多 155 个提交，见第 15 节）
+- 我们的改动不是一份 diff：bili 构建上的七组补丁由 `scripts/patch-bili-build.mjs` 按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
 
-改动分两类：上游 bili 的 `dist/index.js` 里的出口压缩（第 1–4 节，见 `patches/` 里的 diff；本仓库里这份构建只有一份，在 `vendor/billion-context/dist/index.js`），以及**安装期**生成的一体化包装包（第 5 节，源码在仓库根）。
+改动分四层：包装包与组合层（第 5 节，源码在仓库根）、bili 构建产物（第 1–4、10、13、14、16 节，构建只有一份，在 `vendor/billion-context/dist/index.js`）、安装期与默认值（第 7、9 节）。第 0 节是总索引。
+
+## 0. 一页看完（改了什么、下次怎么核对）
+
+这一节只做索引和纪律：相对上游改了什么、每处在哪、合并上游时按什么顺序核对。细节在后面各节。
+
+### 0.1 四层改动
+
+| 层 | 文件 | 改了什么 | 上游升级时怎么重打 |
+| --- | --- | --- | --- |
+| 包装包（我们自己的代码） | `lib/index.js`、`lib/fork-lineage.js`、`lib/client.template.js`、`package.json` | 一个 Loader 条目里挂 bili、压缩闸门、加速器；把两个客户端 bundle 的工厂体合成一个 `id`；fork 时补父会话血缘；`/api/bili-context-patch/version` 的版本与更新接口；启动时把仍然开着的上游条目关掉 | 与上游无关，不用重打 |
+| 组合层 | `dsh.bundle.patch.yml`（生成物） | 只保留自己那条 `insert`，其余是 bili 原有的层：`compaction-basic auto: false`、四个 preset 注入 `biliBasicCompactionPolicy`、`llm-deepseek`/`llm-deepseek-account` 的 retry 策略（含 `MALFORMED_RESPONSE`）；两个上游 insert 行删掉 | `install.mjs` 重跑一次即按新层重新生成 |
+| bili 构建产物 | `vendor/billion-context/dist/index.js` | 七组文本补丁（0.2 的表） | `node scripts/patch-bili-build.mjs`，锚点对不上会报错退出 |
+| 安装期 | `scripts/install.mjs`、`scripts/smoke.mjs`、`scripts/restart.mjs` | 取源顺序、构建校验与冒烟、客户端 bundle 合成、profile 改写（dependencies / bundles / 渠道开关）、`--build` 产物生成 | 与上游无关；上游客户端 bundle 封装格式变了会直接报错退出 |
+
+默认值上的两处偏离上游：`promptCache.routing` 兜底为 `enabled`（第 7 节），中转站渠道装好即开请求压缩（第 7 节）。
+
+### 0.2 我们对 bili 构建的七组补丁
+
+改的都是 `vendor/billion-context/dist/index.js`，全部由 `scripts/patch-bili-build.mjs` 按锚点重打；锚点在文件里必须唯一命中，否则脚本报错退出、不写文件。
+
+| # | 做什么 | 锚点（上游原文） | 开关 / 落点 | 细节 |
+| --- | --- | --- | --- | --- |
+| 1 | 出站请求体压缩（gzip/br）、`x-accel-compress` 指令、回执环、`GET /__bili/encode-stats` | `async function fetchWithTimeout(`、`checkOutboundBody(opts.body);`、`return sendWebLogs(res,req);` | 整块代码在 `patches/outbound-encoding.block.js`；算法开关 `~/.local/state/billion-context/upstream-encoding` 或配置 | 第 1–4、10 节 |
+| 2 | 插件道（dsh 原生全量重发）也走服务端快照渲染 | `if(deps.pluginMode)return clientMsgs;`、`function maybeSnapshotView(session,clientMsgs,deps){` | 标记文件 `~/.config/billion-context/plugin-lane-snapshot.on`，或 `BILI_PLUGIN_SNAPSHOT=1` | 第 13 节 |
+| 3 | fork 子会话首轮借用父会话的记录 | `function loadTranscriptBase(session){` … `function assembleView(rows,blockSeeds,coveredSeqUnion,d,tailMsgs){` | 无条件；父记录不可用时退回 `transcript-empty` | 第 14 节 |
+| 4 | fork 子会话首轮直接复用父会话上一轮的渲染结果 | `function maybeSnapshotView(session,clientMsgs,deps){`、`if(!live&&!shadow)return clientMsgs;`、`noteRender(session,deps);return r.view}` | 一次有效，成功后置 `session.metadata.__biliForkPinned` | 第 16 节 |
+| 5 | 出站请求体落盘（只用于诊断） | `function __biliEncodeOutbound(opts,url){` | 标记文件 `~/.local/state/billion-context/body-dump.on`，目录 `…/body-dump/` | 第 16 节 |
+| 6 | fork 子会话沿用父会话的 `prompt_cache_key` | `if(pckDecision==="stamp"){rebuilt.prompt_cache_key=session.id}` | 进程内 `__biliPckChain` 记录每个会话最后盖的钥匙 | 第 16 节 |
+| 7 | fork 子会话沿用父会话的消息时刻 | `child.state.nextRunId=parent.state.nextRunId;` | 只在 fork 那一刻抄一次，之后新消息照常打时间 | 第 16 节 |
+
+第 4 组依赖第 2、3 组先打（脚本会检查并在顺序不对时退出）；其余各组互相独立，都可以单独判定 already patched。
+
+### 0.3 上游没动的部分
+
+入站解压、折叠与摘要策略、健康检查、其余 `/__bili/*` 接口全部是上游原样（第 6 节）。我们只改了「出站请求体怎么发」「插件道要不要用服务端快照」「fork 首轮借不借父会话的东西」这三类。
+
+### 0.4 试过、明确不用的做法
+
+写在这里是为了不再走一遍。每条都实测过。
+
+| 做法 | 为什么不用 |
+| --- | --- |
+| 在 profile 的 `cordis.patch.yml` 里写跟随行（`!!js` 按条件禁用） | 依赖条目创建顺序，行会落到还不存在的条目上，日志 `patch: entry "bili-native" not found`，规则空转 |
+| 在我们自己的层文件里写 `disabled: true` 压住上游条目 | 层按 `dsh.profile.bundles` 顺序合成，包装包排在原版前面时那几行同样落空（重启后三套一起起来） |
+| 靠运行时 `entry.update()` 关原版 | 插件页的卡片和开关是 `dsh.profile.bundles` 的投影，运行时关不掉卡片；只保留作为「用户又把手装回来了」的兜底 |
+| 从上游源码构建 dist | 产物与仓库认的 `__biliEncZlib` 标记、体积都不一致，会破坏 `install.mjs` 的构建校验；改为对构建产物打文本补丁 |
+| 只打开上游 `snapshotRender` 灰度，不打补丁 | `maybeSnapshotView` 对插件道第一句就 `return clientMsgs`，开关对我们这条路无效（第 13 节） |
+| 关掉 `compress.messageTimestamps` 换取 fork 首轮命中 | 已由第 7 组替代，时间戳照常开也能 99%（第 16 节） |
+| `setTimeout` 延迟挂载 + dispose 时恢复上游条目 | 整树重建时多余，且会让已注册的 HTTP 路由短暂消失 |
+
+### 0.5 合并上游的检查清单
+
+1. 取源：`git clone --depth 1 https://github.com/ranxianglei/billion-context.git`（默认分支是 `master`），`npm ci && npm run build`。
+2. 打补丁：`node scripts/patch-bili-build.mjs <新的 dist/index.js>`。七步都应打印 `patched` 或 `already patched`；任何一步报 `… matched N times, expected 1` 就是上游动了这段代码，回到对应节重做锚点。
+3. 自检：`node --check <dist>`，再 `node scripts/smoke.mjs <dist>`（三路压缩断言，必须 OK）。
+4. 记基线：读 `dist/build-info.json` 的 commit，更新 `PATCHES.md` 开头与 `package.json` 的版本号。
+5. 刷新本仓库：`node scripts/install.mjs --build --bili <新的 bili 目录> --out <本仓库>`，让 `vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` 一起重新生成（这一步不碰 profile）。
+6. 装机：`node scripts/install.mjs --skip-smoke`（装进默认 profile；装到别处用 `--profile`），再 `BILI_PORT=<端口> node scripts/restart.mjs`。脚本自己起不来是正常的，DSH 会在一两分钟内把代理拉起。
+7. 真机验证：日志里应有 `[snapshot-render] active`；发一轮看 `[acp-usage] … cache hit`；新建一个 fork 会话，日志应出现 `[snapshot-render] fork-pin active`，且首轮命中 95% 以上（`/__bili/cache-report` 可查逐轮）。
+8. 收尾：`curl http://127.0.0.1:<端口>/__bili/health`、`/__bili/encode-stats` 有记录即说明压缩链在跑。
 
 ## 1. 出口压缩
 
