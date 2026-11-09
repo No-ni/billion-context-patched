@@ -133,3 +133,26 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 - 更新提示：加速器那句“在本插件目录执行 git pull --ff-only” → “拉取补丁仓库并重新生成包装包”
 
 前两个找不到时安装脚本直接报错退出（不然会悄悄退回加速器的旧行为）；第三个找不到只打印一条 warning，因为提示文案不影响功能。
+
+## 10. 压缩请求体的 Content-Length（0.1.1）
+
+**症状**：渠道开了 brotli / gzip 请求体压缩后，对话报 `502 ... UND_ERR_INVALID_ARG`，代理日志里是 `fetch failed <- invalid content-length header`。Node 24（内置 undici 7.16）上必现，同一上游不压缩时正常。
+
+**原因**：`__biliEncodeOutbound` 压缩完自己写了 `h["content-length"] = String(out.length)`。`fetch` 对 Buffer 身体也会补一个，两个值在 Node 24 上被并成 `"5, 5"`，undici 判为非法请求头，请求在到达网络之前就被拒。
+
+**改法**（`dist/index.js`）：
+
+- 删掉那行手动写入，只保留「删掉原请求所有大小写形式的 content-length」，长度交给 `fetch` 按压缩后的 Buffer 计算；
+- 顺手修掉冒烟测试暴露的第二个问题：`x-accel-compress` / `x-accel-rid` 在第一跳就被删了，重试时没有指令，会回落到全局默认编码（`~/.local/state/billion-context/upstream-encoding`，这台机器是 `gzip`），于是「明确要求不压缩」的请求重试时反而被压。现在把这两个判断记在请求对象上（`__biliCompress` / `__biliRid`，不可枚举，不参与头部转发），重试沿用第一次的决定。
+
+**安装期冒烟测试**（`scripts/smoke.mjs`）：从候选 `dist/index.js` 切出真实的压缩函数（`var __biliEncZlib=` 到 `async function fetchWithTimeout(`），对本机模拟上游发三路请求，断言：
+
+1. 上游只收到一个 `content-length`，是纯数字，且等于实收字节数；
+2. 解压后与原文逐字节一致；不压缩那路不能带 `content-encoding`；
+3. 同一请求连调两次不会二次压缩，`content-encoding` 不变；
+4. 内部指令头 `x-accel-compress` 不会转发给上游；
+5. 文本里不得再出现 `h["content-length"]=String(`。
+
+`install.mjs` 在覆盖 `dist/index.js` 之前跑它，失败就退出、不动已装文件；跑在将要运行代理的那个 Node 上（更新接口走 Electron 的 Node，会带上 `ELECTRON_RUN_AS_NODE=1`）。
+
+**重启脚本**（`scripts/restart.mjs`）：成功不再是「端口上有人答应 health」，而是「答应的那个 `instanceId` 和关停前不同」。旧进程优雅退出期间会继续应答，旧脚本把这段当成重启成功，等旧进程真正退出后服务就没了。

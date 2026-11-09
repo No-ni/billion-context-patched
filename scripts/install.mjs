@@ -108,11 +108,27 @@ const writeWithBackup = (file, content) => {
 
 // ── 1. the patched build ────────────────────────────────────────────────────
 const installedBuild = join(target, "dist", "index.js");
+const candidateBuild = join(here, "..", "dist", "index.js");
+// A build that fails its own smoke test never replaces a working one. The call
+// that breaks in production is the user's next model request, and a backup on
+// disk is no help to someone who does not know it is there. The test runs on the
+// Node that will run the proxy - which is the point of it (scripts/smoke.mjs).
+if (!dryRun && !argv.includes("--skip-smoke")) {
+  say("smoke-testing the candidate build (" + process.version + ")");
+  try {
+    execFileSync(process.execPath, [join(here, "smoke.mjs"), candidateBuild], {
+      stdio: "inherit",
+      env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
+    });
+  } catch {
+    fail("smoke test failed; " + installedBuild + " was left untouched");
+  }
+}
 if (dryRun) {
-  say("would install " + join(here, "..", "dist", "index.js") + " into " + installedBuild);
+  say("would install " + candidateBuild + " into " + installedBuild);
 } else {
   const buildBackup = backupOf(installedBuild);
-  copyFileSync(join(here, "..", "dist", "index.js"), installedBuild);
+  copyFileSync(candidateBuild, installedBuild);
   try {
     chmodSync(installedBuild, 0o755);
   } catch {}

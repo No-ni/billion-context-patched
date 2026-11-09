@@ -61,7 +61,7 @@ node scripts/restart.mjs                       # 重启 bili 代理，让新的 
 
 `install.mjs` 依次做这些事，每步都打印结果，每个被改的文件都留 `<文件>.bak-<时间戳>` 备份：
 
-1. 备份并覆盖 `dist/index.js`；
+1. 先拿候选构建跑冒烟测试（`scripts/smoke.mjs`：本机起一个模拟上游，分不压缩 / brotli / gzip 三路，验证到达上游的 `content-length` 只有一个、是个数字、且等于实际字节数，身体解压后与原文一致，重试不会二次压缩）；通过才备份并覆盖 `dist/index.js`，不通过就停在这里，已装的构建原样不动（`--skip-smoke` 可跳过）；
 2. 确保加速器在 `<profile>/plugins/model-request-accelerator`（缺失时 `git clone`，也可用 `--accelerator` 指定）；
 3. 生成 `<profile>/plugins/bili-context-patch`：manifest、主机入口、合并后的 `lib/client.js`、以及从 bili 复制并删掉 insert 的 `dsh.bundle.patch.yml`；
 4. 把它链进 `node_modules`（加速器同样）；
@@ -113,6 +113,8 @@ curl -s http://127.0.0.1:18787/__bili/health
 curl -s "http://127.0.0.1:18787/__bili/encode-stats?rid=<某个 rid>" | head -c 400
 ```
 
+想单独复核压缩链路，不经过对话：`node scripts/smoke.mjs`（默认测仓库里的 `dist/index.js`，也可以传一个路径）。它失败就说明这份构建不能装。
+
 ## 开关
 
 ```sh
@@ -139,7 +141,7 @@ relay channels: ylinkimi, test -> compression on, brotli-first
 
 ### 版本号与检查更新
 
-版本号就是这个包装包自己的三位 semver，写在 `package/package.json` 里，当前 **0.1.0**；发一版就把最后一位加一（0.1.1、0.1.2…），提交推送后远端就有了。基线 bili 版本不写进版本号，记录在安装后 manifest 的 `meta.upstream`（例如 `billion-context@0.1.212`）里。
+版本号就是这个包装包自己的三位 semver，写在 `package/package.json` 里，当前 **0.1.1**；发一版就把最后一位加一（0.1.1、0.1.2…），提交推送后远端就有了。基线 bili 版本不写进版本号，记录在安装后 manifest 的 `meta.upstream`（例如 `billion-context@0.1.212`）里。
 
 设置 → 模型请求加速 页面底部那行「版本 / 检查更新」在合并之后指向**本补丁包**：
 
