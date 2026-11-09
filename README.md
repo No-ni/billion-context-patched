@@ -6,7 +6,7 @@
 
 另外补了一处 DSH 的缺口：**fork 出来的会话现在会写明自己的父会话**（会话头的 `parentSession`）。bili 靠这个字段继承父会话的压缩状态；没有它，fork 出来的子会话会把继承来的上百万 token 正文从零重压一遍，首字要等好几分钟，甚至直接 413。这是包装包宿主半边自己做的（`lib/fork-lineage.js`），bili 的构建没有为此多打一行补丁。
 
-维护当前差异与升级时先读 [MAINTENANCE.md](MAINTENANCE.md)；历史排查和实现细节见 [PATCHES.md](PATCHES.md)。
+项目行为要求与验收条件见 [SPEC.md](SPEC.md)，覆盖全部定制功能及“缓存钥匙默认开启”的明确约定；后续 AI 每次合并前后必须按 SPEC 核对，执行规则见 [AGENTS.md](AGENTS.md)。当前差异与升级流程见 [MAINTENANCE.md](MAINTENANCE.md)；历史排查和实现细节见 [PATCHES.md](PATCHES.md)。
 
 ## 安装
 
