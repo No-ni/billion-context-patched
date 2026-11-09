@@ -1,8 +1,8 @@
-# 相对上游 v0.1.212 的改动
+# 相对上游 v0.1.213 的改动
 
 - 上游：<https://github.com/ranxianglei/billion-context>（MIT，Copyright (c) 2026 ranxianglei）
-- 本分支基线：**0.1.212**（commit `daa082ea`）
-- 完整 diff：[`patches/upstream-0.1.212.diff`](./patches/upstream-0.1.212.diff)
+- 本分支基线：**0.1.213**（commit `133f3525c`）
+- 完整 diff：[`patches/upstream-0.1.213.diff`](./patches/upstream-0.1.213.diff)
 
 改动分两类：上游 bili 的 `dist/index.js` 里的出口压缩（第 1–4 节，见 `patches/` 里的 diff；本仓库里这份构建只有一份，在 `vendor/billion-context/dist/index.js`），以及**安装期**生成的一体化包装包（第 5 节，源码在仓库根）。
 
@@ -118,7 +118,7 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 
 ## 8. 已知限制
 
-- `vendor/billion-context/dist/index.js` 是构建产物，补丁按**文本锚点**落在 0.1.212 上；上游一旦改动这些函数，需要按上面列的位置手工重做
+- `vendor/billion-context/dist/index.js` 是构建产物，补丁按**文本锚点**落在 0.1.213 上；上游一旦改动这些函数，需要按上面列的位置手工重做
 - br 是否被上游网关接受取决于网关版本，这里不做自动降级
 - 包装包的浏览器半侧按**工厂体文本**切分上游 bundle：上游如果改了客户端 bundle 的封装格式（不再是 `factory: (require) => {...}`），安装脚本会直接报错退出，不会生成半成品
 - 安装脚本会改写 profile 的 `package.json` 与 `cordis.patch.yml`（均保留 `.bak-<时间戳>` 备份）；用 DSH 插件管理器更新 bili 或增删别的插件时它不会自动重做这些，做完需要自己跑一次 `install.mjs`

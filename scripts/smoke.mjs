@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const distPath = resolve(process.argv[2] ?? join(here, "..", "dist", "index.js"));
+const distPath = resolve(process.argv[2] ?? join(here, "..", "vendor", "billion-context", "dist", "index.js"));
 const FORBIDDEN = 'h["content-length"]=String(';
 const fail = (message) => {
   console.error("smoke: FAILED - " + message);

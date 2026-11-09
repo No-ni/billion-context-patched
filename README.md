@@ -1,6 +1,6 @@
 # bili-context-patch
 
-[billion-context](https://github.com/ranxianglei/billion-context)（命令名 `bili`）的自维护构建，基线 **v0.1.212**，MIT 许可。
+[billion-context](https://github.com/ranxianglei/billion-context)（命令名 `bili`）的自维护构建，基线 **v0.1.213**，MIT 许可。
 
 相对上游，这个包多带一个[模型请求加速](https://github.com/No-ni/dsh-plugin-model-request-accelerator)插件：压缩请求体、预传输共享对话历史，并给出每次请求的耗时面板。两样东西装在一起，所以「设置 → 插件」里只有一张 `bili-context-patch`；bili 面板与「模型请求加速」两个设置页照旧各管各的。
 
@@ -34,7 +34,7 @@ dsh plugin --profile desktop remove bili-context-patch
 - `lib/` —— 主机入口 `index.js`、客户端合并包 `client.js`、上游转发 `upstream.js`
 - `vendor/` —— 两个上游的源码副本，自包含，不依赖 profile 里的其他包；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
 - `dsh.bundle.patch.yml` —— 组合层
-- `patches/` —— 相对上游 v0.1.212 的 diff
+- `patches/` —— 相对上游 v0.1.213 的 diff
 - `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`restart.mjs`、`smoke.mjs`
 
 `vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` 是 `node scripts/install.mjs --build` 生成的，不要手改。补丁本身改了什么，见 [PATCHES.md](PATCHES.md)。
