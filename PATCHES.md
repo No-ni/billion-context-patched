@@ -386,6 +386,7 @@ function __biliForkTranscriptSource(session,store){
 | 5. 请求体落盘（诊断，默认关） | `function __biliEncodeOutbound(opts,url){` | 插入 `__biliDumpBody`，只有标记文件存在时才写盘 |
 | 6. fork 沿用父会话的缓存钥匙（第 16 节） | `if(pckDecision==="stamp"){rebuilt.prompt_cache_key=session.id}` | 改成 `__biliForkPck(session)`，沿血缘取父会话实际用的那把钥匙 |
 | 7. fork 沿用父会话的消息时刻（第 16 节） | `child.state.nextRunId=parent.state.nextRunId;` | 插入一行：把父会话 `state.tsStamps` 里属于本次前缀的时刻抄给子会话 |
+| 8. 取不到统一记录时沿用上一轮画面（第 17 节） | `function legacyFor(session,deps,clientMsgs,reason){`、`session.metadata["snapshotRenderDegradeReason"]=reason;` | 插入 `__biliStickyView`，退化前先试着沿用本会话上一轮的渲染结果 |
 
 **吸收进来的上游改动**（用户可感）：
 
@@ -430,3 +431,15 @@ function __biliForkTranscriptSource(session,store){
 | ＋第 7 组：沿用父会话时刻，时间戳重新打开 | 78.8K | 78.3K | **99.4%**（第二轮 98.9%、第三轮 99.7%） |
 
 **代价与注意**：改动上线后每个会话的下一轮会冷一次（标签字节变了）；第 7 组只在 fork 那一刻抄一次时刻，之后子会话的新消息照常按自己的时间打，`compress.messageTimestamps` 保持默认（开）。
+
+## 17. 取不到统一记录时，沿用上一轮画面（0.5.2）
+
+**现象**：19:37 有一次请求直接失败——`preflight fail-fast 502 (retryable=false)`，报「上下文约 204 万 token 超过模型窗口 28.4 万，且找不到可压缩的段落」。两秒后宿主自动重试就成功了。
+
+**根因**：那一轮快照渲染退回了旧路径（日志 `[snapshot-render] legacy fallback (block-unanchored)`）——某个生效中的块在统一记录里找不到自己的消息行。退回本身是瞬时的：压缩刚提交这个块，写消息行的 ingest 还没跟上（同一次请求的日志里有 `slow-ingest … path=full`，说明增量快路径退回了整份重写），下一次请求记录就齐了。要命的是插件道上客户端发来的消息**就是整段原始历史**（4871 条 / 7.5 MiB），旧路径把它原样交出，preflight 压不下去，只能按超窗拒绝。
+
+**处理**（第 8 组）：`legacyFor` 在退回旧路径前先问一次 `__biliStickyView`——如果这个会话上一轮渲染过、客户端消息的尾部与那次一致、追加不超过 8 条，就用上一轮的渲染结果接上新消息。结果是：存储短暂不齐时这一轮少压一点（新消息可能还没折进摘要），但请求照常发出，而不是整份原始历史被拒。
+
+**条件与边界**：只在插件道（`deps.pluginMode`）接管；没有上一轮记录、尾部对不上、追加超过 8 条、追加段以 tool 开头时都退回原来的退化路径。日志 `[snapshot-render] sticky view (<原因>): pinned=… appended=…`。
+
+**顺带收紧**：fork-pin 命中后把子会话这一轮的渲染结果也登记成它自己的 pin（从子会话再 fork 的孙会话也能复用，sticky 也立刻可用）；pin 表上限 4 → 8；缓存钥匙链上限 512 条。

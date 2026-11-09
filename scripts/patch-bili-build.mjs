@@ -17,11 +17,25 @@
 //   3. fork child renders the parent transcript on its first request — the
 //      child has no unified rows until its first save, which is exactly the
 //      turn that could have reused the parent's cached prefix.
-////
 //   4. fork-pin — patch 3 makes the child render the same transcript, but the
 //      rendered view still differs (block anchors, tail split), so the cache
 //      seam moves and the first turn misses anyway. The parent's last rendered
 //      view is kept here and handed to the child for that one turn, verbatim.
+//
+//   5. body dump — diagnostics only, writes the outbound body when a marker
+//      file exists; off unless someone is comparing two turns.
+//
+//   6. fork cache-key lineage — the forked session stamps the key its parent
+//      actually used, so upstream files both under the same cache entry.
+//
+//   7. fork timestamps — the child's stamp table starts empty, so inherited
+//      messages would be re-stamped at the fork's clock and the tag bytes
+//      drift; the parent's stamps are copied for the prefix instead.
+//
+//   8. sticky view — when the unified transcript cannot anchor a block, the
+//      old path hands back the client's messages, which on a plugin lane is the
+//      whole raw history and gets refused as over-window; the session's own last
+//      rendered view is reused instead.
 //
 // Usage: node scripts/patch-bili-build.mjs [dist/index.js]
 import { readFileSync, writeFileSync } from "node:fs";
@@ -136,8 +150,8 @@ if (text.includes("function __biliForkTranscriptSource(session,store)")) {
 const PIN_HELPERS = [
   "const __biliPinnedViews=new Map();",
   'const __biliPinLog=(deps,line)=>{try{if(deps&&typeof deps.log==="function")return void deps.log("info",line)}catch{}try{console.warn(line)}catch{}};',
-  'const __biliPinViewRecord=(session,clientMsgs,view)=>{try{if(!session||typeof session.id!=="string"||!Array.isArray(clientMsgs)||!Array.isArray(view)||view.length===0)return;const pin={view:JSON.parse(JSON.stringify(view)),count:clientMsgs.length,tail:JSON.stringify(clientMsgs[clientMsgs.length-1]??null).slice(0,200),at:Date.now()};__biliPinnedViews.delete(session.id);__biliPinnedViews.set(session.id,pin);while(__biliPinnedViews.size>4)__biliPinnedViews.delete(__biliPinnedViews.keys().next().value)}catch{}};',
-  'const __biliForkPinView=(session,clientMsgs,deps)=>{try{const md=session&&session.metadata;if(!md||md.__biliForkPinned)return null;const parent=md.parentConversationId;if(typeof parent!=="string"||parent.length===0)return null;const pin=__biliPinnedViews.get(parent);if(!pin){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: no-pin-for-parent");return null}if(!Array.isArray(clientMsgs)||clientMsgs.length<pin.count){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: shorter-than-pin");return null}if(JSON.stringify(clientMsgs[pin.count-1]??null).slice(0,200)!==pin.tail){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: prefix-mismatch");return null}if(clientMsgs.length-pin.count>8){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: too-many-new-messages");return null}const extra=clientMsgs.slice(pin.count);if(extra.length>0&&extra[0]&&extra[0].role==="tool"){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: appended-starts-with-tool");return null}const msgs=pin.view.concat(extra);if(msgs.length===0){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: empty");return null}md.__biliForkPinned=true;__biliPinLog(deps,"[snapshot-render] fork-pin active parent="+parent.slice(0,8)+" pinned="+pin.view.length+" appended="+extra.length);return msgs}catch(e){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: "+((e&&e.message)||"error"));return null}};',
+  'const __biliPinViewRecord=(session,clientMsgs,view)=>{try{if(!session||typeof session.id!=="string"||!Array.isArray(clientMsgs)||!Array.isArray(view)||view.length===0)return;const pin={view:JSON.parse(JSON.stringify(view)),count:clientMsgs.length,tail:JSON.stringify(clientMsgs[clientMsgs.length-1]??null).slice(0,200),at:Date.now()};__biliPinnedViews.delete(session.id);__biliPinnedViews.set(session.id,pin);while(__biliPinnedViews.size>8)__biliPinnedViews.delete(__biliPinnedViews.keys().next().value)}catch{}};',
+  'const __biliForkPinView=(session,clientMsgs,deps)=>{try{const md=session&&session.metadata;if(!md||md.__biliForkPinned)return null;const parent=md.parentConversationId;if(typeof parent!=="string"||parent.length===0)return null;const pin=__biliPinnedViews.get(parent);if(!pin){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: no-pin-for-parent");return null}if(!Array.isArray(clientMsgs)||clientMsgs.length<pin.count){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: shorter-than-pin");return null}if(JSON.stringify(clientMsgs[pin.count-1]??null).slice(0,200)!==pin.tail){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: prefix-mismatch");return null}if(clientMsgs.length-pin.count>8){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: too-many-new-messages");return null}const extra=clientMsgs.slice(pin.count);if(extra.length>0&&extra[0]&&extra[0].role==="tool"){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: appended-starts-with-tool");return null}const msgs=pin.view.concat(extra);if(msgs.length===0){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: empty");return null}__biliPinViewRecord(session,clientMsgs,msgs);md.__biliForkPinned=true;__biliPinLog(deps,"[snapshot-render] fork-pin active parent="+parent.slice(0,8)+" pinned="+pin.view.length+" appended="+extra.length);return msgs}catch(e){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: "+((e&&e.message)||"error"));return null}};',
 ].join("\n");
 
 const PIN_MARK = "const __biliPinnedViews=new Map();";
@@ -176,7 +190,7 @@ const PKC_MARK = "const __biliPckChain=new Map();";
 const PKC_ANCHOR = "if(pckDecision===\"stamp\"){rebuilt.prompt_cache_key=session.id}";
 const PKC_REPL = "if(pckDecision===\"stamp\"){rebuilt.prompt_cache_key=__biliForkPck(session)}";
 const PKC_OLD = "function __biliForkPck(session){try{var md=session&&session.metadata;if(md&&typeof md.parentConversationId===\"string\"&&md.parentConversationId.length&&__biliPluginLaneSnapshot())return md.parentConversationId}catch(e){}return session.id};";
-const PKC_HELPER = "const __biliPckChain=new Map();function __biliForkPck(session){try{var own=session&&session.id;var md=session&&session.metadata;var key=own;if(md&&typeof md.parentConversationId===\"string\"&&md.parentConversationId.length&&__biliPluginLaneSnapshot()){var up=__biliPckChain.get(md.parentConversationId);key=up||md.parentConversationId}if(own)__biliPckChain.set(own,key);return key}catch(e){return session&&session.id}};";
+const PKC_HELPER = "const __biliPckChain=new Map();function __biliForkPck(session){try{var own=session&&session.id;var md=session&&session.metadata;var key=own;if(md&&typeof md.parentConversationId===\"string\"&&md.parentConversationId.length&&__biliPluginLaneSnapshot()){var up=__biliPckChain.get(md.parentConversationId);key=up||md.parentConversationId}if(own){__biliPckChain.delete(own);__biliPckChain.set(own,key)}while(__biliPckChain.size>512)__biliPckChain.delete(__biliPckChain.keys().next().value);return key}catch(e){return session&&session.id}};";
 
 if (text.includes(PKC_MARK)) {
   console.log("fork-pck: already patched");
@@ -208,6 +222,32 @@ if (text.includes(TS_MARK)) {
   text = text.split(TS_ANCHOR).join(TS_REPL);
   changed = true;
   console.log("fork-ts: patched");
+}
+// 8. keep the last good view when the unified transcript cannot be anchored ---------
+// maybeSnapshotView hands the client's messages back whenever the store cannot line a
+// block up with its rows. That is transient — a commit lands, the ingest that writes its
+// rows lags (the delta fast path falls back, the WAL grows) and a moment later the rows
+// are there, which is exactly what the host's automatic retry sees. In the plugin lane
+// the client's messages ARE the whole raw history, so the fallback ships megabytes and
+// preflight refuses the request with a 502 instead of compressing it. Reuse the session's
+// own last rendered view, behind the same guards as the fork pin, so a store hiccup costs
+// one turn without new compression rather than the request itself.
+const STICKY_MARK = "function __biliStickyView(";
+const STICKY_ANCHOR = "function legacyFor(session,deps,clientMsgs,reason){";
+const STICKY_CALL_ANCHOR = 'session.metadata["snapshotRenderDegradeReason"]=reason;';
+const STICKY_CALL = STICKY_CALL_ANCHOR + "const __biliSticky=__biliStickyView(session,clientMsgs,deps,reason);if(__biliSticky)return __biliSticky;";
+const STICKY_HELPER =
+  'function __biliStickyView(session,clientMsgs,deps,reason){try{if(!deps||!deps.pluginMode)return null;const pin=session&&__biliPinnedViews.get(session.id);if(!pin)return null;if(!Array.isArray(clientMsgs)||clientMsgs.length<pin.count)return null;if(JSON.stringify(clientMsgs[pin.count-1]??null).slice(0,200)!==pin.tail)return null;const extra=clientMsgs.slice(pin.count);if(extra.length>8)return null;if(extra.length>0&&extra[0]&&extra[0].role==="tool")return null;const msgs=pin.view.concat(extra);if(msgs.length===0)return null;__biliPinLog(deps,"[snapshot-render] sticky view ("+reason+"): pinned="+pin.view.length+" appended="+extra.length);return msgs}catch(e){__biliPinLog(deps,"[snapshot-render] sticky view skipped: "+((e&&e.message)||"error"));return null}};';
+
+if (text.includes(STICKY_MARK)) {
+  console.log("sticky-view: already patched");
+} else if (!text.includes(PIN_MARK)) {
+  console.error("sticky-view: needs step 4 applied first — run it, then re-run this script");
+  process.exit(1);
+} else {
+  replaceOnce("sticky-view", STICKY_ANCHOR, STICKY_HELPER + STICKY_ANCHOR);
+  replaceOnce("sticky-view", STICKY_CALL_ANCHOR, STICKY_CALL);
+  console.log("sticky-view: patched");
 }
 if (changed) {
   writeFileSync(target, text, "latin1");
