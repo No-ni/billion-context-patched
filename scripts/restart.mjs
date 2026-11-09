@@ -16,16 +16,30 @@
 //    health poll counts as one - the old script held the very connection that
 //    kept the shutdown from completing.
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { request } from "node:http";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const port = Number(process.env.BILI_PORT ?? process.argv[2] ?? 18787);
+const explicitPort = process.env.BILI_PORT ?? process.argv[2];
+const statePath = join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "billion-context", "proxy-origin");
+const initialInstance = (() => { try { return JSON.parse(readFileSync(statePath, "utf8")); } catch { return {}; } })();
+const discoveredPort = () => {
+  try {
+    const value = JSON.parse(readFileSync(statePath, "utf8")).port;
+    return Number.isInteger(value) && value > 0 && value <= 65535 ? value : undefined;
+  } catch { return undefined; }
+};
+let port = Number(explicitPort ?? discoveredPort() ?? 18787);
+if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("invalid bili port");
 const pkg =
-  process.env.BILI_PKG ?? join(homedir(), ".dsh", "profiles", "desktop", "node_modules", "billion-context");
+  process.env.BILI_PKG ??
+  [join(homedir(), ".dsh", "profiles", "desktop", "plugins", "bili-context-patch", "vendor", "billion-context"),
+   join(homedir(), ".dsh", "profiles", "desktop", "node_modules", "billion-context")]
+    .find(path => existsSync(join(path, "dist", "index.js")));
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 /** One request, one connection, closed afterwards. */
@@ -37,6 +51,8 @@ const call = (method, path) =>
         const chunks = [];
         res.on("data", (chunk) => chunks.push(chunk));
         res.on("end", () => done({ status: res.statusCode, text: Buffer.concat(chunks).toString("utf8") }));
+        res.on("aborted", () => done(null));
+        res.on("error", () => done(null));
       },
     );
     req.on("timeout", () => req.destroy());
@@ -46,12 +62,13 @@ const call = (method, path) =>
 
 /** The proxy, or null when nothing is serving. A 503 "starting" also reads as down. */
 const info = async () => {
+  if (explicitPort === undefined) port = discoveredPort() ?? port;
   const answer = await call("GET", "/__bili/health");
   if (answer === null || answer.status !== 200) return null;
   try {
     const body = JSON.parse(answer.text);
-    if (body === null || body.ok !== true) return null;
-    return { pid: body.pid, instanceId: body.instanceId, version: body.version };
+    if (body === null || body.ok !== true || typeof body.instanceId !== "string" || !body.instanceId || !Number.isInteger(body.pid)) return null;
+    return { pid: body.pid, instanceId: body.instanceId, version: body.version, parentPid: body.watchdog?.parentPid };
   } catch {
     return null;
   }
@@ -97,8 +114,8 @@ if (current === null) {
     );
     process.exit(1);
   }
-  const entry = join(pkg, "dist", "index.js");
-  if (!existsSync(entry)) {
+  const entry = pkg && join(pkg, "dist", "index.js");
+  if (!entry || !existsSync(entry)) {
     console.error("cannot start: " + entry + " does not exist");
     process.exit(1);
   }
@@ -106,9 +123,31 @@ if (current === null) {
   const child = spawn(process.execPath, [entry, "start", "--host", "127.0.0.1", "--port", String(port)], {
     detached: true,
     stdio: "ignore",
+    env: { ...process.env,
+      BILI_LAUNCH_TOKEN: randomUUID(),
+      ...(initialInstance.lane ? {BILI_LAUNCHER_LANE:initialInstance.lane} : {}),
+      ...(before?.parentPid ? {BILI_PARENT_PID:String(before.parentPid)} : {}),
+      ...(initialInstance.modelWindows ? {BILI_LAUNCHER_MODEL_WINDOWS:JSON.stringify(initialInstance.modelWindows)} : {}),
+    },
   });
-  child.unref();
+  let spawnError;
+  child.on("error", error => { spawnError = error; });
   current = await waitForReplacement(before, 40);
+  if (!current || current.pid !== child.pid) {
+    // This attempt is ours; never leave it behind if a supervisor won the race.
+    if (child.pid && child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise(done => child.once("exit", done));
+      child.kill("SIGTERM");
+      const timer = setTimeout(() => child.kill("SIGKILL"), 3000);
+      await exited;
+      clearTimeout(timer);
+    }
+  }
+  if (spawnError) console.error("start failed: " + spawnError.message);
+  if (current && current.pid === child.pid) {
+    child.unref();
+    console.log("standalone proxy retained: pid " + child.pid + ", port " + port + "; stop via POST /__bili/shutdown");
+  }
 }
 
 if (current === null) {

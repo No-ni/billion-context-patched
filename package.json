@@ -1,6 +1,6 @@
 {
   "name": "bili-context-patch",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "billion-context, patched: HTTP/2 off the table, request bodies compressed, and the model-request accelerator mounted inside the same plugin.",
   "license": "MIT",
   "repository": {

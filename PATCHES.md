@@ -2,7 +2,7 @@
 
 - 上游：<https://github.com/ranxianglei/billion-context>（MIT，Copyright (c) 2026 ranxianglei）
 - 本分支基线：上游 `master` 的 `406193b2`（上游版本号仍是 0.1.213，比那次发版多 155 个提交，见第 15 节）
-- 我们的改动不是一份 diff：bili 构建上的七组补丁由 `scripts/patch-bili-build.mjs` 按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
+- 我们的改动不是一份 diff：bili 构建上的十组补丁由 `scripts/patch-bili-build.mjs` 按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
 
 改动分四层：包装包与组合层（第 5 节，源码在仓库根）、bili 构建产物（第 1–4、10、13、14、16 节，构建只有一份，在 `vendor/billion-context/dist/index.js`）、安装期与默认值（第 7、9 节）。第 0 节是总索引。
 
@@ -16,12 +16,12 @@
 | --- | --- | --- | --- |
 | 包装包（我们自己的代码） | `lib/index.js`、`lib/fork-lineage.js`、`lib/client.template.js`、`package.json` | 一个 Loader 条目里挂 bili、压缩闸门、加速器；把两个客户端 bundle 的工厂体合成一个 `id`；fork 时补父会话血缘；`/api/bili-context-patch/version` 的版本与更新接口；启动时把仍然开着的上游条目关掉 | 与上游无关，不用重打 |
 | 组合层 | `dsh.bundle.patch.yml`（生成物） | 只保留自己那条 `insert`，其余是 bili 原有的层：`compaction-basic auto: false`、四个 preset 注入 `biliBasicCompactionPolicy`、`llm-deepseek`/`llm-deepseek-account` 的 retry 策略（含 `MALFORMED_RESPONSE`）；两个上游 insert 行删掉 | `install.mjs` 重跑一次即按新层重新生成 |
-| bili 构建产物 | `vendor/billion-context/dist/index.js` | 七组文本补丁（0.2 的表） | `node scripts/patch-bili-build.mjs`，锚点对不上会报错退出 |
+| bili 构建产物 | `vendor/billion-context/dist/index.js` | 十组文本补丁（0.2 的表） | `node scripts/patch-bili-build.mjs`，锚点对不上会报错退出 |
 | 安装期 | `scripts/install.mjs`、`scripts/smoke.mjs`、`scripts/restart.mjs` | 取源顺序、构建校验与冒烟、客户端 bundle 合成、profile 改写（dependencies / bundles / 渠道开关）、`--build` 产物生成 | 与上游无关；上游客户端 bundle 封装格式变了会直接报错退出 |
 
 默认值上的两处偏离上游：`promptCache.routing` 兜底为 `enabled`（第 7 节），中转站渠道装好即开请求压缩（第 7 节）。
 
-### 0.2 我们对 bili 构建的七组补丁
+### 0.2 我们对 bili 构建的十组补丁
 
 改的都是 `vendor/billion-context/dist/index.js`，全部由 `scripts/patch-bili-build.mjs` 按锚点重打；锚点在文件里必须唯一命中，否则脚本报错退出、不写文件。
 
@@ -34,8 +34,11 @@
 | 5 | 出站请求体落盘（只用于诊断） | `function __biliEncodeOutbound(opts,url){` | 标记文件 `~/.local/state/billion-context/body-dump.on`，目录 `…/body-dump/` | 第 16 节 |
 | 6 | fork 子会话沿用父会话的 `prompt_cache_key` | `if(pckDecision==="stamp"){rebuilt.prompt_cache_key=session.id}` | 进程内 `__biliPckChain` 记录每个会话最后盖的钥匙 | 第 16 节 |
 | 7 | fork 子会话沿用父会话的消息时刻 | `child.state.nextRunId=parent.state.nextRunId;` | 只在 fork 那一刻抄一次，之后新消息照常打时间 | 第 16 节 |
+| 8 | 存储退化时复用本会话上一轮画面 | `legacyFor` | 插件道；0.5.3 增加完整前缀和摘要有效性校验 | 第 17、18 节 |
+| 9 | 最新块缺行时保留其原文 | `blockSeqs.size===0` | 0.5.3 要求所有覆盖消息都在实际尾部 | 第 17、18 节 |
+| 10 | 完整前缀、摘要有效性和跳过块覆盖校验 | `buildView`、`buildAnchoredView`、pin helpers | `patches/view-safety.block.js`；普通与增量两条路径都检查 | 第 18 节 |
 
-第 4 组依赖第 2、3 组先打（脚本会检查并在顺序不对时退出）；其余各组互相独立，都可以单独判定 already patched。
+第 4 组依赖第 2、3 组，第 8 组依赖 pin，第 10 组升级第 4、8、9 组并同时检查普通与增量拼接点；按脚本顺序执行，所有步骤支持重复运行。
 
 ### 0.3 上游没动的部分
 
@@ -58,7 +61,7 @@
 ### 0.5 合并上游的检查清单
 
 1. 取源：`git clone --depth 1 https://github.com/ranxianglei/billion-context.git`（默认分支是 `master`），`npm ci && npm run build`。
-2. 打补丁：`node scripts/patch-bili-build.mjs <新的 dist/index.js>`。七步都应打印 `patched` 或 `already patched`；任何一步报 `… matched N times, expected 1` 就是上游动了这段代码，回到对应节重做锚点。
+2. 打补丁：`node scripts/patch-bili-build.mjs <新的 dist/index.js>`。十步都应打印 `patched` 或 `already patched`；任何一步报 `… matched N times, expected 1` 就是上游动了这段代码，回到对应节重做锚点。
 3. 自检：`node --check <dist>`，再 `node scripts/smoke.mjs <dist>`（三路压缩断言，必须 OK）。
 4. 记基线：读 `dist/build-info.json` 的 commit，更新 `PATCHES.md` 开头与 `package.json` 的版本号。
 5. 刷新本仓库：`node scripts/install.mjs --build --bili <新的 bili 目录> --out <本仓库>`，让 `vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` 一起重新生成（这一步不碰 profile）。
@@ -388,6 +391,7 @@ function __biliForkTranscriptSource(session,store){
 | 7. fork 沿用父会话的消息时刻（第 16 节） | `child.state.nextRunId=parent.state.nextRunId;` | 插入一行：把父会话 `state.tsStamps` 里属于本次前缀的时刻抄给子会话 |
 | 8. 取不到统一记录时沿用上一轮画面（第 17 节） | `function legacyFor(session,deps,clientMsgs,reason){`、`session.metadata["snapshotRenderDegradeReason"]=reason;` | 插入 `__biliStickyView`，退化前先试着沿用本会话上一轮的渲染结果 |
 | 9. 最新的块还没落行时只丢它自己（第 17 节） | `if(blockSeqs.size===0)return{reason:"block-unanchored"};` | 取不到行的是最新那个块就跳过它（这一轮它的消息按原文发出，其余照旧压缩）；取不到行的是更老的块才继续判定整份视图不可用 |
+| 10. 消息完整性校验（第 18 节） | pin helpers、`buildView`、`buildAnchoredView` | 完整前缀哈希、摘要仍有效、跳过块必须完整存在于追加尾部 |
 
 **吸收进来的上游改动**（用户可感）：
 
@@ -450,3 +454,20 @@ function __biliForkTranscriptSource(session,store){
 **处理（第 9 组，真正的修法）**：`loadTranscriptBase` 里块取不到消息行时，原来一律放弃整份视图。现在按块的位置分两种：取不到行的是**最新的那个块**——它的消息正是客户端尾部还没落盘的那几条，这一轮跳过它没有任何内容损失（这些消息随后按原文接在视图尾部），其余块照旧压缩；取不到行的是**更老的块**——照旧放弃，否则那些消息会从视图里静默消失。跳过还额外要求「至少已经有一个块锚住了」，避免整份视图退化成纯原文。日志 `[snapshot-render] newest block <id> is not in the transcript yet, rendered raw this turn`。
 
 两层的关系：第 9 组从源头上让这一轮能正常渲染（哪怕少折一个块），第 8 组是它之外的兜底（视图整体取不回来时才用上一轮画面）。
+
+
+## 18. 消息完整性与安装、重启修正（0.5.3）
+
+第 17 节「最新块的消息一定在尾部」只是当时的假设，不是代码保证。反例：统一记录是 A、B、C，客户端是 A、B、X、C，最新块覆盖 X。原补丁跳过这个块，拼接点选到 C，结果既没有 X 原文也没有它的摘要，仍返回成功。现在在普通和增量渲染路径上都验证：跳过块的每一条 effectiveMessageId 必须在最终追加的原文尾部，否则返回 `skipped-block-not-in-tail`，走受校验的旧画面兜底或原有拒绝路径。第 9 步仅放宽零行的最新块；单块缺行、更老块缺行仍拒绝。
+
+旧画面与 fork 首轮复用原来只比较末条消息 JSON 的前 200 个字符，历史中较早的编辑或末条长文本后半段的修改都会被忽略。现在对完整客户端前缀逐条计算 SHA-256，复用时重新校验；并要求旧画面的每个摘要占位符仍对应一个 active 块，避免块被重新压缩后复用失效的空占位符。复用成功时补写 `snapshotRenderTailStart`，供出站完整性检查使用。pin 表仍最多 8 条，缓存钥匙链仍最多 512 条。
+
+显式指定未打补丁的上游目录时现在先报错，避免用新 manifest/client 配旧 dist。安装脚本改为先在临时目录打补丁并检查，检查失败不会替换正在安装的 dist；退出时删除临时目录。原来的重新安装逻辑会把带 `disabled:` 的包装包行改成只有 `disabled: false`，连同同一行的 config 一起删掉，现已删除这段逻辑，保留用户显式开关和配置。
+
+包装包延迟启动回调现在在 dispose 后取消，避免插件刚被禁用或重载，排队的旧回调仍挂载三个子插件。
+
+重启脚本从 `proxy-origin` 发现当前端口，替换进程换端口时也跟进；手动起代理的备选路径改为优先使用包装包内的 vendor，避免寻找已经不再安装的独立包。健康检查要求有效实例标识，并处理响应中断。若脚本尝试启动的进程未成为实际替换进程，精确终止该子进程；成功保留时输出 PID、端口和停止方式，并沿用可获得的宿主看护 PID、通道和模型窗口信息。
+
+验证：`check-views.mjs` 检查 15 项渲染、pin、缓存钥匙及 fork 时间戳行为；`check-wrapper.mjs` 验证并发 fork、禁用时取消排队启动、安装幂等、配置保留，以及补丁失败不覆盖正式构建；`check-restart.mjs` 用本地模拟服务验证动态端口发现与实例替换；`smoke.mjs` 验证原文、br、gzip 三路传输。检查不会向真实模型发请求。
+
+边界：这些改动防止静默丢失和错误复用，不能保证所有存储故障都能继续发请求。没有可靠旧画面且无法证明消息覆盖时仍应拒绝。彻底消除块/消息读取不一致，需要上游把块状态、消息行和视图指针作为同一版本提交并读取；这次没有改造上游存储事务。

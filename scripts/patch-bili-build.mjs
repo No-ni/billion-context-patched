@@ -266,6 +266,32 @@ if (text.includes(UNANCHORED_MARK)) {
   replaceOnce("unanchored-newest", UNANCHORED_ANCHOR, UNANCHORED_REPL);
   console.log("unanchored-newest: patched");
 }
+// 10. Verify complete prefixes and prove skipped-block raw coverage.
+// Upgrade existing patched builds as well as fresh upstream builds.
+const safety = readFileSync(join(here, "patches", "view-safety.block.js"), "utf8");
+const SAFETY_MARK = "function __biliPrefixDigest(";
+if (!text.includes(SAFETY_MARK)) {
+  const removeSpan = (start, end) => {
+    const a = text.indexOf(start), b = text.indexOf(end, a);
+    if (a < 0 || b <= a || text.indexOf(start, a + start.length) !== -1) {
+      throw new Error("view-safety: upstream span changed: " + start);
+    }
+    text = text.slice(0, a) + text.slice(b);
+    changed = true;
+  };
+  removeSpan("const __biliPinViewRecord=", "function maybeSnapshotView(");
+  removeSpan("function __biliStickyView(", "function legacyFor(");
+  replaceOnce("view-safety helpers", PIN_MARK, safety + "\n" + PIN_MARK);
+  replaceOnce("view-safety client seam",
+    "const d=joinRow+1;const merged=assembleView(",
+    'if(!__biliSkippedCoverage(session,blockSeeds,clientMsgs.slice(clientJoin)))return{ok:false,reason:"skipped-block-not-in-tail"};const d=joinRow+1;const merged=assembleView(');
+  replaceOnce("view-safety anchored seam",
+    "const d=rows.length;const merged=assembleView(",
+    'if(!__biliSkippedCoverage(session,blockSeeds,tailMsgs))return{ok:false,reason:"skipped-block-not-in-tail"};const d=rows.length;const merged=assembleView(');
+  console.log("view-safety: patched");
+} else {
+  console.log("view-safety: already patched");
+}
 if (changed) {
   writeFileSync(target, text, "latin1");
   console.log("written " + target);

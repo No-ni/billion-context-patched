@@ -39,11 +39,11 @@ dsh plugin --profile desktop remove bili-context-patch
 - `vendor/` —— 两个上游的源码副本，自包含，不依赖 profile 里的其他包；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
 - `dsh.bundle.patch.yml` —— 组合层
 - `patches/` —— 我们对 bili 构建做的改动：`outbound-encoding.block.js` 是请求体压缩那一整块代码，其余由脚本按锚点插入
-- `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`patch-bili-build.mjs`（给 bili 构建按锚点打七处补丁，逐项见 [PATCHES.md](PATCHES.md) 第 0.2 节）、`restart.mjs`、`smoke.mjs`
+- `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`patch-bili-build.mjs`（给 bili 构建按锚点应用补丁，逐项见 [PATCHES.md](PATCHES.md) 第 0.2 节）、`restart.mjs`、`smoke.mjs`
 
 `vendor/`、`lib/client.js`、`lib/upstream.js`、`dsh.bundle.patch.yml` 是 `node scripts/install.mjs --build` 生成的，不要手改。
 
-我们相对上游到底改了什么、每处在哪、合并上游时怎么核对，见 [PATCHES.md](PATCHES.md) 第 0 节：四层改动总表、七组补丁的锚点、已废弃的做法、合并清单。
+我们相对上游到底改了什么、每处在哪、合并上游时怎么核对，见 [PATCHES.md](PATCHES.md) 第 0 节：四层改动总表、补丁的锚点、已废弃的做法、合并清单。
 
 ## 插件道的快照渲染（0.4.3，可关）
 
@@ -72,9 +72,20 @@ dsh 这条道每轮整份重发历史，而 billion-context 的插件道默认�
 
 最后一条是定稿做法：fork 时把父会话「每条消息的时刻」抄给子会话，标签里的时间与父会话逐字一致，所以时间戳照旧显示，不需要改任何配置。改动上线后每个会话的下一轮会冷一次（标签字节变了）。
 
-**渲染临时失败时不再整段重推（0.5.2）**：存储偶尔会「块已提交、消息行还没写完」，这时快照渲染会退回旧路径，而插件道上的客户端消息是整段原始历史，退回就会被判超窗、请求直接失败（实测出现一次，宿主重试后成功）。现在退回前先沿用这个会话上一轮的渲染结果接上新消息：这一轮少压一点，但请求不再失败。日志里是 `[snapshot-render] sticky view (…)`。
+**临时缺行与旧画面复用（0.5.3）**：最新块暂时找不到消息行时，仅在确认该块的全部消息都位于客户端尾部后，才允许这一轮跳过它。旧画面复用改为校验完整历史前缀的 SHA-256，并确认它引用的摘要块仍然有效；历史被编辑、缺少消息或摘要已失效时不复用。重启后的首轮没有旧画面，无法证明完整性时仍可能拒绝请求，不能保证所有存储故障都能无损绕过。
 
-细节见 [PATCHES.md](PATCHES.md) 第 13、14、16、17 节。
+安装会先在临时文件中应用补丁并运行消息完整性、请求压缩检查，再替换正式构建；重装保留手动禁用状态和渠道配置。重启脚本自动读取当前代理端口。
+
+维护检查：
+
+```sh
+node scripts/check-views.mjs
+node scripts/check-wrapper.mjs
+node scripts/check-restart.mjs
+node scripts/smoke.mjs
+```
+
+细节见 [PATCHES.md](PATCHES.md) 第 18 节。
 
 ## 0.5.0：跟上上游主线
 

@@ -22,13 +22,14 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -174,12 +175,27 @@ const isPatchedBuild = (file) => {
     return false;
   }
 };
+if (resolve(target) !== resolve(vendorBili) && !existsSync(repoBuild) && !isPatchedBuild(sourceBuild)) {
+  fail("source build is not patched; run scripts/patch-bili-build.mjs on " + sourceBuild + " before installing it");
+}
 const pendingBuild = existsSync(repoBuild)
   ? repoBuild
   : resolve(target) !== resolve(vendorBili) && isPatchedBuild(sourceBuild)
     ? sourceBuild
     : null;
-const smokeTarget = pendingBuild ?? (existsSync(installedBuild) ? installedBuild : null);
+const candidateBuild = pendingBuild ?? (existsSync(installedBuild) ? installedBuild : null);
+let stagedBuild = null;
+if (!dryRun && candidateBuild) {
+  const stage = mkdtempSync(join(tmpdir(), "bili-install-"));
+  process.on("exit", () => rmSync(stage, { recursive: true, force: true }));
+  stagedBuild = join(stage, "index.js");
+  copyFileSync(candidateBuild, stagedBuild);
+  execFileSync(process.execPath, [join(here, "patch-bili-build.mjs"), stagedBuild], {
+    stdio: ["ignore", "ignore", "inherit"], timeout: 30000,
+    env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
+  });
+}
+const smokeTarget = stagedBuild;
 // A build that fails its own smoke test never replaces a working one. The call
 // that breaks in production is the user's next model request, and a backup on
 // disk is no help to someone who does not know it is there. The test runs on the
@@ -187,8 +203,13 @@ const smokeTarget = pendingBuild ?? (existsSync(installedBuild) ? installedBuild
 if (!dryRun && !argv.includes("--skip-smoke") && smokeTarget) {
   say("smoke-testing " + smokeTarget + " (" + process.version + ")");
   try {
+    execFileSync(process.execPath, [join(here, "check-views.mjs"), smokeTarget], {
+      stdio: "inherit", timeout: 30000,
+      env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
+    });
     execFileSync(process.execPath, [join(here, "smoke.mjs"), smokeTarget], {
       stdio: "inherit",
+      timeout: 30000,
       env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
     });
   } catch {
@@ -198,7 +219,7 @@ if (!dryRun && !argv.includes("--skip-smoke") && smokeTarget) {
 // The copy waits for the merge below: writing dist first would leave a new build
 // beside an old wrapper if the merge aborts on a reshaped upstream bundle.
 const installBuild = () => {
-  if (!pendingBuild) {
+  if (!pendingBuild && !stagedBuild) {
     say("billion-context: keeping the vendored build at " + installedBuild);
     return;
   }
@@ -207,7 +228,7 @@ const installBuild = () => {
     return;
   }
   mkdirSync(dirname(installedBuild), { recursive: true });
-  copyFileSync(pendingBuild, installedBuild);
+  copyFileSync(stagedBuild ?? pendingBuild, installedBuild);
   try {
     chmodSync(installedBuild, 0o755);
   } catch {}
@@ -388,17 +409,6 @@ const mergedClient = template
 // Both halves extracted and parsed, so the build can go in now: an abort above
 // leaves the installed dist exactly as it was.
 installBuild();
-
-// The vendored build carries one written-in change of its own — the guard that
-// lets billion-context's snapshot render serve plugin lanes, so the dsh shim's
-// full-resend prefix stops being re-derived every turn. A build dropped in from
-// outside (--build) does not have it, so it is re-asserted here rather than
-// trusted to whoever refreshed the vendor tree.
-if (!dryRun) {
-  execFileSync(process.execPath, [join(here, "patch-bili-build.mjs"), join(vendorBili, "dist", "index.js")], {
-    stdio: ["ignore", "ignore", "inherit"],
-  });
-}
 
 // ── 4. the wrapper's bundle layer ───────────────────────────────────────────
 // billion-context's own layer supplies the compaction gate wiring that the host
@@ -674,26 +684,8 @@ if (!buildMode) {
       };
     });
 
-    // (b) The wrapper's own row has to stay enabled: switching it off takes the
-    //     compaction gate with it, and the agent presets then wait forever for a
-    //     service nothing provides (#3662). A stray `disabled: true` here is always
-    //     damage, never intent, so it is repaired rather than respected.
-    let keptWrapperRow = false;
-    blocks = blocks.filter((block) => {
-      if (block.id !== wrapperId) return true;
-      // Any row of ours carrying a top-level `disabled:` is the pin row, and the pin
-      // row must never carry config: it would override the real one above it.
-      if (!block.body.some((line) => /^ {2}disabled:/.test(line))) return true;
-      if (keptWrapperRow) {
-        notes.push("dropped a duplicate " + wrapperId + " row");
-        return false;
-      }
-      keptWrapperRow = true;
-      if (!block.body.join(" ").includes("false")) notes.push("re-enabled the " + wrapperId + " row");
-      else if (block.body.length > 1) notes.push("stripped stray config from the " + wrapperId + " pin row");
-      block.body = ["  disabled: false"];
-      return true;
-    });
+    // Explicit disabled values and config belong to the user. A reinstall must
+    // not enable the plugin or discard a config-bearing row.
 
     // (c) The previous version kept the two upstream packages in the bundle list
     //     and switched their rows off through a `!!js` expression that read the
