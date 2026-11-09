@@ -1,47 +1,90 @@
 #!/usr/bin/env node
-// Let billion-context's snapshot render serve plugin lanes too (local experiment).
+// Two written-in changes on the vendored billion-context build. Both are
+// re-applied by install.mjs after any build lands, so an upstream refresh
+// cannot quietly drop them.
 //
-// snapshot-render.ts opens with `if (deps.pluginMode) return clientMsgs;`: plugin
-// lanes are client-authoritative by design. The dsh shim is a plugin lane that
-// resends the FULL conversation every turn, so the outbound prefix is re-derived
-// (and re-folded) each round and the upstream prompt cache stops matching in the
-// middle of the body — the fork turns measured 10% and 11% cache hits.
+//   1. plugin-lane snapshot render  — the dsh shim resends the whole history
+//      every turn; snapshot render is skipped on plugin lanes by design, so the
+//      outbound prefix was re-derived (and re-folded) each round and the cache
+//      seam landed mid-body. The guard now asks a marker file.
 //
-// The guard is rewritten to consult a marker file, so the lane can opt in without
-// rebuilding and can be switched off by deleting one file:
+//   2. fork child renders the parent transcript on its first request — the
+//      child has no unified rows until its first save, which is exactly the
+//      turn that could have reused the parent's cached prefix.
 //
-//   ~/.config/billion-context/plugin-lane-snapshot.on   (present = lane may render)
-//   BILI_PLUGIN_SNAPSHOT=0|1                            (overrides the file)
-//
-// Outbound bytes stay untouched until billion-context's own `snapshotRender`
-// rollout is on; with the rollout off this only feeds the snapshot-shadow
-// observer. Run after every upstream build: node scripts/patch-plugin-lane-snapshot.mjs
+// Usage: node scripts/patch-plugin-lane-snapshot.mjs [dist/index.js]
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const here = dirname(dirname(fileURLToPath(import.meta.url)));
 const target = process.argv[2] ?? join(here, "vendor", "billion-context", "dist", "index.js");
+let text = readFileSync(target, "latin1");
+let changed = false;
 
+// ── 1. the plugin-lane guard ────────────────────────────────────────────────
 const ORIGINAL = "if(deps.pluginMode)return clientMsgs;";
 const PATCHED = "if(deps.pluginMode&&!__biliPluginLaneSnapshot())return clientMsgs;";
-const ANCHOR = "function maybeSnapshotView(session,clientMsgs,deps){";
-const HELPER =
-  "function __biliPluginLaneSnapshot(){const v=process.env.BILI_PLUGIN_SNAPSHOT;if(v===\"1\")return true;if(v===\"0\")return false;try{const fs9=require(\"node:fs\"),path9=require(\"node:path\"),os9=require(\"node:os\"),base9=process.env.XDG_CONFIG_HOME||path9.join(os9.homedir(),\".config\");return fs9.existsSync(path9.join(base9,\"billion-context\",\"plugin-lane-snapshot.on\"))}catch{return false}}";
+const VIEW_ANCHOR = "function maybeSnapshotView(session,clientMsgs,deps){";
+const HELPER_LANE =
+  'function __biliPluginLaneSnapshot(){const v=process.env.BILI_PLUGIN_SNAPSHOT;if(v==="1")return true;if(v==="0")return false;try{const fs9=require("node:fs"),path9=require("node:path"),os9=require("node:os"),base9=process.env.XDG_CONFIG_HOME||path9.join(os9.homedir(),".config");return fs9.existsSync(path9.join(base9,"billion-context","plugin-lane-snapshot.on"))}catch{return false}}';
 
-const text = readFileSync(target, "latin1");
 if (text.includes(PATCHED) && text.includes("function __biliPluginLaneSnapshot()")) {
   console.log("plugin-lane snapshot: already patched");
-  process.exit(0);
+} else {
+  const hits = text.split(ORIGINAL).length - 1;
+  if (hits !== 1) {
+    console.error("plugin-lane snapshot: expected exactly one guard, found " + hits + " — upstream changed, re-derive the patch");
+    process.exit(1);
+  }
+  if (text.split(VIEW_ANCHOR).length !== 2) {
+    console.error("plugin-lane snapshot: maybeSnapshotView anchor not unique — upstream changed");
+    process.exit(1);
+  }
+  text = text.replace(ORIGINAL, PATCHED).replace(VIEW_ANCHOR, HELPER_LANE + VIEW_ANCHOR);
+  changed = true;
+  console.log("plugin-lane snapshot: patched");
 }
-const hits = text.split(ORIGINAL).length - 1;
-if (hits !== 1) {
-  console.error("plugin-lane snapshot: expected exactly one guard, found " + hits + " — upstream changed, re-derive the patch");
-  process.exit(1);
+
+// ── 2. a fork child renders the parent transcript on its first request ──────
+const CHILD_ANCHOR = "function loadTranscriptBase(session){";
+const FUNCTION_END = "function assembleView(rows,blockSeeds,coveredSeqUnion,d,tailMsgs){";
+const HELPER_FORK =
+  "function __biliForkTranscriptSource(session,store){try{const parent=session&&session.metadata&&session.metadata.parentConversationId;if(typeof parent===\"string\"&&parent.length>0){const own=store.unifiedMessageIdRows(session.id);if(!own||own.length===0)return parent}}catch{}return session.id}";
+
+if (text.includes("function __biliForkTranscriptSource(session,store)")) {
+  console.log("fork transcript source: already patched");
+} else {
+  const from = text.indexOf(CHILD_ANCHOR);
+  const to = text.indexOf(FUNCTION_END);
+  if (from === -1 || to === -1 || to < from) {
+    console.error("fork transcript source: loadTranscriptBase span not found — upstream changed");
+    process.exit(1);
+  }
+  const body = text.slice(from, to);
+  const swaps = [
+    ['const store2=getStore();if(!store2)return{reason:"store-unavailable"};',
+     'const store2=getStore();if(!store2)return{reason:"store-unavailable"};const __transcriptId=__biliForkTranscriptSource(session,store2);'],
+    ["unifiedMessageIdRows(session.id)", "unifiedMessageIdRows(__transcriptId)"],
+    ["unifiedTailSeqs(session.id)", "unifiedTailSeqs(__transcriptId)"],
+    ["unifiedUncoveredRows(session.id,intervals)", "unifiedUncoveredRows(__transcriptId,intervals)"],
+    ["unifiedTailViewRows(session.id)", "unifiedTailViewRows(__transcriptId)"],
+  ];
+  let next = body;
+  for (const [find, repl] of swaps) {
+    const n = next.split(find).length - 1;
+    if (n !== 1) {
+      console.error('fork transcript source: "' + find + '" matched ' + n + ' times inside loadTranscriptBase, expected 1');
+      process.exit(1);
+    }
+    next = next.replace(find, repl);
+  }
+  text = text.slice(0, from) + HELPER_FORK + next + text.slice(to);
+  changed = true;
+  console.log("fork transcript source: patched");
 }
-if (text.split(ANCHOR).length !== 2) {
-  console.error("plugin-lane snapshot: maybeSnapshotView anchor not unique — upstream changed");
-  process.exit(1);
+
+if (changed) {
+  writeFileSync(target, text, "latin1");
+  console.log("written " + target);
 }
-writeFileSync(target, text.replace(ORIGINAL, PATCHED).replace(ANCHOR, HELPER + ANCHOR), "latin1");
-console.log("plugin-lane snapshot: patched " + target);

@@ -284,3 +284,30 @@ if(deps.pluginMode&&!__biliPluginLaneSnapshot())return clientMsgs;
 
 **边界**：快照渲染有大量降级门（锚点校验失败、尾部接不上、行不可解析都会退回旧路径，退回时出站字节与改动前一致）；服务端对前缀有最终解释权，客户端改写头部（检查点、删除）不再复活被丢的行。
 
+
+
+## 14. fork 第一轮就沿用父会话的前缀（0.4.4）
+
+**问题**：fork 出来的会话第一轮仍然是全价。原因不是没做血缘（`#2399` 的 adoption 早就在跑，日志里 `fork child … adopted parent … at branch point 3465`），而是**子会话在第一次保存之前没有任何统一表记录**：`loadTranscriptBase` 读到空表就返回 `transcript-empty`，首轮退回旧路径，整段重新推导、重新计费一次。
+
+**改法**：adoption 时 bili 已经把父会话 id 记在子会话上（`child.metadata.parentConversationId`，`src/plugin.ts:1682`）。构建产物里给 `loadTranscriptBase` 加一个来源解析：
+
+```js
+function __biliForkTranscriptSource(session,store){
+  try{
+    const parent=session&&session.metadata&&session.metadata.parentConversationId;
+    if(typeof parent==="string"&&parent.length>0){
+      const own=store.unifiedMessageIdRows(session.id);
+      if(!own||own.length===0)return parent;
+    }
+  }catch{}
+  return session.id;
+}
+```
+
+函数体里四处读表（identity rows、tail seqs、uncovered rows、tail view rows）改用解析出来的 id。**只在子会话自己没有记录时**借用父会话；子会话第一轮落盘后就用自己的记录，行为回到常态。
+
+**降级照旧**：父 id 不存在、父记录为空、行不可解析、锚点对不上，全部原样返回 `transcript-empty` / 对应 reason，退回旧路径——与改动前一致。
+
+**验证方法**：新建一个 fork 会话发第一句，看日志首轮是否出现 `[snapshot-render] active`，以及 `[acp-usage]` 的 cached 是否不为 0。
+
