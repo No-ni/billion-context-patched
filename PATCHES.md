@@ -322,6 +322,9 @@ function __biliForkTranscriptSource(session,store){
 | 1. 请求体压缩（第 1–4 节） | `async function fetchWithTimeout(`、`checkOutboundBody(opts.body);`、`return sendWebLogs(res,req);` | 插入 `patches/outbound-encoding.block.js` 整块、在转发前调用 `__biliEncodeOutbound`、注册 `GET /__bili/encode-stats` |
 | 2. 快照渲染开关（第 13 节） | `if(deps.pluginMode)return clientMsgs;`、`function maybeSnapshotView(session,clientMsgs,deps){` | 改成先问标记文件，再决定是否跳过 |
 | 3. fork 首轮借用父会话（第 14 节） | `function loadTranscriptBase(session){` … `function assembleView(` | 插入 `__biliForkTranscriptSource`，函数体内四处读表改写 |
+| 4. fork 首轮钉住父会话的渲染结果（第 16 节） | `maybeSnapshotView` 首行、`if(!live&&!shadow)return clientMsgs;`、`noteRender(session,deps);return r.view}` | 插入 `__biliPinViewRecord` / `__biliForkPinView`，首轮直接返回父会话那份视图再接新消息 |
+| 5. 请求体落盘（诊断，默认关） | `function __biliEncodeOutbound(opts,url){` | 插入 `__biliDumpBody`，只有标记文件存在时才写盘 |
+| 6. fork 沿用父会话的缓存钥匙（第 16 节） | `if(pckDecision==="stamp"){rebuilt.prompt_cache_key=session.id}` | 改成 `__biliForkPck(session)`，沿血缘取父会话实际用的那把钥匙 |
 
 **吸收进来的上游改动**（用户可感）：
 
@@ -336,3 +339,30 @@ function __biliForkTranscriptSource(session,store){
 **上游这几处没动过**：`src/server/snapshot-render.ts` 在这 155 个提交里一行未改，所以第 2 步的锚点仍然成立；第 3 步锚在 `loadTranscriptBase`，上游也没碰。
 
 **复核方法**：`node scripts/smoke.mjs vendor/billion-context/dist/index.js` 打三路请求，断言出站字节被压缩且没有自己写 content-length；`dist/build-info.json` 记录当前构建对应的上游提交。
+
+## 16. fork 第一轮真正复用父会话的缓存（0.5.0）
+
+第 3 组补丁只解决了「有记录可读」，实测 fork 首轮命中仍然只有 1%。逐轮排查下来是三件事叠在一起，缺一件都不成立：
+
+| 现象（fork 首轮命中） | 找到的原因 | 处理 |
+| --- | --- | --- |
+| 1% | 首轮出站前缀与父会话最后一轮不是同一份字节：这一轮又重算了一遍 | 第 4 组：首轮直接复用父会话上一轮的渲染结果，只追加新消息 |
+| 28% → 58% | 请求体带 `prompt_cache_key`，bili 按会话盖章；fork 换了钥匙，上游把前缀分到另一个仓 | 第 6 组：fork 会话沿血缘取父会话**实际用的**那把钥匙（只看一层不够，套娃 fork 会拿错） |
+| 58% → 99.3% | 消息标签 `<acp tokens type time>` 里的时间在 fork 时被重打（18:37:52 → 18:37:54），两位数字之差让前缀从这里断开 | 配置 `compress.messageTimestamps: false`，标签不再带时间；也可用环境变量 `BILI_MESSAGE_TIMESTAMPS=0` |
+
+**定位方法**（可复用）：第 5 组补丁把出站请求体原样落盘（标记文件 `~/.local/state/billion-context/body-dump.on`，目录 `~/.local/state/billion-context/body-dump/`），把父会话最后一轮与 fork 首轮两份放在一起逐条比对。实测 75 条消息里只有 2 条不同，差异精确落在标签时间上——比读代码猜快得多。诊断完删掉标记文件即停止写盘。
+
+**第 4 组（fork-pin）细节**：`maybeSnapshotView` 在 `live` 时先问 `__biliForkPinView`；命中条件是父会话有 pin、本次客户端消息数不比 pin 短、末条前缀一致、追加不超过 8 条、追加段不以 tool 开头。成功后置 `session.metadata.__biliForkPinned`，后续轮次回到常规路径。日志 `[snapshot-render] fork-pin active parent=… pinned=… appended=…`，不命中时打 `fork-pin skipped: <原因>`。
+
+**第 6 组（缓存钥匙）细节**：`__biliPckChain` 在进程内记录每个会话最后盖章用的钥匙；fork 会话先查父会话的、查不到退回父会话 id，再退回自己的 id。进程重启后链为空，退化为「用父会话 id」这一级。
+
+**验证数据**（同一台机器，fork 新会话首轮）：
+
+| 阶段 | 输入 | 命中 | 命中率 |
+| --- | --- | --- | --- |
+| 只有第 3 组 | 89.4K | 28.3K | 32% |
+| ＋第 4 组 | 101.6K | 28.3K | 27.8% |
+| ＋第 6 组（钥匙） | 63.7K | 37.0K | 58.1% |
+| ＋去掉标签时间 | 88.8K | 88.2K | **99.3%**（第二轮 99.6%） |
+
+**代价与注意**：模型看不到每条消息的时刻（标签只剩 ref、类型、token 数）；改动上线后每个会话的下一轮会冷一次（标签字节变了）；`compress.messageTimestamps` 是普通配置项，改回 `true` 即恢复，但 fork 首轮会退回 58% 附近。

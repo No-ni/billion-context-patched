@@ -17,6 +17,11 @@
 //   3. fork child renders the parent transcript on its first request — the
 //      child has no unified rows until its first save, which is exactly the
 //      turn that could have reused the parent's cached prefix.
+////
+//   4. fork-pin — patch 3 makes the child render the same transcript, but the
+//      rendered view still differs (block anchors, tail split), so the cache
+//      seam moves and the first turn misses anyway. The parent's last rendered
+//      view is kept here and handed to the child for that one turn, verbatim.
 //
 // Usage: node scripts/patch-bili-build.mjs [dist/index.js]
 import { readFileSync, writeFileSync } from "node:fs";
@@ -120,6 +125,72 @@ if (text.includes("function __biliForkTranscriptSource(session,store)")) {
   text = text.slice(0, from) + HELPER_FORK + next + text.slice(to);
   changed = true;
   console.log("fork transcript source: patched");
+}
+
+// ── 4. a fork child's first request reuses the parent's rendered prefix ─────
+// Patch 3 gives the child the same raw transcript, but the rendered view is
+// still re-derived (anchors, covered rows, tail) and the outbound bytes land
+// differently, so the cache seam moves and the first turn pays full price. The
+// parent's last live view is pinned here and reused verbatim for the child's
+// first request, then dropped.
+const PIN_HELPERS = [
+  "const __biliPinnedViews=new Map();",
+  'const __biliPinLog=(deps,line)=>{try{if(deps&&typeof deps.log==="function")return void deps.log("info",line)}catch{}try{console.warn(line)}catch{}};',
+  'const __biliPinViewRecord=(session,clientMsgs,view)=>{try{if(!session||typeof session.id!=="string"||!Array.isArray(clientMsgs)||!Array.isArray(view)||view.length===0)return;const pin={view:JSON.parse(JSON.stringify(view)),count:clientMsgs.length,tail:JSON.stringify(clientMsgs[clientMsgs.length-1]??null).slice(0,200),at:Date.now()};__biliPinnedViews.delete(session.id);__biliPinnedViews.set(session.id,pin);while(__biliPinnedViews.size>4)__biliPinnedViews.delete(__biliPinnedViews.keys().next().value)}catch{}};',
+  'const __biliForkPinView=(session,clientMsgs,deps)=>{try{const md=session&&session.metadata;if(!md||md.__biliForkPinned)return null;const parent=md.parentConversationId;if(typeof parent!=="string"||parent.length===0)return null;const pin=__biliPinnedViews.get(parent);if(!pin){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: no-pin-for-parent");return null}if(!Array.isArray(clientMsgs)||clientMsgs.length<pin.count){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: shorter-than-pin");return null}if(JSON.stringify(clientMsgs[pin.count-1]??null).slice(0,200)!==pin.tail){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: prefix-mismatch");return null}if(clientMsgs.length-pin.count>8){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: too-many-new-messages");return null}const extra=clientMsgs.slice(pin.count);if(extra.length>0&&extra[0]&&extra[0].role==="tool"){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: appended-starts-with-tool");return null}const msgs=pin.view.concat(extra);if(msgs.length===0){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: empty");return null}md.__biliForkPinned=true;__biliPinLog(deps,"[snapshot-render] fork-pin active parent="+parent.slice(0,8)+" pinned="+pin.view.length+" appended="+extra.length);return msgs}catch(e){__biliPinLog(deps,"[snapshot-render] fork-pin skipped: "+((e&&e.message)||"error"));return null}};',
+].join("\n");
+
+const PIN_MARK = "const __biliPinnedViews=new Map();";
+const LIVE_ANCHOR = "if(!live&&!shadow)return clientMsgs;";
+const RETURN_ANCHOR = "noteRender(session,deps);return r.view}";
+const PIN_GO = "if(!live&&!shadow)return clientMsgs;if(live){const __biliPinHit=__biliForkPinView(session,clientMsgs,deps);if(__biliPinHit)return __biliPinHit}";
+const PIN_SAVE = "noteRender(session,deps);__biliPinViewRecord(session,clientMsgs,r.view);return r.view}";
+
+if (text.includes(PIN_MARK)) {
+  console.log("fork-pin: already patched");
+} else {
+  if (!text.includes(PATCHED) || !text.includes("function __biliForkTranscriptSource(session,store)")) {
+    console.error("fork-pin: needs steps 2 and 3 applied first — run them, then re-run this script");
+    process.exit(1);
+  }
+  replaceOnce("fork-pin", VIEW_ANCHOR, PIN_HELPERS + VIEW_ANCHOR);
+  replaceOnce("fork-pin", LIVE_ANCHOR, PIN_GO);
+  replaceOnce("fork-pin", RETURN_ANCHOR, PIN_SAVE);
+  console.log("fork-pin: patched");
+}
+
+// 5. body dump (diagnostics only, gated by ~/.local/state/billion-context/body-dump.on)
+const DUMP_MARK = "function __biliDumpBody(opts,url){";
+const DUMP_ANCHOR = "function __biliEncodeOutbound(opts,url){";
+const DUMP_HELPER = "function __biliDumpBody(opts,url){try{var fs=require(\"node:fs\"),path=require(\"node:path\"),os=require(\"node:os\");var base=process.env.XDG_STATE_HOME||path.join(os.homedir(),\".local\",\"state\");var root=path.join(base,\"billion-context\");if(!fs.existsSync(path.join(root,\"body-dump.on\")))return;var b=opts&&opts.body;if(b===undefined||b===null)return;var txt=typeof b===\"string\"?b:(Buffer.isBuffer(b)?b.toString(\"utf8\"):(b instanceof Uint8Array?Buffer.from(b).toString(\"utf8\"):\"\"));if(!txt)return;var dir=path.join(root,\"body-dump\");fs.mkdirSync(dir,{recursive:true});var name=new Date().toISOString().replace(/[:.]/g,\"-\")+\"-\"+txt.length+\".json\";fs.writeFileSync(path.join(dir,name),txt)}catch(e){}};";
+
+if (text.includes(DUMP_MARK)) {
+  console.log("body-dump: already patched");
+} else {
+  replaceOnce("body-dump", DUMP_ANCHOR, DUMP_HELPER + DUMP_ANCHOR + "__biliDumpBody(opts,url);");
+  console.log("body-dump: patched");
+}
+
+// 6. fork cache-key lineage: a forked session stamps its parent's effective key
+const PKC_MARK = "const __biliPckChain=new Map();";
+const PKC_ANCHOR = "if(pckDecision===\"stamp\"){rebuilt.prompt_cache_key=session.id}";
+const PKC_REPL = "if(pckDecision===\"stamp\"){rebuilt.prompt_cache_key=__biliForkPck(session)}";
+const PKC_OLD = "function __biliForkPck(session){try{var md=session&&session.metadata;if(md&&typeof md.parentConversationId===\"string\"&&md.parentConversationId.length&&__biliPluginLaneSnapshot())return md.parentConversationId}catch(e){}return session.id};";
+const PKC_HELPER = "const __biliPckChain=new Map();function __biliForkPck(session){try{var own=session&&session.id;var md=session&&session.metadata;var key=own;if(md&&typeof md.parentConversationId===\"string\"&&md.parentConversationId.length&&__biliPluginLaneSnapshot()){var up=__biliPckChain.get(md.parentConversationId);key=up||md.parentConversationId}if(own)__biliPckChain.set(own,key);return key}catch(e){return session&&session.id}};";
+
+if (text.includes(PKC_MARK)) {
+  console.log("fork-pck: already patched");
+} else if (text.includes(PKC_OLD)) {
+  text = text.split(PKC_OLD).join(PKC_HELPER);
+  changed = true;
+  console.log("fork-pck: helper upgraded to key chain");
+} else if (!text.includes(PKC_ANCHOR)) {
+  console.log("fork-pck: anchor not found, skipped");
+} else {
+  replaceOnce("fork-pck", "function __biliEncodeOutbound(opts,url){", PKC_HELPER + "function __biliEncodeOutbound(opts,url){");
+  text = text.split(PKC_ANCHOR).join(PKC_REPL);
+  changed = true;
+  console.log("fork-pck: patched");
 }
 
 if (changed) {
