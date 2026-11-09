@@ -292,6 +292,48 @@ if (!text.includes(SAFETY_MARK)) {
 } else {
   console.log("view-safety: already patched");
 }
+// 11. Required fork default: stamp cache keys unless the user chose a routing mode.
+const CACHE_DEFAULT_OLD = 'function parsePromptCacheRouting(value){return value==="auto"||value==="enabled"||value==="disabled"?value:"disabled"}';
+const CACHE_DEFAULT_NEW = CACHE_DEFAULT_OLD.replace('?value:"disabled"}', '?value:"enabled"}');
+if (text.includes(CACHE_DEFAULT_NEW)) {
+  if (text.split(CACHE_DEFAULT_NEW).length !== 2 || text.includes(CACHE_DEFAULT_OLD)) {
+    throw new Error("cache-key-default: ambiguous parser; re-derive the patch");
+  }
+  console.log("cache-key-default: already patched");
+} else {
+  replaceOnce("cache-key-default", CACHE_DEFAULT_OLD, CACHE_DEFAULT_NEW);
+  console.log("cache-key-default: patched");
+}
+// The settings page has its own absent-config default and bilingual help text.
+const cacheUiChanges = [
+  [
+    "const pcv = (draft.promptCache && typeof draft.promptCache === \"object\" && !Array.isArray(draft.promptCache) && typeof draft.promptCache.routing === \"string\") ? draft.promptCache.routing : \"disabled\";",
+    "const pcv = (draft.promptCache && typeof draft.promptCache === \"object\" && !Array.isArray(draft.promptCache) && typeof draft.promptCache.routing === \"string\") ? draft.promptCache.routing : \"enabled\";"
+  ],
+  [
+    "\"cfg.q_pck_disabled_desc\":\"\\u5173\\u95ED\\uFF08\\u5F53\\u524D\\u9ED8\\u8BA4\\uFF09\\uFF1Abili \\u4E0D\\u81EA\\u884C\\u5199 prompt_cache_key\\uFF0C\\u5BA2\\u6237\\u7AEF\\u81EA\\u5E26\\u7684\\u503C\\u4ECD\\u539F\\u6837\\u8F6C\\u53D1\\u3002\\u76F4\\u8FDE\\u5B98\\u65B9 API \\u7684\\u7528\\u6237\\u4FDD\\u6301\\u6B64\\u9879\\u5373\\u53EF\\u3002\"",
+    "\"cfg.q_pck_disabled_desc\":\"\\u5173\\u95ED\\uFF1Abili \\u4E0D\\u81EA\\u884C\\u5199 prompt_cache_key\\uFF0C\\u5BA2\\u6237\\u7AEF\\u81EA\\u5E26\\u7684\\u503C\\u4ECD\\u539F\\u6837\\u8F6C\\u53D1\\u3002\\u76F4\\u8FDE\\u5B98\\u65B9 API \\u7684\\u7528\\u6237\\u4FDD\\u6301\\u6B64\\u9879\\u5373\\u53EF\\u3002\""
+  ],
+  [
+    "\"cfg.q_pck_disabled_desc\":\"Off (current default): bili never writes its own prompt_cache_key; client-supplied values still forward verbatim. Direct official-API users stay here.\"",
+    "\"cfg.q_pck_disabled_desc\":\"Off: bili never writes its own prompt_cache_key; client-supplied values still forward verbatim. Direct official-API users stay here.\""
+  ],
+  [
+    "\"cfg.q_pck_enabled_desc\":\"\\u5F3A\\u5236\\u5F00\\u542F\\uFF1A\\u51E1\\u652F\\u6301\\u6CE8\\u5165\\u7684\\u7EBF\\u8DEF\\u90FD\\u5199\\u5165\\u4F1A\\u8BDD id\\uFF08Responses \\u7EBF\\u4E0D\\u9650\\u4E3B\\u673A\\uFF09\\uFF0C\\u4FDD\\u7559\\u62D2\\u7EDD\\u63A2\\u6D4B\\u515C\\u5E95\\u3002\"",
+    "\"cfg.q_pck_enabled_desc\":\"\\u5F3A\\u5236\\u5F00\\u542F\\uFF08\\u5F53\\u524D\\u9ED8\\u8BA4\\uFF09\\uFF1A\\u51E1\\u652F\\u6301\\u6CE8\\u5165\\u7684\\u7EBF\\u8DEF\\u90FD\\u5199\\u5165\\u4F1A\\u8BDD id\\uFF08Responses \\u7EBF\\u4E0D\\u9650\\u4E3B\\u673A\\uFF09\\uFF0C\\u4FDD\\u7559\\u62D2\\u7EDD\\u63A2\\u6D4B\\u515C\\u5E95\\u3002\""
+  ],
+  [
+    "\"cfg.q_pck_enabled_desc\":\"Force on: stamp the session id on every supporting lane (Responses wire any host), with the rejection probe kept as a safety net.\"",
+    "\"cfg.q_pck_enabled_desc\":\"Force on (current default): stamp the session id on every supporting lane (Responses wire any host), with the rejection probe kept as a safety net.\""
+  ]
+];
+for (const [before, after] of cacheUiChanges) {
+  if (text.includes(after)) {
+    if (text.split(after).length !== 2) throw new Error("cache-key-ui: ambiguous patched anchor");
+  } else {
+    replaceOnce("cache-key-ui", before, after);
+  }
+}
 if (changed) {
   writeFileSync(target, text, "latin1");
   console.log("written " + target);

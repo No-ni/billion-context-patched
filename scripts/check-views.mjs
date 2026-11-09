@@ -121,4 +121,34 @@ check("fork timestamps copy only the inherited prefix", () => {
   child.state.tsStamps.a=99;
   assert.equal(parent.state.tsStamps.a,10);
 });
+check("cache-key routing defaults to enabled and preserves explicit choices", () => {
+  const routing = runInNewContext(
+    span("function parsePromptCacheRouting(", "function parseUpstreamProxyMode(") +
+    "\n({parse:parsePromptCacheRouting,effective:effectivePromptCacheRouting});"
+  );
+  for (const value of [undefined, null, "", "invalid"]) {
+    assert.equal(routing.parse(value), "enabled");
+    assert.equal(routing.effective({routing:value}), "enabled");
+  }
+  assert.equal(routing.effective(undefined), "enabled");
+  for (const value of ["disabled", "auto", "enabled"]) {
+    assert.equal(routing.parse(value), value);
+    assert.equal(routing.effective({routing:value}), value);
+  }
+});
+check("settings show enabled by default and preserve explicit routing", () => {
+  const start = source.indexOf("const pcv = ");
+  assert(start >= 0, "missing settings routing selector");
+  const expression = source.slice(start, source.indexOf(";", start) + 1) + "\npcv";
+  for (const draft of [{}, {promptCache:{}}, {promptCache:null}]) {
+    assert.equal(runInNewContext(expression, {draft}), "enabled");
+  }
+  for (const routing of ["disabled", "auto", "enabled"]) {
+    assert.equal(runInNewContext(expression, {draft:{promptCache:{routing}}}), routing);
+  }
+  assert(!source.includes('"cfg.q_pck_disabled_desc":"Off (current default):'));
+  assert(source.includes('"cfg.q_pck_enabled_desc":"Force on (current default):'));
+  assert(!source.includes("\"cfg.q_pck_disabled_desc\":\"\\u5173\\u95ED\\uFF08"));
+  assert(source.includes("\"cfg.q_pck_enabled_desc\":\"\\u5F3A\\u5236\\u5F00\\u542F\\uFF08"));
+});
 console.log("views: " + checks + " checks passed");

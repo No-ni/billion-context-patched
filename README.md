@@ -45,7 +45,7 @@ dsh plugin --profile desktop remove bili-context-patch
 
 `vendor/` 从选定来源复制，其中 bili 代理构建由补丁脚本修改；`lib/client.js`、`lib/upstream.js`、根 `dsh.bundle.patch.yml` 由 `node scripts/install.mjs --build` 生成。具体来源规则见 MAINTENANCE，不要只手改生成物。
 
-当前清单覆盖 10 组 bili 补丁、6 项包装能力、5 项安装与运维行为，并逐项列出检查方法和未覆盖部分。上游已吸收的能力与本包新增能力分开记录。
+当前清单覆盖 11 组 bili 补丁、6 项包装能力、5 项安装与运维行为，并逐项列出检查方法和未覆盖部分。上游已吸收的能力与本包新增能力分开记录。
 
 ## 插件道的快照渲染（0.4.3，可关）
 
@@ -108,7 +108,7 @@ node scripts/smoke.mjs
 
 按 [MAINTENANCE.md](MAINTENANCE.md) 的来源基线、逐项清单和升级流程处理；仓库 [AGENTS.md](AGENTS.md) 要求后续修改同步记录差异及验证。
 
-当前构建并不默认开启 `prompt_cache_key`，也没有全局禁止加速器 HTTP/2。这两处历史描述已在维护文档中纠正。本页缓存命中率是历史环境测量，不能保证新网关也相同。
+当前构建默认开启 `prompt_cache_key`（0.5.4 已恢复并纳入补丁脚本），保留用户显式的 disabled/auto/enabled 设置。加速器仍支持按渠道启用 HTTP/2。本页缓存命中率是历史环境测量，不能保证新网关也相同。
 
 ## 许可
 

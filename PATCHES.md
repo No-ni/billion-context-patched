@@ -4,9 +4,9 @@
 
 - 上游：<https://github.com/ranxianglei/billion-context>（MIT，Copyright (c) 2026 ranxianglei）
 - 本分支基线：上游 `master` 的 `406193b2`（上游版本号仍是 0.1.213，比那次发版多 155 个提交，见第 15 节）
-- 我们的改动不是一份 diff：bili 构建上的十组补丁由 `scripts/patch-bili-build.mjs` 按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
+- 我们的改动不是一份 diff：bili 构建上的十一组补丁由 `scripts/patch-bili-build.mjs` 按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
 
-当前维护分为 bili 构建 B1–B10、包装包 W1–W6、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
+当前维护分为 bili 构建 B1–B11、包装包 W1–W6、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
 
 ## 0. 一页看完（改了什么、下次怎么核对）
 
@@ -18,14 +18,14 @@
 | --- | --- | --- | --- |
 | 包装包（我们自己的代码） | `lib/index.js`、`lib/fork-lineage.js`、`lib/client.template.js`、`package.json` | 一个 Loader 条目里挂 bili、压缩闸门、加速器；把两个客户端 bundle 的工厂体合成一个 `id`；fork 时补父会话血缘；`/api/bili-context-patch/version` 的版本与更新接口；启动时把仍然开着的上游条目关掉 | 与上游无关，不用重打 |
 | 组合层 | `dsh.bundle.patch.yml`（生成物） | 只保留自己那条 `insert`，其余是 bili 原有的层：`compaction-basic auto: false`、四个 preset 注入 `biliBasicCompactionPolicy`、`llm-deepseek`/`llm-deepseek-account` 的 retry 策略（含 `MALFORMED_RESPONSE`）；两个上游 insert 行删掉 | `install.mjs` 重跑一次即按新层重新生成 |
-| bili 构建产物 | `vendor/billion-context/dist/index.js` | 十组文本补丁（0.2 的表） | `node scripts/patch-bili-build.mjs`，锚点对不上会报错退出 |
+| bili 构建产物 | `vendor/billion-context/dist/index.js` | 十一组文本补丁（0.2 的表） | `node scripts/patch-bili-build.mjs`，锚点对不上会报错退出 |
 | 安装期 | `scripts/install.mjs`、`scripts/smoke.mjs`、`scripts/restart.mjs` | 取源顺序、构建校验与冒烟、客户端 bundle 合成、profile 改写（dependencies / bundles / 渠道开关）、`--build` 产物生成 | 与上游无关；上游客户端 bundle 封装格式变了会直接报错退出 |
 
-当前仍保留指定中转主机渠道的压缩缺省值规则（仅补缺失键）。历史的 `promptCache.routing=enabled` 默认值已不在当前构建，见第 7 节；不能从文档推断机器配置。
+当前仍保留指定中转主机渠道的压缩缺省值规则（仅补缺失键）。`promptCache.routing=enabled` 默认值已在 0.5.4 恢复并纳入第 11 组补丁，见第 7、19 节；显式配置优先。
 
-### 0.2 我们对 bili 构建的十组补丁
+### 0.2 我们对 bili 构建的十一组补丁
 
-改的都是 `vendor/billion-context/dist/index.js`，由 `scripts/patch-bili-build.mjs` 按顺序重打。多数新插入位置要求唯一命中；步骤 6/7 在缺少锚点时仍可能打印 skipped。必须逐项检查输出并验证最终构建，不能把退出码当成十项全齐的证明。
+改的都是 `vendor/billion-context/dist/index.js`，由 `scripts/patch-bili-build.mjs` 按顺序重打。多数新插入位置要求唯一命中；步骤 6/7 在缺少锚点时仍可能打印 skipped。必须逐项检查输出并验证最终构建，不能把退出码当成十一项全齐的证明。
 
 | # | 做什么 | 锚点（上游原文） | 开关 / 落点 | 细节 |
 | --- | --- | --- | --- | --- |
@@ -39,6 +39,7 @@
 | 8 | 存储退化时复用本会话上一轮画面 | `legacyFor` | 插件道；0.5.3 增加完整前缀和摘要有效性校验 | 第 17、18 节 |
 | 9 | 最新块缺行时保留其原文 | `blockSeqs.size===0` | 0.5.3 要求所有覆盖消息都在实际尾部 | 第 17、18 节 |
 | 10 | 完整前缀、摘要有效性和跳过块覆盖校验 | `buildView`、`buildAnchoredView`、pin helpers | `patches/view-safety.block.js`；普通与增量两条路径都检查 | 第 18 节 |
+| 11 | 默认开启 prompt_cache_key，保留显式三档设置 | `parsePromptCacheRouting` | 未设置/无效值回落 enabled；精确锚点、幂等检查 | 第 19 节 |
 
 第 4 组依赖第 2、3 组，第 8 组依赖 pin，第 10 组升级第 4、8、9 组并同时检查普通与增量拼接点；按脚本顺序执行，所有步骤支持重复运行。
 
@@ -171,7 +172,7 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 
 ## 7. 默认值：历史与当前
 
-- **历史默认值已丢失，当前不默认注入**：旧提交 `537d590` 曾把 `parsePromptCacheRouting` 兜底从 disabled 改成 enabled；当前构建兜底为 disabled，十步脚本没有重打此项。三档仍存在：disabled 不发、auto 按上游判定、enabled 开启。第 6 组只影响需要盖章时选择哪个 key；测量机器显式配置不能当成插件默认。是否恢复旧默认需另做行为决定，本轮仅纠正文档。
+- **默认开启缓存钥匙（0.5.4 恢复，B11）**：旧提交 `537d590` 把 `parsePromptCacheRouting` 兜底从 disabled 改成 enabled；`f2b9fd6` 刷新基线时意外漏迁。现已作为第 11 步重打并回归检查。未配置或无效值默认 enabled；显式 disabled 不发、auto 按上游判定、enabled 开启，环境变量优先级不变。第 6 组只决定盖章时选择哪个 key。
 - **中转站渠道自动开请求压缩**：`install.mjs` 扫描 profile 的 `cordis.yml` 与 `cordis.patch.yml`，把 `baseURL` 命中 `www.didudidu.asia` 或 `154.219.111.56` 的渠道名挑出来，在包装包条目的 `config.providers.<渠道>` 下仅补缺失的 `enabled: true` 与 `encoding: auto`（优先 brotli，运行时缺 brotli 或上游拒绝时回落 gzip）。匹配用的是**主机名**，渠道改名不影响；渠道换了别的域名要重跑一次脚本。
 
 ## 8. 已知限制
@@ -387,6 +388,7 @@ function __biliForkTranscriptSource(session,store){
 | 8. 取不到统一记录时沿用上一轮画面（第 17 节） | `function legacyFor(session,deps,clientMsgs,reason){`、`session.metadata["snapshotRenderDegradeReason"]=reason;` | 插入 `__biliStickyView`，退化前先试着沿用本会话上一轮的渲染结果 |
 | 9. 最新的块还没落行时只丢它自己（第 17 节） | `if(blockSeqs.size===0)return{reason:"block-unanchored"};` | 取不到行的是最新那个块就跳过它（这一轮它的消息按原文发出，其余照旧压缩）；取不到行的是更老的块才继续判定整份视图不可用 |
 | 10. 消息完整性校验（第 18 节） | pin helpers、`buildView`、`buildAnchoredView` | 完整前缀哈希、摘要仍有效、跳过块必须完整存在于追加尾部 |
+| 11. 默认开启缓存钥匙（第 19 节） | `parsePromptCacheRouting` | 将兜底恢复为 enabled，显式三档不变 |
 
 **吸收进来的上游改动**（用户可感）：
 
@@ -470,3 +472,11 @@ function __biliForkTranscriptSource(session,store){
 验证：`check-views.mjs` 检查 15 项渲染、pin、缓存钥匙及 fork 时间戳行为；`check-wrapper.mjs` 验证并发 fork、禁用时取消排队启动、安装幂等、配置保留，以及补丁失败不覆盖正式构建；`check-restart.mjs` 用本地模拟服务验证动态端口发现与实例替换；`smoke.mjs` 验证原文、br、gzip 三路传输。检查不会向真实模型发请求。
 
 边界：这些改动防止静默丢失和错误复用，不能保证所有存储故障都能继续发请求。没有可靠旧画面且无法证明消息覆盖时仍应拒绝。彻底消除块/消息读取不一致，需要上游把块状态、消息行和视图指针作为同一版本提交并读取；这次没有改造上游存储事务。
+
+## 19. 恢复默认开启缓存钥匙（0.5.4）
+
+默认开启 `prompt_cache_key` 是本分支明确需求。`537d590` 曾直接修改旧构建，0.5.0（`f2b9fd6`）改用上游源码构建时没有把它迁入补丁脚本，因此意外回到默认 disabled。0.5.3 文档整理只记录缺失，没有恢复既定需求，这一处理现已纠正。
+
+第 11 步精确修改 `parsePromptCacheRouting` 的兜底为 enabled；缺失或无效值启用，用户显式 disabled/auto/enabled 和环境变量优先级保持不变。脚本验证唯一锚点，无法识别的上游实现直接失败，重复应用不改字节。设置页独立的缺省选项同样改为 enabled，并将中英文的“当前默认”说明移到开启项。B6 的 fork 血缘选 key 与 B11 的默认开关分别记录，避免再次混淆。
+
+`check-views.mjs` 从实际发布构建提取解析及生效函数，验证缺省、无效值与三档设置，并检查设置页缺省选项与默认文案；当前共 17 项检查。安装时也运行此检查，因此缺少 B11 的候选构建无法通过发布验证。

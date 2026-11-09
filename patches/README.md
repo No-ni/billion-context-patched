@@ -4,7 +4,7 @@
 
 - `outbound-encoding.block.js`：B1，请求体 gzip/br、指令头与回执接口。
 - `view-safety.block.js`：B10，完整前缀、摘要有效性与跳过块的尾部覆盖校验。
-- B2–B9 在 `scripts/patch-bili-build.mjs` 定点修改原函数；B4/B8 的最终函数体由 B10 替换。按十步完整执行，不能只抄旧版本的某一段。
+- B2–B9、B11 在 `scripts/patch-bili-build.mjs` 定点修改原函数；B4/B8 的最终函数体由 B10 替换。按十一步完整执行，不能只抄旧版本的某一段。
 
 对选定上游的新构建执行：
 

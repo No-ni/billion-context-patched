@@ -1,19 +1,19 @@
 # 当前差异与上游升级指南
 
-本文是当前实现的维护入口，按 0.5.3 的代码核对。`PATCHES.md` 保存实现细节、历史故障和测量结果；发生冲突时先核查代码，再同步两份文档，不能把历史叙述当成当前保证。
+本文是当前实现的维护入口，按 0.5.4 的代码核对。`PATCHES.md` 保存实现细节、历史故障和测量结果；发生冲突时先核查代码，再同步两份文档，不能把历史叙述当成当前保证。
 
 ## 1. 两个来源分别锁定
 
 | 来源 | 当前版本 / 提交 | 本仓库的关系 |
 | --- | --- | --- |
-| [billion-context](https://github.com/ranxianglei/billion-context) | 0.1.213，master `406193b202c13248241f25201e1c6bbda747c99b` | 上游源码构建后，对代理 `dist/index.js` 应用 B1–B10；agent、client、层和清单也随该基线复制 |
+| [billion-context](https://github.com/ranxianglei/billion-context) | 0.1.213，master `406193b202c13248241f25201e1c6bbda747c99b` | 上游源码构建后，对代理 `dist/index.js` 应用 B1–B11；agent、client、层和清单也随该基线复制 |
 | [dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator) | 2.3.0，`e8c30af1f2b5cffa6749d032f0f296e17d4e26d0` | 2026-11-09 逐文件比对：当前 vendor 的 package.json 和全部 8 个 lib/*.js 与该提交完全一致；其功能独立维护，包装包仅在生成客户端时改写三个字面量 |
 
 bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整提交通过上游提交接口核对；本轮未重新构建该基线做逐字节比对，不将整个二进制声明为已独立验证可复现。版本号相同不代表提交相同，不能只按 0.1.213 判断是否需要升级。
 
 ## 2. 必须逐项核对的差异
 
-### bili 构建：B1–B10 对应补丁脚本步骤
+### bili 构建：B1–B11 对应补丁脚本步骤
 
 | ID | 当前行为与边界 | 维护位置 | 验证 |
 | --- | --- | --- | --- |
@@ -27,6 +27,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 | B8 | 存储降级时，插件道尝试复用本会话 pin 加尾部；无 pin、前缀变动或尾部不合格就拒绝复用 | 步骤 8；最终函数体由步骤 10 提供 | `check-views.mjs` |
 | B9 | 只有最后一个 active 块零行且前面有块已锚住时，才允许暂时跳过；还必须通过 B10 | 步骤 9，`loadTranscriptBase` | `check-views.mjs` 检查最新/老块/单块缺失 |
 | B10 | SHA-256 校验完整客户端前缀；旧画面所有摘要块仍 active；跳过块全部消息必须在实际追加尾部；复用时补 tailStart | `patches/view-safety.block.js`；步骤 10 同时修改普通与 WS/增量拼接点 | `check-views.mjs` 检查历史编辑、长文本编辑、失效摘要、拼接点前遗漏、部分覆盖、两种请求路径 |
+| B11 | prompt_cache_key 路由默认 enabled；显式 disabled/auto/enabled 原样保留，环境变量优先级不变；设置页缺省选项及中英文默认文案同步 | 步骤 11，parsePromptCacheRouting | check-views.mjs 提取真实解析与生效函数检查缺省、无效值及三档显式设置 |
 
 依赖：B4 依赖 B2/B3，B8 依赖 pin，B10 升级 B4/B8/B9 的行为。pin 表最多 8 条，不落盘；重启首轮无 pin。检查提取真实构建函数，用模拟存储运行，不能替代真实 DSH 的存储/投影集成测试。
 
@@ -53,15 +54,15 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 
 ### 已失效描述与本地配置
 
-- **默认开启 prompt_cache_key 已不在当前构建中**：`parsePromptCacheRouting` 兜底是 `disabled`，补丁脚本没有修改它。历史提交 `537d590` 曾改为 enabled；刷新基线后的构建已经不再包含这个默认值。B6 只决定“需要盖章时用哪个 key”。如想恢复旧默认，必须另做明确补丁和检查；本次文档整理没有改变运行行为。
-- **不能称整个插件禁止 HTTP/2**：当前加速器保留按渠道启用 HTTP/2 的能力；它的 transport 与来源提交一致。bili 转发仍用当前上游的 fetch/transport 路径；十组补丁里没有独立的 HTTP/2 禁用补丁。不要把旧描述当成重打要求。
+- **默认开启 prompt_cache_key 已恢复（0.5.4，B11）**：这是本分支要求。旧提交 `537d590` 的手改默认值在 `f2b9fd6`（0.5.0）刷新源码基线时意外丢失；现已纳入重打脚本和回归检查。B6 决定盖章时使用哪个 key，B11 决定未显式配置时启用路由；用户显式三档选择仍保留。
+- **不能称整个插件禁止 HTTP/2**：当前加速器保留按渠道启用 HTTP/2 的能力；它的 transport 与来源提交一致。bili 转发仍用当前上游的 fetch/transport 路径；十一组补丁里没有独立的 HTTP/2 禁用补丁。不要把旧描述当成重打要求。
 - 标记文件、rollout、代理、模型窗口和用户设置属于运行环境，不随 Git 安装自动复制。历史 99% 缓存命中、首轮耗时是特定配置下的测量，不能作为所有网关的发布通过阈值。
 
 ## 3. 上游升级操作
 
 1. 确认工作区状态，选定两个上游各自的完整提交。新源码在独立目录处理，不能直接覆盖唯一的 vendor 构建。先查看旧/新上游差异。
 2. bili 在选定源码提交运行上游自己的 `npm ci`、`npm run build`。记录 commit、Node/npm 版本和构建命令；**从源码构建是当前流程，不是禁用方案**。
-3. 在新构建运行 `node scripts/patch-bili-build.mjs <新目录>/dist/index.js`。逐项看 B1–B10；任何 skipped、缺锚点或行为变化都须判明。尤其步骤 6/7 当前缺锚点只打印 skipped，不会强制失败；后续视图检查会使用其函数，但不能只依赖脚本退出码。
+3. 在新构建运行 `node scripts/patch-bili-build.mjs <新目录>/dist/index.js`。逐项看 B1–B11；任何 skipped、缺锚点或行为变化都须判明。尤其步骤 6/7 当前缺锚点只打印 skipped，不会强制失败；后续视图检查会使用其函数，但不能只依赖脚本退出码。
 4. 若上游已提供等价功能，记录哪个上游提交替代哪个 ID，调整补丁与检查后再移除重复实现。不要在未比较输入、配置和降级边界前直接删补丁。
 5. 需要升级加速器时，显式指定 `--accelerator <选定提交目录>`；省略该选项可能沿用 profile/旧 vendor，不代表自动升级。它的压缩、预传输、HTTP/2、计时和账本功能来自第二个仓库，不要误归为 bili 的差异。
 6. 构建仓库产物（在本仓库运行，示例目录替换成实际路径）：
@@ -70,7 +71,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
    node scripts/install.mjs --build --bili /path/to/new-bili --accelerator /path/to/accelerator
    ```
 
-   核对 B1–B10、W1–W6、I1–I5；更新本页来源和当前结论、PATCHES 对应细节。修改客户端模板/安装合并逻辑后也要重建 `lib/client.js`、`lib/upstream.js` 和根组合层。
+   核对 B1–B11、W1–W6、I1–I5；更新本页来源和当前结论、PATCHES 对应细节。修改客户端模板/安装合并逻辑后也要重建 `lib/client.js`、`lib/upstream.js` 和根组合层。
 7. 自动验证最终 vendor 构建，而不只验证输入来源：
 
    ```sh
