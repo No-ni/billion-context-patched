@@ -14,7 +14,8 @@
 // installed build alone.
 import { createRequire } from "node:module";
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
@@ -35,6 +36,17 @@ if (source.includes(FORBIDDEN)) {
       "); fetch adds its own, and on Node 24 the pair becomes an invalid header",
   );
 }
+// A private HOME: the helper writes its encode log and reads the machine-wide
+// "default encoding for requests without a directive" file from there. Giving it
+// a temporary one keeps this test from touching the real log - and lets us set
+// that default deliberately, because the retry case below only means something
+// when a fallback exists to be wrongly applied.
+const home = mkdtempSync(join(tmpdir(), "bili-smoke-"));
+mkdirSync(join(home, ".local", "state", "billion-context"), { recursive: true });
+writeFileSync(join(home, ".local", "state", "billion-context", "upstream-encoding"), "gzip\n");
+process.env.HOME = home;
+process.env.USERPROFILE = home;
+
 const start = source.indexOf("var __biliEncZlib=");
 const end = source.indexOf("async function fetchWithTimeout(");
 if (start < 0 || end <= start) fail("cannot find the compression helpers in " + distPath);
@@ -111,5 +123,6 @@ for (const test of [
 }
 
 server.close();
+rmSync(home, { recursive: true, force: true });
 const electron = process.versions.electron === undefined ? "" : " (Electron " + process.versions.electron + ")";
 console.log("smoke: OK - " + cases + " cases on Node " + process.version + electron);
