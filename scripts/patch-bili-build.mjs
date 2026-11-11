@@ -334,6 +334,244 @@ for (const [before, after] of cacheUiChanges) {
     replaceOnce("cache-key-ui", before, after);
   }
 }
+// ── 12. image retention and the image convention ────────────────────────────
+// A picture is re-sent on every later turn because the whole transcript goes
+// out again each time. After one successful look the pass replaces it with a
+// one-line note (acp_read_original_image brings the original back by ref). The
+// same pass shrinks what still leaves, through the host's own encoder: sips on
+// macOS, PowerShell's System.Drawing on Windows, ImageMagick on PATH. The
+// convention paragraph rides on the tail of the standing compression prompt:
+// that text is inside the cached prefix's last block, so a constant paragraph
+// costs nothing after the first turn.
+//
+// The block sits between two sentinels so a later revision of it replaces the
+// old text in place instead of being skipped as "already patched".
+const IMAGE_BLOCK_START = "// <bili-image-blocks begin>";
+const IMAGE_BLOCK_END = "// <bili-image-blocks end>";
+const IMAGE_BLOCK_TEXT = [
+  readFileSync(join(here, "patches", "image-convention.block.js"), "utf8"),
+  readFileSync(join(here, "patches", "image-retention.block.js"), "utf8")
+].map((block) => block.replace(/\s+$/, "")).join("\n");
+if (/[^\x00-\x7e]/.test(IMAGE_BLOCK_TEXT)) {
+  throw new Error("image blocks: non-ASCII bytes would be mangled by the latin1 write; keep them escaped");
+}
+const IMAGE_BLOCK_BODY = IMAGE_BLOCK_START + "\n" + IMAGE_BLOCK_TEXT + "\n" + IMAGE_BLOCK_END;
+const IMAGE_HELPERS_MARK = "function biliRetentionApply(";
+const IMAGE_CONVENTION_LEGACY_START = "// --- image convention: a picture is expensive, look once";
+const IMAGE_LEGACY_START = "// --- image retention: a picture is worth one look";
+const SHED_ANCHOR = "async function shedWireImages(body,protocol,targetBytes,opts={}){";
+{
+  const startAt = text.indexOf(IMAGE_BLOCK_START);
+  const endAt = text.indexOf(IMAGE_BLOCK_END);
+  if (startAt >= 0 && endAt > startAt) {
+    const current = text.slice(startAt, endAt + IMAGE_BLOCK_END.length);
+    if (current === IMAGE_BLOCK_BODY) {
+      console.log("image helpers: already patched");
+    } else {
+      text = text.slice(0, startAt) + IMAGE_BLOCK_BODY + text.slice(endAt + IMAGE_BLOCK_END.length);
+      changed = true;
+      console.log("image helpers: updated");
+    }
+  } else if (text.includes(IMAGE_HELPERS_MARK)) {
+    const shedAt = text.indexOf(SHED_ANCHOR);
+    const starts = [IMAGE_CONVENTION_LEGACY_START, IMAGE_LEGACY_START]
+      .map((marker) => text.indexOf(marker))
+      .filter((at) => at >= 0);
+    if (starts.length === 0 || shedAt < 0) {
+      throw new Error("image helpers: a block without sentinels is present but its bounds were not found");
+    }
+    const legacyAt = Math.min(...starts);
+    const legacySlice = text.slice(legacyAt, shedAt);
+    if (legacySlice.split(IMAGE_HELPERS_MARK).length !== 2) {
+      throw new Error("image helpers: the legacy bounds do not wrap exactly one retention block");
+    }
+    text = text.slice(0, legacyAt) + IMAGE_BLOCK_BODY + "\n" + text.slice(shedAt);
+    changed = true;
+    console.log("image helpers: updated (sentinels added around the legacy block)");
+  } else {
+    replaceOnce("image helpers", SHED_ANCHOR, IMAGE_BLOCK_BODY + "\n" + SHED_ANCHOR);
+    console.log("image helpers: patched");
+  }
+}
+// ── 13. the convention rides on both standing-prompt builders ───────────────
+// Two independent section arrays feed two builders; responses picks between them
+// per turn, so both tails are appended (after applySectionOverrides, where a
+// user's section overrides cannot drop it).
+const PROMPT_SEAMS = [
+  "}function buildCompressHybridSystemPrompt(prompts=defaultPrompts,sections){",
+  "}function createContentStore(){return{version:1,byHash:{},byRef:{}}}"
+];
+for (const seam of PROMPT_SEAMS) {
+  const withConvention = "+biliImageConventionText()" + seam;
+  if (text.includes(withConvention)) {
+    console.log("image prompt: already patched");
+    continue;
+  }
+  replaceOnce("image prompt", seam, withConvention);
+  console.log("image prompt: patched");
+}
+// ── 14. retention runs before the size shedder ──────────────────────────────
+// Folding first is what makes the budget shedder see the real payload; it stays
+// in place for the images that are still leaving.
+const SHED_CALL = 'const shed=await shedEgressIfOverBudget(wireBody,prepared.protocol,{sessionId:prepared.session.id,session:prepared.session,log:log2,phase:"pre-send"});';
+const RETENTION_CALL = 'const biliImages=await biliRetentionApply(wireBody,prepared.protocol,prepared.session,{phase:"pre-send",log:log2});if(biliImages.changed){wireBody=biliImages.body;outboundCopyRewritten=true;try{log2("info","[image-retention] folded "+biliImages.folded+" shrunk "+biliImages.shrunk)}catch(err4){}}';
+if (text.includes(RETENTION_CALL)) {
+  console.log("image retention call: already patched");
+} else {
+  replaceOnce("image retention call", SHED_CALL, RETENTION_CALL + SHED_CALL);
+  console.log("image retention call: patched");
+}
+// ── 15. a look only counts once the request made it upstream ────────────────
+const FORWARD_ANCHOR = "function noteSuccessfulForward(inp){try{armInternal(inp)}";
+const FORWARD_PATCHED = "function noteSuccessfulForward(inp){try{biliRetentionCommit(inp&&inp.sessionId)}catch(err3){}try{armInternal(inp)}";
+if (text.includes(FORWARD_PATCHED)) {
+  console.log("image retention commit: already patched");
+} else {
+  replaceOnce("image retention commit", FORWARD_ANCHOR, FORWARD_PATCHED);
+  console.log("image retention commit: patched");
+}
+// ── 16. the new knobs are top-level config keys ─────────────────────────────
+const CONFIG_KEYS_ANCHOR = ',"autoModeForge","imageRescale","guardrails","cacheKeepalive"]);';
+const CONFIG_KEYS_PATCHED = ',"autoModeForge","imageRescale","imageRescaleMaxDim","imageRetention","imageRetentionKeepLastUser","imageRetentionMaxDim","imagePrompt","guardrails","cacheKeepalive"]);';
+if (text.includes(CONFIG_KEYS_PATCHED)) {
+  console.log("image config keys: already patched");
+} else {
+  replaceOnce("image config keys", CONFIG_KEYS_ANCHOR, CONFIG_KEYS_PATCHED);
+  console.log("image config keys: patched");
+}
+// ── 17. the image card in the config page ───────────────────────────────────
+// A picture leaves once, and these four keys are the ones people reach for
+// while watching a body grow. The config page already edits this exact file,
+// so the card edits the same draft the raw editor holds: one Save, one file,
+// and the keys stay visible there like any other. Each region sits between
+// sentinels so a later revision of the card replaces the old text in place
+// instead of being skipped as "already patched".
+const CARD_MARKUP = readFileSync(join(here, "patches", "image-card.markup.block.js"), "utf8").replace(/\s+$/, "");
+const CARD_SCRIPT = readFileSync(join(here, "patches", "image-card.script.block.js"), "utf8").replace(/\s+$/, "");
+const CARD_LISTENERS = readFileSync(join(here, "patches", "image-card.listeners.block.js"), "utf8").replace(/\s+$/, "");
+for (const [name, block] of [["markup", CARD_MARKUP], ["script", CARD_SCRIPT], ["listeners", CARD_LISTENERS]]) {
+  if (/[^\x00-\x7e]/.test(block)) {
+    throw new Error("image card " + name + ": non-ASCII bytes would be mangled by the latin1 write; keep them escaped");
+  }
+}
+// The page dictionary is one object literal in the bundle, and the copy the
+// page script uses is serialized out of it when a page renders, so adding the
+// keys there covers both the rendered markup and the script side.
+const IMAGE_CARD_COPY_ZH = {
+  "cfg.image": "图像",
+  "cfg.image_desc": "图片在会话里只上传一次：看过之后，后续请求把它换成一行占位说明，原图仍可用 acp_read_original_image 按引用取回；第一次上送时，超过上限就先压小。这几项写进同一个配置文件，保存后对下一条请求生效。",
+  "cfg.image_retention": "看过的图片不再重传",
+  "cfg.image_retention_hint": "关闭后，历史里的图片每轮都整张重传，请求体只增不减。",
+  "cfg.image_keep_last": "保留最新一条消息里的图片",
+  "cfg.image_keep_last_hint": "当轮还能直接看；工具结果里的截图不受这条影响。",
+  "cfg.image_max_dim": "上送时的最长边（像素）",
+  "cfg.image_max_dim_hint": "低于 128 会被拒绝；只缩不放，压不到原图八成以下就按原样发送。",
+  "cfg.image_dim_invalid": "请输入不小于 128 的整数",
+  "cfg.image_prompt": "在系统提示里提醒模型少看图",
+  "cfg.image_prompt_hint": "追加一段图像使用约定：先问文字与数据，能不看图就不看，看过就把结论写下来。",
+  "cfg.image_reset": "恢复默认",
+  "cfg.image_restored": "已恢复默认值，记得保存"
+};
+const IMAGE_CARD_COPY_EN = {
+  "cfg.image": "Image",
+  "cfg.image_desc": "A picture is uploaded once per session: once it has been looked at, later requests carry a one-line note instead, and acp_read_original_image brings the original back by ref. Anything over the limit is shrunk before its first upload. These keys live in the same config file and apply to the next request after saving.",
+  "cfg.image_retention": "Do not resend images already seen",
+  "cfg.image_retention_hint": "Turned off, every historical image goes out in full on every turn and the request body only grows.",
+  "cfg.image_keep_last": "Keep the images in the latest message",
+  "cfg.image_keep_last_hint": "They stay visible for this turn; screenshots from tool results are not affected.",
+  "cfg.image_max_dim": "Longest side on upload (px)",
+  "cfg.image_max_dim_hint": "Values below 128 are rejected; it only shrinks, and sends the original when it cannot get under 80 percent.",
+  "cfg.image_dim_invalid": "Enter a whole number of at least 128",
+  "cfg.image_prompt": "Remind the model not to look at images",
+  "cfg.image_prompt_hint": "Appends an image convention: ask for text and data first, skip the picture when it can, and write the conclusion down once seen.",
+  "cfg.image_reset": "Restore defaults",
+  "cfg.image_restored": "Defaults restored; remember to save"
+};
+const asciiJson = (value) => JSON.stringify(value).replace(/[^ -~]/g, (ch) => String.fromCharCode(92) + "u" + ch.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase());
+const CARD_I18N = [
+  "// <bili-image-card:i18n begin>",
+  'Object.assign(MESSAGES["zh-CN"], ' + asciiJson(IMAGE_CARD_COPY_ZH) + ");",
+  "Object.assign(MESSAGES.en, " + asciiJson(IMAGE_CARD_COPY_EN) + ");",
+  "// <bili-image-card:i18n end>"
+].join("\n");
+const cardUpsert = (label, start, end, body, anchor, after) => {
+  const startAt = text.indexOf(start);
+  const endAt = text.indexOf(end);
+  if (startAt >= 0 && endAt > startAt) {
+    // The marker starts its own line: measure from the line start and drop the
+    // indentation the previous copy carried, or every re-run adds four spaces
+    // in front of the block and never compares equal.
+    let from = startAt;
+    while (from > 0 && (text[from - 1] === " " || text[from - 1] === "\t")) from--;
+    const current = text.slice(from, endAt + end.length);
+    if (current === body) {
+      console.log(label + ": already patched");
+      return;
+    }
+    text = text.slice(0, from) + body + text.slice(endAt + end.length);
+    changed = true;
+    console.log(label + ": updated");
+    return;
+  }
+  replaceOnce(label, anchor, after ? anchor + "\n" + body : body + "\n" + anchor);
+  console.log(label + ": patched");
+};
+cardUpsert("image card i18n", "// <bili-image-card:i18n begin>", "// <bili-image-card:i18n end>", CARD_I18N, "function translate(locale,key2,vars){", false);
+cardUpsert("image card markup", "<!-- <bili-image-card begin> -->", "<!-- <bili-image-card end> -->", CARD_MARKUP, '<div class="card" id="summary-settings">', false);
+cardUpsert("image card script", "// <bili-image-card:js begin>", "// <bili-image-card:js end>", CARD_SCRIPT, "    function hydrateQuickConfig(cfg) {", false);
+cardUpsert("image card listeners", "// <bili-image-card:listeners begin>", "// <bili-image-card:listeners end>", CARD_LISTENERS, "            await putCfg(sq, { file: raw });\n        });", true);
+const CARD_CALL_ANCHOR = "            hydrateQuickConfig(cfg);\n            hydrateSummaryConfig(cfg);";
+const CARD_CALL_PATCHED = "            hydrateQuickConfig(cfg);\n            hydrateImageCard(cfg);\n            hydrateSummaryConfig(cfg);";
+if (text.includes("            hydrateImageCard(cfg);")) {
+  console.log("image card call: already patched");
+} else {
+  replaceOnce("image card call", CARD_CALL_ANCHOR, CARD_CALL_PATCHED);
+  console.log("image card call: patched");
+}
+const CARD_DIRTY_OLD = '["card-quick", "card-file", "summary-settings"]';
+const CARD_DIRTY_NEW = '["card-quick", "card-file", "card-image", "summary-settings"]';
+if (text.includes(CARD_DIRTY_NEW)) {
+  console.log("image card dirty list: already patched");
+} else {
+  replaceOnce("image card dirty list", CARD_DIRTY_OLD, CARD_DIRTY_NEW);
+  console.log("image card dirty list: patched");
+}
+const CARD_DISABLE_OLD = '["cfg-file-edit", "save-file", "save-upstream", "save-quick", "save-summary", "save-pricing"]';
+const CARD_DISABLE_NEW = '["cfg-file-edit", "save-file", "save-upstream", "save-quick", "save-image", "reset-image", "save-summary", "save-pricing"]';
+if (text.includes(CARD_DISABLE_NEW)) {
+  console.log("image card disable list: already patched");
+} else {
+  replaceOnce("image card disable list", CARD_DISABLE_OLD, CARD_DISABLE_NEW);
+  console.log("image card disable list: patched");
+}
+// ── 18. the fold step defaults to 80k ──────────────────────────────────────
+// Upstream nudges once the context has grown 50k tokens since the last fold.
+// This branch's own profile has been running at 80k for months: folds are less
+// frequent, summaries keep more material, and the request body stops being
+// re-derived as often. The kernel default and the config page's default have to
+// agree, or a fresh install shows 50000 in the card and then behaves like it.
+const NUDGE_KERNEL_OLD = "growthFloor:5e4,growthCap:5e4";
+const NUDGE_KERNEL_NEW = "growthFloor:8e4,growthCap:8e4";
+const NUDGE_PAGE_OLD = "const NUDGE_DEFAULT = 50000, NUDGE_STEP = 5000";
+const NUDGE_PAGE_NEW = "const NUDGE_DEFAULT = 80000, NUDGE_STEP = 5000";
+const escapedCopy = (value) => String(value).replace(/[^ -~]/g, (ch) => String.fromCharCode(92) + "u" + ch.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase());
+const NUDGE_ZH_OLD = escapedCopy("内核默认 50000");
+const NUDGE_ZH_NEW = escapedCopy("内核默认 80000");
+const NUDGE_EN_OLD = "kernel default 50000";
+const NUDGE_EN_NEW = "kernel default 80000";
+const NUDGE_EDITS = [
+  ["nudge default (kernel)", NUDGE_KERNEL_OLD, NUDGE_KERNEL_NEW],
+  ["nudge default (config page)", NUDGE_PAGE_OLD, NUDGE_PAGE_NEW],
+  ["nudge default (zh hint)", NUDGE_ZH_OLD, NUDGE_ZH_NEW],
+  ["nudge default (en hint)", NUDGE_EN_OLD, NUDGE_EN_NEW],
+];
+let nudged = 0;
+for (const [label, find, replacement] of NUDGE_EDITS) {
+  if (text.includes(replacement)) continue;
+  replaceOnce(label, find, replacement);
+  nudged++;
+}
+console.log("nudge growth default: " + (nudged > 0 ? "patched (" + nudged + "/" + NUDGE_EDITS.length + ")" : "already patched"));
 if (changed) {
   writeFileSync(target, text, "latin1");
   console.log("written " + target);

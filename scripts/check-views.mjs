@@ -151,4 +151,13 @@ check("settings show enabled by default and preserve explicit routing", () => {
   assert(!source.includes("\"cfg.q_pck_disabled_desc\":\"\\u5173\\u95ED\\uFF08"));
   assert(source.includes("\"cfg.q_pck_enabled_desc\":\"\\u5F3A\\u5236\\u5F00\\u542F\\uFF08"));
 });
+check("nudge growth default is 80k", () => {
+  assert(source.includes("growthFloor:8e4,growthCap:8e4"));
+  assert(source.includes("const NUDGE_DEFAULT = 80000, NUDGE_STEP = 5000"));
+  assert(source.includes("kernel default 80000"));
+  assert(source.includes("\\u9ED8\\u8BA4 80000"));
+  assert(!source.includes("growthFloor:5e4,growthCap:5e4"));
+  assert(!source.includes("const NUDGE_DEFAULT = 50000, NUDGE_STEP = 5000"));
+  assert(!source.includes("kernel default 50000"));
+});
 console.log("views: " + checks + " checks passed");

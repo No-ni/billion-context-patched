@@ -207,6 +207,10 @@ if (!dryRun && !argv.includes("--skip-smoke") && smokeTarget) {
       stdio: "inherit", timeout: 30000,
       env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
     });
+    execFileSync(process.execPath, [join(here, "check-image-card.mjs"), smokeTarget], {
+      stdio: "inherit", timeout: 30000,
+      env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
+    });
     execFileSync(process.execPath, [join(here, "smoke.mjs"), smokeTarget], {
       stdio: "inherit",
       timeout: 30000,
@@ -405,6 +409,10 @@ const acceleratorRebuilt = hintRewrite.text;
 const mergedClient = template
   .replace("/*__BILI_FACTORY__*/", () => biliClientBody)
   .replace("/*__ACCELERATOR_FACTORY__*/", () => acceleratorRebuilt);
+// Both halves plus the inserted image section are one program from here on, so
+// parse it as one: a seam that landed inside a string or a brace fails here,
+// while the installed copy is still the previous one.
+extractFactory(mergedClient, "merged client");
 
 // Both halves extracted and parsed, so the build can go in now: an abort above
 // leaves the installed dist exactly as it was.

@@ -8,6 +8,12 @@
 
 项目行为要求与验收条件见 [SPEC.md](SPEC.md)，覆盖全部定制功能及“缓存钥匙默认开启”的明确约定；后续 AI 每次合并前后必须按 SPEC 核对，执行规则见 [AGENTS.md](AGENTS.md)。当前差异与升级流程见 [MAINTENANCE.md](MAINTENANCE.md)；历史排查和实现细节见 [PATCHES.md](PATCHES.md)。
 
+当前版本 **0.6.3**。
+
+0.6.0 起还多一件事：**同一张图只在它被看过的那一次上送**。模型请求每轮全量重发，一张整页截图的 base64 会让之后每一轮请求体多出几百 KB；现在成功发送一次之后，后续请求里它会变成一行占位说明（尺寸、引用号、已看过、以及 `acp_read_original_image("<ref>")` 的取回方式），原图随时可按 ref 取回。首次上送前先用宿主自带的编码器试着压到 `imageRetentionMaxDim`（默认 1200）并转 JPEG：macOS 用 `/usr/bin/sips`，Windows 用 PowerShell 里的 `System.Drawing`，其它平台找 PATH 上的 ImageMagick，都不给运行环境新增依赖（0.6.1 起覆盖三平台，0.6.0 只有 macOS）。同时系统提示尾部追加一段恒定的图像使用约定（能不用图就不用、要看就一次看够、出图够判断即可）。这些开关都在配置里：`imageRetention`、`imageRetentionKeepLastUser`、`imageRetentionMaxDim`、`imagePrompt`，默认全开，设 false 即回到旧行为，详见 [PATCHES.md](PATCHES.md) 第 20 节。
+
+0.6.3 起不用再翻配置文件：bili 自己的 Web UI（设置里的内嵌页面）的「配置」页多了一张「图像」卡，四行就是上面四个开关（开关、开关、一个不小于 128 的数字框、开关），下面还有「恢复默认」。改动先进页面草稿，点保存才随整份配置写进 `billion-context.json`（先备份 `.bili-bak`，临时文件 rename 原子替换），下一条请求生效，不用重启；同名环境变量仍然优先，卡片只展示文件里的值。手改 JSON 当然也可以，卡片不是唯一入口。
+
 ## 安装
 
 设置 → 插件 → 安装，填仓库地址即可，装完重启 DSH：
@@ -45,7 +51,7 @@ dsh plugin --profile desktop remove bili-context-patch
 
 `vendor/` 从选定来源复制，其中 bili 代理构建由补丁脚本修改；`lib/client.js`、`lib/upstream.js`、根 `dsh.bundle.patch.yml` 由 `node scripts/install.mjs --build` 生成。具体来源规则见 MAINTENANCE，不要只手改生成物。
 
-当前清单覆盖 11 组 bili 补丁、6 项包装能力、5 项安装与运维行为，并逐项列出检查方法和未覆盖部分。上游已吸收的能力与本包新增能力分开记录。
+当前清单覆盖 16 组 bili 补丁、7 项包装能力、5 项安装与运维行为，并逐项列出检查方法和未覆盖部分。上游已吸收的能力与本包新增能力分开记录。
 
 ## 插件道的快照渲染（0.4.3，可关）
 

@@ -1,6 +1,6 @@
 # 当前差异与上游升级指南
 
-本文是当前实现的维护入口，按 0.5.4 的代码核对。`PATCHES.md` 保存实现细节、历史故障和测量结果；发生冲突时先核查代码，再同步两份文档，不能把历史叙述当成当前保证。
+本文是当前实现的维护入口，按 0.6.3 的代码核对。`PATCHES.md` 保存实现细节、历史故障和测量结果；发生冲突时先核查代码，再同步两份文档，不能把历史叙述当成当前保证。
 
 [SPEC.md](SPEC.md) 规定必须保留的行为，本页记录当前实现与验证覆盖。发现代码偏离规范时登记并修复，不能仅通过修改说明把回归变成新默认。每次合并前后按 SPEC 第 7 节核对 PCK-01–PCK-05 和本页全部稳定 ID，并保存核对结果；不仅在上游升级时执行。
 
@@ -8,14 +8,14 @@
 
 | 来源 | 当前版本 / 提交 | 本仓库的关系 |
 | --- | --- | --- |
-| [billion-context](https://github.com/ranxianglei/billion-context) | 0.1.213，master `406193b202c13248241f25201e1c6bbda747c99b` | 上游源码构建后，对代理 `dist/index.js` 应用 B1–B11；agent、client、层和清单也随该基线复制 |
+| [billion-context](https://github.com/ranxianglei/billion-context) | 0.1.213，master `406193b202c13248241f25201e1c6bbda747c99b` | 上游源码构建后，对代理 `dist/index.js` 应用 B1–B18；agent、client、层和清单也随该基线复制 |
 | [dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator) | 2.3.0，`e8c30af1f2b5cffa6749d032f0f296e17d4e26d0` | 2026-11-09 逐文件比对：当前 vendor 的 package.json 和全部 8 个 lib/*.js 与该提交完全一致；其功能独立维护，包装包仅在生成客户端时改写三个字面量 |
 
 bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整提交通过上游提交接口核对；本轮未重新构建该基线做逐字节比对，不将整个二进制声明为已独立验证可复现。版本号相同不代表提交相同，不能只按 0.1.213 判断是否需要升级。
 
 ## 2. 必须逐项核对的差异
 
-### bili 构建：B1–B11 对应补丁脚本步骤
+### bili 构建：B1–B18 对应补丁脚本步骤
 
 | ID | 当前行为与边界 | 维护位置 | 验证 |
 | --- | --- | --- | --- |
@@ -30,10 +30,17 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 | B9 | 只有最后一个 active 块零行且前面有块已锚住时，才允许暂时跳过；还必须通过 B10 | 步骤 9，`loadTranscriptBase` | `check-views.mjs` 检查最新/老块/单块缺失 |
 | B10 | SHA-256 校验完整客户端前缀；旧画面所有摘要块仍 active；跳过块全部消息必须在实际追加尾部；复用时补 tailStart | `patches/view-safety.block.js`；步骤 10 同时修改普通与 WS/增量拼接点 | `check-views.mjs` 检查历史编辑、长文本编辑、失效摘要、拼接点前遗漏、部分覆盖、两种请求路径 |
 | B11 | prompt_cache_key 路由默认 enabled；显式 disabled/auto/enabled 原样保留，环境变量优先级不变；设置页缺省选项及中英文默认文案同步 | 步骤 11，parsePromptCacheRouting | check-views.mjs 提取真实解析与生效函数检查缺省、无效值及三档显式设置 |
+| B12 | 图片在首次成功发送后折叠成一行占位说明（尺寸、ref、已看过提示、可选的 acp_read_original_image 取回方式）；四协议全覆盖，含 tool_result 与原图回执图 | `patches/image-retention.block.js`；步骤 12、14 | `check-image-retention.mjs` 检查四种请求形状与关机行为 |
+| B13 | 首次上送按需压缩：长边 > imageRetentionMaxDim（默认 1200）或 > 100 KB 时，按平台顺序借宿主编码器（macOS `/usr/bin/sips`、Windows PowerShell `System.Drawing`、其它 ImageMagick）试 JPEG(q80) 与 PNG 取小，且 ≤ 原图 × 0.8 才采纳；一个都没有则静默跳过 | 同一个块的 `biliRetentionShrinkOne`、`biliRetentionBackends`；步骤 12 | `check-image-retention.mjs` 核对三平台命令行并用自造 PNG 真跑本机后端 |
+| B14 | 两个压缩提示构建器的返回尾部追加恒定图像约定；覆盖四协议与两种 strategy，不受 `applySectionOverrides` 影响 | `patches/image-convention.block.js`；步骤 13 的两处 seam | `check-image-retention.mjs` 检查文本开头、关键词、稳定性与关闭 |
+| B15 | 折叠记账挂在 `noteSuccessfulForward`：只有上游真正接收后才算看过，失败请求下一轮仍发原图 | 步骤 15 | `check-image-retention.mjs` 检查首次不折叠、记账后再见折叠 |
+| B16 | 新增顶层配置键（imageRetention / imageRetentionKeepLastUser / imageRetentionMaxDim / imagePrompt / imageRescaleMaxDim）登记，避免启动未知键警告 | 步骤 16 | `check-image-retention.mjs` 结构检查 |
+| B17 | bili Web UI「配置」页里的「图像」卡：四个控件只编辑配置草稿，保存走页面原有的 `PUT /__bili/config`；边长不小于 128，恢复默认只删四个键；中英词条在 `translate` 之前注入 bundle 级 `MESSAGES` | `patches/image-card.{markup,script,listeners}.block.js`；步骤 17，哨兵区间可整段替换 | `check-image-card.mjs` 检查标记、词条、调用点、内联脚本解析与假 DOM 行为 |
+| B18 | 压缩增长阈值缺省 80000：内核 `defaultConfig` 的 floor/cap、Web UI 快速配置默认值、中英文提示文案同步；只给没写 `compress.nudgeGrowthTokens` 的配置定值 | `scripts/patch-bili-build.mjs` 第 18 节；`check-views.mjs` 的新值断言 | `check-views.mjs` 检查 `growthFloor:8e4`、`NUDGE_DEFAULT = 80000`、中英提示 80000 在，旧的 5e4 与 50000 不在 |
 
 依赖：B4 依赖 B2/B3，B8 依赖 pin，B10 升级 B4/B8/B9 的行为。pin 表最多 8 条，不落盘；重启首轮无 pin。检查提取真实构建函数，用模拟存储运行，不能替代真实 DSH 的存储/投影集成测试。
 
-### 包装包：W1–W6
+### 包装包：W1–W7
 
 | ID | 保留的能力 | 维护位置与验证 |
 | --- | --- | --- |
@@ -43,6 +50,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 | W4 | 启动前扫描与运行期跟踪，抑制重复的上游条目；销毁时取消排队启动 | `lib/index.js`；`check-wrapper.mjs` 检查取消启动，重复条目与热重载需真机验证 |
 | W5 | fork 经 AsyncLocalStorage 给 seeded create 补 parentSession，尊重已有父字段；销毁时恢复服务 | `lib/fork-lineage.js`；`check-wrapper.mjs` 检查并发隔离、普通创建和恢复 |
 | W6 | 包装包自己的版本检查和更新接口；串行共享更新；checkout 安装用 git pull --ff-only + installer；无 patchRepo 提示走插件管理器 | `lib/index.js`；与客户端 W2 配对；版本提示、更新成功/失败需人工验证，四项自动检查不覆盖接口 |
+| W7 | （补丁 B17）bili Web UI「配置」页里的「图像」卡：四个控件（折叠总开关、上传豁免、首传最长边、图像约定）只编辑页面上的配置草稿，保存沿用页面原有的 `PUT /__bili/config`；边长只收不小于 128 的整数，非法就地提示并回填；恢复默认只删四个键；中英词条随补丁注入 bundle 级 `MESSAGES`，位置必须在 `translate` 定义之前 | `patches/image-card.{markup,script,listeners}.block.js`、`scripts/patch-bili-build.mjs` 第 17 节、`scripts/install.mjs`；`check-image-card.mjs` 覆盖结构、内联脚本解析与假 DOM 行为，真实浏览器里的保存与重启后显示需人工确认 |
 
 ### 安装与运维：I1–I5
 
@@ -57,14 +65,16 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 ### 已失效描述与本地配置
 
 - **默认开启 prompt_cache_key 已恢复（0.5.4，B11）**：这是本分支要求。旧提交 `537d590` 的手改默认值在 `f2b9fd6`（0.5.0）刷新源码基线时意外丢失；现已纳入重打脚本和回归检查。B6 决定盖章时使用哪个 key，B11 决定未显式配置时启用路由；用户显式三档选择仍保留。
-- **不能称整个插件禁止 HTTP/2**：当前加速器保留按渠道启用 HTTP/2 的能力；它的 transport 与来源提交一致。bili 转发仍用当前上游的 fetch/transport 路径；十一组补丁里没有独立的 HTTP/2 禁用补丁。不要把旧描述当成重打要求。
+- **配置页图像卡（0.6.3，B17）**：卡片属于当前实现，配置键和代理行为不受它影响；若要整张卡去掉，删除三个 `patches/image-card.*.block.js`、`scripts/patch-bili-build.mjs` 的第 17 节、`scripts/install.mjs` 里 `check-image-card.mjs` 那一行，再从干净构建重打补丁即可。四个配置键仍可手改文件或走环境变量。
+- **图片折叠与压缩默认开启（0.6.0，B12–B15）**：`imageRetention` 关掉折叠与压缩、`imageRetentionKeepLastUser` 关掉上传豁免、`imagePrompt` 关掉约定，环境变量 `BILI_IMAGE_RETENTION` / `BILI_IMAGE_PROMPT` 优先。三条都是改配置即可回滚，不需要重打补丁。压缩只借宿主自带的编码器（macOS `sips`、Windows PowerShell `System.Drawing`、其它平台 ImageMagick），0.6.0 只覆盖 macOS，0.6.1 起三平台。上游 jimp 降采样链因依赖未安装而从未生效；不要为了恢复上游行为去改 `IMAGE_RESCALE_DEFAULT_MAX_DIM`，那个常量当前没有效果。
+- **不能称整个插件禁止 HTTP/2**：当前加速器保留按渠道启用 HTTP/2 的能力；它的 transport 与来源提交一致。bili 转发仍用当前上游的 fetch/transport 路径；十八组补丁里没有独立的 HTTP/2 禁用补丁。不要把旧描述当成重打要求。
 - 标记文件、rollout、代理、模型窗口和用户设置属于运行环境，不随 Git 安装自动复制。历史 99% 缓存命中、首轮耗时是特定配置下的测量，不能作为所有网关的发布通过阈值。
 
 ## 3. 上游升级操作
 
 1. 确认工作区状态，选定两个上游各自的完整提交。新源码在独立目录处理，不能直接覆盖唯一的 vendor 构建。先查看旧/新上游差异。
 2. bili 在选定源码提交运行上游自己的 `npm ci`、`npm run build`。记录 commit、Node/npm 版本和构建命令；**从源码构建是当前流程，不是禁用方案**。
-3. 在新构建运行 `node scripts/patch-bili-build.mjs <新目录>/dist/index.js`。逐项看 B1–B11；任何 skipped、缺锚点或行为变化都须判明。尤其步骤 6/7 当前缺锚点只打印 skipped，不会强制失败；后续视图检查会使用其函数，但不能只依赖脚本退出码。
+3. 在新构建运行 `node scripts/patch-bili-build.mjs <新目录>/dist/index.js`。逐项看 B1–B18；任何 skipped、缺锚点或行为变化都须判明。尤其步骤 6/7 当前缺锚点只打印 skipped，不会强制失败；后续视图检查会使用其函数，但不能只依赖脚本退出码。
 4. 若上游已提供等价功能，记录哪个上游提交替代哪个 ID，调整补丁与检查后再移除重复实现。不要在未比较输入、配置和降级边界前直接删补丁。
 5. 需要升级加速器时，显式指定 `--accelerator <选定提交目录>`；省略该选项可能沿用 profile/旧 vendor，不代表自动升级。它的压缩、预传输、HTTP/2、计时和账本功能来自第二个仓库，不要误归为 bili 的差异。
 6. 构建仓库产物（在本仓库运行，示例目录替换成实际路径）：
@@ -73,7 +83,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
    node scripts/install.mjs --build --bili /path/to/new-bili --accelerator /path/to/accelerator
    ```
 
-   核对 B1–B11、W1–W6、I1–I5；更新本页来源和当前结论、PATCHES 对应细节。修改客户端模板/安装合并逻辑后也要重建 `lib/client.js`、`lib/upstream.js` 和根组合层。
+   核对 B1–B18、W1–W7、I1–I5；更新本页来源和当前结论、PATCHES 对应细节。修改客户端模板/安装合并逻辑后也要重建 `lib/client.js`、`lib/upstream.js` 和根组合层。
 7. 自动验证最终 vendor 构建，而不只验证输入来源：
 
    ```sh

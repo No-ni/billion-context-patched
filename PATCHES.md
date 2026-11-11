@@ -4,9 +4,9 @@
 
 - 上游：<https://github.com/ranxianglei/billion-context>（MIT，Copyright (c) 2026 ranxianglei）
 - 本分支基线：上游 `master` 的 `406193b2`（上游版本号仍是 0.1.213，比那次发版多 155 个提交，见第 15 节）
-- 我们的改动不是一份 diff：bili 构建上的十一组补丁由 `scripts/patch-bili-build.mjs` 按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
+- 我们的改动不是一份 diff：bili 构建上的十八组补丁由 `scripts/patch-bili-build.mjs` 按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
 
-项目需求及验收以 [SPEC.md](SPEC.md) 为准。当前维护分为 bili 构建 B1–B11、包装包 W1–W6、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
+项目需求及验收以 [SPEC.md](SPEC.md) 为准。当前维护分为 bili 构建 B1–B18、包装包 W1–W7、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
 
 ## 0. 一页看完（改了什么、下次怎么核对）
 
@@ -18,12 +18,12 @@
 | --- | --- | --- | --- |
 | 包装包（我们自己的代码） | `lib/index.js`、`lib/fork-lineage.js`、`lib/client.template.js`、`package.json` | 一个 Loader 条目里挂 bili、压缩闸门、加速器；把两个客户端 bundle 的工厂体合成一个 `id`；fork 时补父会话血缘；`/api/bili-context-patch/version` 的版本与更新接口；启动时把仍然开着的上游条目关掉 | 与上游无关，不用重打 |
 | 组合层 | `dsh.bundle.patch.yml`（生成物） | 只保留自己那条 `insert`，其余是 bili 原有的层：`compaction-basic auto: false`、四个 preset 注入 `biliBasicCompactionPolicy`、`llm-deepseek`/`llm-deepseek-account` 的 retry 策略（含 `MALFORMED_RESPONSE`）；两个上游 insert 行删掉 | `install.mjs` 重跑一次即按新层重新生成 |
-| bili 构建产物 | `vendor/billion-context/dist/index.js` | 十一组文本补丁（0.2 的表） | `node scripts/patch-bili-build.mjs`，锚点对不上会报错退出 |
-| 安装期 | `scripts/install.mjs`、`scripts/smoke.mjs`、`scripts/restart.mjs` | 取源顺序、构建校验与冒烟、客户端 bundle 合成、profile 改写（dependencies / bundles / 渠道开关）、`--build` 产物生成 | 与上游无关；上游客户端 bundle 封装格式变了会直接报错退出 |
+| bili 构建产物 | `vendor/billion-context/dist/index.js` | 十八组文本补丁（0.2 的表） | `node scripts/patch-bili-build.mjs`，锚点对不上会报错退出 |
+| 安装期 | `scripts/install.mjs`、`scripts/check-views.mjs`、`scripts/check-image-card.mjs`、`scripts/smoke.mjs`、`scripts/restart.mjs` | 取源顺序、构建校验与冒烟（视图 → 图像卡 → 请求体压缩）、客户端 bundle 合成、profile 改写（dependencies / bundles / 渠道开关）、`--build` 产物生成 | 与上游无关；上游客户端 bundle 封装格式变了会直接报错退出 |
 
 当前仍保留指定中转主机渠道的压缩缺省值规则（仅补缺失键）。`promptCache.routing=enabled` 默认值已在 0.5.4 恢复并纳入第 11 组补丁，见第 7、19 节；显式配置优先。
 
-### 0.2 我们对 bili 构建的十一组补丁
+### 0.2 我们对 bili 构建的十八组补丁
 
 改的都是 `vendor/billion-context/dist/index.js`，由 `scripts/patch-bili-build.mjs` 按顺序重打。多数新插入位置要求唯一命中；步骤 6/7 在缺少锚点时仍可能打印 skipped。必须逐项检查输出并验证最终构建，不能把退出码当成十一项全齐的证明。
 
@@ -40,6 +40,13 @@
 | 9 | 最新块缺行时保留其原文 | `blockSeqs.size===0` | 0.5.3 要求所有覆盖消息都在实际尾部 | 第 17、18 节 |
 | 10 | 完整前缀、摘要有效性和跳过块覆盖校验 | `buildView`、`buildAnchoredView`、pin helpers | `patches/view-safety.block.js`；普通与增量两条路径都检查 | 第 18 节 |
 | 11 | 默认开启 prompt_cache_key，保留显式三档设置 | `parsePromptCacheRouting` | 未设置/无效值回落 enabled；精确锚点、幂等检查 | 第 19 节 |
+| 12 | 图片看过一次后就折叠成一行占位说明，可按 ref 取回原图 | `async function shedWireImages(body,protocol,targetBytes,opts={}){`（块插在它前面）、pre-send 的 `shedEgressIfOverBudget` 调用 | `patches/image-retention.block.js`；`imageRetention`（默认开）、`imageRetentionKeepLastUser`（默认开） | 第 20 节 |
+| 13 | 首次上送按需压到 `imageRetentionMaxDim`（默认 1200），JPEG(q80) 与 PNG 两路取小 | 同一个块的 `biliRetentionShrinkOne`、`biliRetentionBackendSteps` | 按平台借宿主编码器：macOS sips、Windows PowerShell System.Drawing、其它 ImageMagick；上游 jimp 未安装时这是唯一可用的压缩路径 | 第 20 节 |
+| 14 | 两个压缩提示构建器的返回尾部追加恒定图像约定 | `}function buildCompressHybridSystemPrompt(`、`}function createContentStore(){` | `patches/image-convention.block.js`；`imagePrompt`（默认开） | 第 20 节 |
+| 15 | 折叠记账只在上游真正接收后发生 | `function noteSuccessfulForward(inp){` | 拒收/失败不算看过 | 第 20 节 |
+| 16 | 新增顶层配置键登记，避免启动警告 | `,"autoModeForge","imageRescale","guardrails","cacheKeepalive"]);` | imageRetention / imageRetentionKeepLastUser / imageRetentionMaxDim / imagePrompt / imageRescaleMaxDim | 第 20 节 |
+| 17 | bili Web UI「配置」页新增「图像」卡（四个开关 + 保存 + 恢复默认），中英词条一并补齐 | `function translate(locale,key2,vars){`、`<div class="card" id="summary-settings">`、`    function hydrateQuickConfig(cfg) {`、`            await putCfg(sq, { file: raw });` 那段的 `});` 之后、初始化调用点、两处 id 列表 | `patches/image-card.{markup,script,listeners}.block.js`；带哨兵，重复运行按整段替换或跳过 | 第 21 节 |
+| 18 | 压缩增长阈值（`compress.nudgeGrowthTokens`）的默认值改成 80000：内核 `defaultConfig` 的 floor/cap、Web UI 快速配置的默认值、中英文提示里的「内核默认 50000」一起对齐 | `growthFloor:5e4,growthCap:5e4`、`const NUDGE_DEFAULT = 50000, NUDGE_STEP = 5000`、`内核默认 50000`（zh）、`kernel default 50000`（en） | 只改缺省值，配置文件或环境变量里的显式值照旧优先；页面删掉该键即回落到 80000 | 第 22 节 |
 
 第 4 组依赖第 2、3 组，第 8 组依赖 pin，第 10 组升级第 4、8、9 组并同时检查普通与增量拼接点；按脚本顺序执行，所有步骤支持重复运行。
 
@@ -480,3 +487,168 @@ function __biliForkTranscriptSource(session,store){
 第 11 步精确修改 `parsePromptCacheRouting` 的兜底为 enabled；缺失或无效值启用，用户显式 disabled/auto/enabled 和环境变量优先级保持不变。脚本验证唯一锚点，无法识别的上游实现直接失败，重复应用不改字节。设置页独立的缺省选项同样改为 enabled，并将中英文的“当前默认”说明移到开启项。B6 的 fork 血缘选 key 与 B11 的默认开关分别记录，避免再次混淆。
 
 `check-views.mjs` 从实际发布构建提取解析及生效函数，验证缺省、无效值与三档设置，并检查设置页缺省选项与默认文案；当前共 17 项检查。安装时也运行此检查，因此缺少 B11 的候选构建无法通过发布验证。
+
+## 20. 图片只发一次与图像约定（0.6.0 起，B12–B16）
+
+问题：模型请求是无状态的，每轮把整段对话重新发一遍；图片以 base64 内联，体积约为原文件的 4/3。被调查的一个表格排版会话里，45 次调用把请求体从 83.8 KB 抬到 1.51 MB，其中图片占 78%（6 张不重复截图各 78–288 KB）。缓存命中率 99.4%，token 花费很低，但请求体和带宽一轮都没省。
+
+上游的 `applyImageRescalePass` 本来能做降采样，但它依赖 `jimp`：`vendor/billion-context/package.json` 的 optionalDependencies 写着 `jimp 1.6.1`，实际从未安装，`loadJimp` 每次都落到 catch 分支打印 `image rescaling disabled for this process (originals pass through)`，所以 1663×1306 / 283 KB 的整页截图原样发出。这也是为什么不改上游常量：`IMAGE_RESCALE_DEFAULT_MAX_DIM` 从 1600 改成 1200 不会有任何效果，而要给这条链补上 jimp，还得同时改 5 个方言重建点里的 media_type/mimeType，否则会出现"标着 png 的 jpeg 字节"。
+
+### 20.1 折叠（B12）
+
+`patches/image-retention.block.js` 插在 `shedWireImages` 定义之前，在 pre-send 阶段对四个协议（anthropic 含 tool_result、openai 的 image_url、responses 的 input_image、google 的 inlineData）逐个找出图片位置，把命中过的换成一行文字：
+
+```text
+[image: png 1663x1306 m00145 已看过，后续请求不再重传；需要原图时调用 acp_read_original_image("m00145")]
+```
+
+- 保留了上游 `shedNote` 的 `[image: ` 前缀，视图检查和既有日志都能认。
+- 末尾的取回提示只在 body 里确实有 `acp_read_original_image` 工具时追加，免得给出调不通的指令。
+- 与上游 `collectOccurrences` 的一个关键差别：**不跳过**"从原图工具取回的回执图"。回执图正是"又被看过一次"的对象，跳过它就等于每次都重传。
+- 记账用 `session.metadata.biliImageSeen`（SHA-256 前 32 位，最多 400 条），跨请求存活，重启后靠会话文件仍在。
+
+### 20.2 记账时机（B15）
+
+折叠只在上游真正接收之后发生：`biliRetentionApply` 把本轮看到的图放进内存里的 pending 表，`noteSuccessfulForward` 开头调用 `biliRetentionCommit` 落进 metadata。上游 4xx/5xx、超时、连接失败都不算看过，下一轮仍是原图。这样做的代价是"同一张图最多重传一次"，换来的是不会因为一次失败把用户还没看到的图抹掉。
+
+### 20.3 首次压缩（B13）
+
+压缩不引入任何依赖，借宿主已有的编码器，顺序由 `biliRetentionBackendOrder` 这个纯函数决定：darwin → `sips`、`magick`、`convert`；win32 → PowerShell、`magick`、`convert`；其它平台 → `magick`、`convert`。每个后端都试 JPEG(q80) 与 PNG 两路，取体积更小的一路，且必须 ≤ 原图 × 0.8 才采纳（和上游 `KEEP_RATIO` 同口径）；这个后端不达标就换下一个。
+
+- macOS：`/usr/bin/sips`，`-Z <maxDim> -s format jpeg -s formatOptions 80` 与 `-Z <maxDim>` 的 PNG。实测 4K PNG 332 KB → JPEG 1200px 109 KB；真实 office 截图（RGBA）328 KB → JPEG 77 KB。
+- Windows：先找 `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`，找不到再退回 PATH 上的 `powershell`；`-NoProfile -NonInteractive -Command` 跑一段 `Add-Type -AssemblyName System.Drawing` 脚本：`HighQualityBicubic` + `PixelOffsetMode::HighQuality` 只缩不放，`Graphics.Clear(White)` 防透明 PNG 转 JPEG 变黑，JPEG 走 `GetImageEncoders` 的 `image/jpeg` + `EncoderParameters` 的质量 80，同一次进程里再存一份 PNG 保住 alpha；路径用单引号包裹、内部单引号翻倍。
+- 其它平台：PATH 上的 `magick`（ImageMagick 7）或 `convert`（6），`-resize 1200x1200>` 只缩不放，`-quality 80` 只加在 JPEG 那一路。
+
+- 透明 PNG 转 JPEG 会被合成到白底，这是已知代价：原图仍可用 `acp_read_original_image` 取回，保留透明度不值得为此保留几倍体积。
+- 只在"长边超过 maxDim 或原始字节超过 100 KB"时才动手，避免把本来就是小图的东西重编码一遍。
+- 一个后端都没有、命令缺失、子进程超时（20 s）或产物不达标，一律静默跳过，折叠照常工作。
+- 临时目录用 `mkdtemp`，`finally` 里 `rm -rf`；编码结果按 sha256 缓存在进程内（上限 16 条）。
+
+### 20.4 约定注入（B14）
+
+`patches/image-convention.block.js` 提供 `biliImageConventionText()`，补丁把 `+biliImageConventionText()` 追加到两个压缩提示构建器的返回值尾部：`buildCompressSystemPrompt`（anthropic / openai / google）与 `buildCompressHybridSystemPrompt`（responses 按策略二选一）。这样四协议、两种 strategy 全覆盖，而且用户的 `applySectionOverrides` 覆盖不掉它。
+
+选恒定文案而不是"有图时才注入"，理由是缓存：`stampAnthropicSystemCacheControl` 把 `cache_control` 打在 system 的最后一块上，恒定文本落在缓存前缀里，稳态零成本；按条件注入会让整段 system 前缀每轮作废——`GENERATION_BOUNDARY_NOTE` 已经是这样一个潜在 miss 源，不再加第二个。代价是这两个构建器被 7 处内部压缩/摘要子调用复用，每次多约 200 token，可以接受。
+
+文案本身（用户逐字认可，改之前先问）：
+
+```text
+关于图像：能用文字或数据看到的信息，就不要通过看图获取——图片有体积和重传成本，且看过后不会一直保留。
+· 只有确实需要"看"（版面、配色、布局、图形细节）时才出图或读图。
+· 要看就一次看够：同一版面不要重复渲染；改动后先自查差异，确认必要再看。
+· 出图够判断即可，不要整页高分辨率；能裁剪就裁剪。
+· 图是临时的：你看过之后，后续请求里它会被替换成一行占位说明，只有你写下来的文字会留下。看完请把事情写成文字（结论、差异、待办）；确实需要回看时，用 acp_read_original_image("<ref>") 按引用取回。
+```
+
+中文以 \uXXXX 转义写进块文件：dist 以 latin1 读写，非 ASCII 字面量会被打坏，补丁脚本对块内容做了非 ASCII 检查并在命中时直接抛错。
+
+### 20.5 配置、回滚与验证（B16）
+
+| 键 / 环境变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `imageRetention` / `BILI_IMAGE_RETENTION` | 开 | 折叠 + 首传压缩总开关；设 `false` 即回到旧行为（图仍然重传） |
+| `imageRetentionKeepLastUser` | 开 | 当前回合用户刚上传的图豁免一次 |
+| `imageRetentionMaxDim` / `BILI_IMAGE_RETENTION_MAX_DIM` | 1200 | 首传压缩的长边上限，最小 128 |
+| `imagePrompt` / `BILI_IMAGE_PROMPT` | 开 | 系统提示尾部的图像约定 |
+| `imageRescaleMaxDim` | 未设 | 上游 jimp 那条链的键，当前无效果，登记它是为了让配置不报未知键 |
+
+环境变量里 `0`/`false`/`off` 视为关闭，优先级高于配置文件。五个键都已登记进 `KNOWN_TOP_LEVEL_KEYS`。
+
+`node scripts/check-image-retention.mjs [dist]` 是离线检查：结构上核对块已插入、折叠在体积削减之前、记账挂在 `noteSuccessfulForward`、两处 prompt seam、配置键登记；行为上把两个块注入 shim 后跑 11 组用例——首见不折叠 / 记账后再见折叠、上传豁免、关掉豁免则折、tool_result 里的图折叠、google 的裸 `inlineData`（夹具里不含 "base64" 字样）、openai 的 image_url、responses 的 function_call_output、总开关、三平台后端顺序与命令行（sips、PowerShell、ImageMagick 各自的参数、只缩不放、引号转义）、本机后端的真实压缩（自造 1500×1000 PNG）、约定文本的开头/关键词/稳定性/关闭。Windows 的端到端压缩需要 Windows 主机，其它平台跳过；不联网、不调模型。
+
+### 20.6 没做的事
+
+- 不改上游 `applyImageRescalePass`，也不在 profile 里安装 jimp：profile 会被重装或剪枝，装进去的依赖迟早消失。压缩只借宿主自带的编码器：macOS `sips`、Windows PowerShell `System.Drawing`、其它平台 ImageMagick；三样都没有就只折叠不压缩。
+- 不在 acp-loop 那条路上重复挂折叠：那里已经过 surrogate 清洗与 image-learning 计数，再折一次会打乱统计；pre-send 是两条路的公共出口。
+- 不按"是否有图"条件注入约定（见 20.4 的缓存理由）。
+- 用户明确不考虑"新开会话"作为解决方案，所以这里的默认值是"老会话里也立刻生效"。
+
+## 21. bili 配置页里的图像卡（0.6.3，B17）
+
+图像那几个开关原来只能改配置文件或环境变量。0.6.3 把它做成 bili Web UI「配置」页里的一张卡：内嵌 iframe 里点「配置」，快速配置卡下面就是「图像」，四个控件直接编辑同一份 `billion-context.json`，保存复用配置页原有的 `PUT /__bili/config`。
+
+### 21.1 为什么在配置页，不在 DSH 设置页
+
+第一版插在 DSH「设置 → 插件 → bili-context-patch」的加速器卡片末尾。问题在于那不是用户眼里的「bili 卡片」：bili 那半边注册的是 iframe 面板（`vendor/billion-context/dist/agent/dsh-native-client.js`），设置页里没有它的原生表单，能挂进去的只有加速器那半的 `SettingsCard`，图像控件就跑到了无关的「模型请求加速」卡片里。而「配置」页本来就在编辑同一份 `billion-context.json`（快速配置、摘要、计费、原始 JSON 四张卡），四个配置键在 B16 里已经登记成顶层键。
+
+所以落点改成配置页，同时删掉 DSH 宿主那一套：`lib/client.image-section.js`（React 区）、`lib/image-settings.js`（读写与校验）、`GET/POST /api/bili-context-patch/image-settings`、安装脚本的两个 seam、`scripts/check-image-settings.mjs`。现在只有一条写入路径，就是 Web UI 自己的保存按钮。
+
+### 21.2 落点与哨兵
+
+锚点补丁由 `scripts/patch-bili-build.mjs` 第 17 节应用，内容来自 `patches/image-card.markup.block.js`、`patches/image-card.script.block.js`、`patches/image-card.listeners.block.js`。三块都带哨兵注释，`cardUpsert` 对哨兵区间分三种情况：区间不存在就按锚点插入；存在且内容相同就跳过；存在但内容不同就整段替换；替换时按行首重新写回块文件自带的缩进，所以重复运行不会在标记前面累积空白，第二次运行打印 already patched。改卡片只改块文件，锚点不用动。
+
+| 落点 | 锚点 | 内容 |
+| --- | --- | --- |
+| 词条 | `function translate(locale,key2,vars){` 前 | `// <bili-image-card:i18n begin>` 到 `end`：两条 `Object.assign`，往 bundle 级 `MESSAGES["zh-CN"]` 与 `MESSAGES.en` 补键，非 ASCII 字符全部转成反斜杠 u 转义 |
+| 卡片标记 | `<div class="card" id="summary-settings">` 前 | `<!-- <bili-image-card begin> -->` 到 `end`：`#card-image` 那张卡，紧跟快速配置卡 |
+| 渲染函数 | `    function hydrateQuickConfig(cfg) {` 前 | `// <bili-image-card:js begin>` 到 `end`：`hydrateImageCard(cfg)` |
+| 监听器 | `            await putCfg(sq, { file: raw });` 那段的 `});` 之后 | `// <bili-image-card:listeners begin>` 到 `end`：`#save-image`、`#reset-image` |
+| 初始化 | `hydrateQuickConfig(cfg);` 与 `hydrateSummaryConfig(cfg);` 之间 | 加一行 `hydrateImageCard(cfg);` |
+| 脏标记 | `["card-quick", "card-file", ...]` | 加 `"card-image"` |
+| 坏配置禁用 | `["cfg-file-edit", ... "save-pricing"]` | 加 `"save-image"`、`"reset-image"` |
+
+词条必须加在 bundle 级 `MESSAGES` 上，位置还必须在 `translate` 定义之前：页面脚本里的 `const MESSAGES=${JSON.stringify(MESSAGES)}` 是在 `WEB_CLIENT` 那个模板字面量求值时拍下的快照。第一版把词条插在 `var zh=key2=>translate("zh-CN",key2);` 之前，晚于快照，于是服务端渲染有中文标题，前端切换语言和 `data-i18n` 替换却查不到键。
+
+### 21.3 编辑与保存语义
+
+卡片和快速配置卡共用同一套机制：
+
+- 控件改的是页面上那份原始 JSON 草稿（`#cfg-file-edit`），不是文件。每次改动先 `parseConfigDraft` 取 draft，改一个键，`JSON.stringify(draft, null, 2)` 写回草稿，再 `refreshDirtyFlag()`：卡片描边变黄、出现未保存提示。用户手写的其它键原样保留。
+- 三个开关（`imageRetention`、`imageRetentionKeepLastUser`、`imagePrompt`）：勾上表示「键不存在或不为 false」，取消勾选写 `false`，再勾回来就把键删掉；默认值由代理自己给，卡片不固化。
+- 数字框 `#image-max-dim` 是 `min=128`、默认 1200。空串、非整数、小于 128 一律就地提示「请输入不小于 128 的整数」并回填当前值，不写进草稿；合法才写 `imageRetentionMaxDim`。
+- 保存：先 `parseConfigDraft` 校验整份草稿，再 `putCfg(btn, { file: raw })`，也就是配置页原有的 `PUT /__bili/config`：服务端先备份 `.bili-bak` 再临时文件 rename 原子替换；草稿坏了先 toast 拒绝，不覆盖手改坏的文件。
+- 恢复默认：删四个键 → 写回草稿 → 刷新脏标记 → 重新渲染卡片 → 提示「已恢复默认值，记得保存」。同样是草稿级操作，不点保存不落盘。
+- 生效：代理每次请求都 `loadConfigFile()`，保存后下一条请求生效，不用重启。同名环境变量（`BILI_IMAGE_*`）仍然优先，卡片只展示配置文件里的值。
+- 坏配置：页面顶部 banner 报错时，整块控件与两个按钮一起禁用。
+
+### 21.4 页面
+
+「图像」标题下一句说明（会话里只上传一次、看过之后折叠成占位说明、原图可按 ref 取回、首次上送先压小），然后三行开关和一行数字框，每行下面一行灰色提示；底部「恢复默认」与保存。按钮样式、未保存提示、坏配置禁用都和快速配置卡一致。
+
+### 21.5 验证
+
+`node scripts/check-image-card.mjs [dist]` 离线跑：用临时 HOME 起一个隔离的代理，取 `/__bili/` 页面，断言卡片标记、四行控件、两个按钮、中英词条、`hydrateImageCard(cfg);` 调用点、脏标记与禁用列表；把内联页面脚本整体 `new Function` 解析；再从页面里抽出 `hydrateImageCard` 与监听器，用假 DOM 跑 21 项——默认值与文件值回填、开关写草稿且保留未知键、边长 100 被拒并回填、900 写入、坏配置禁用、保存发出的正是草稿、恢复默认删四键并重渲染。
+
+安装脚本把它接在 `check-views.mjs` 之后、`smoke.mjs` 之前，锚点漂移或卡片坏了都装不进去。
+
+
+## 22. 压缩增长阈值的默认值改成 80k（0.6.3，B18）
+
+### 22.1 为什么改
+
+折叠有两种触发：模型自己调 `compress`，或者代理在上下文长到一定程度时提示（nudge）。提示的步长由 `compress.nudgeGrowthTokens` 决定——自上次折叠以来计费 token 涨了多少才提示下一次。上游的缺省是 50000：
+
+- 内核 `defaultConfig` 里 `nudge.growthFloor` 与 `nudge.growthCap` 都是 `5e4`，`resolveAdaptiveGrowth` 取 `min(cap, max(floor, 窗口 × 0.05))`，所以任何窗口下都恒等于 50000；
+- Web UI「快速配置」里 `NUDGE_DEFAULT = 50000`，页面上没写这个键时按它显示；
+- 中英提示文案里写着「内核默认 50000」。
+
+本机这套配置一直跑 `compress.nudgeGrowthTokens = 80000`：两次折叠之间留出的上下文更多，摘要能保住更多材料，请求体也不会频繁重算。新装的默认 50k 会让折叠更密、更容易丢细节，所以把缺省对齐到 80000：配置文件里不写这个键，也得到和本机一样的步长。
+
+### 22.2 改了哪几处
+
+第 18 节补丁只改缺省值和文案，不动任何逻辑分支：
+
+| 位置 | 原文 | 改后 |
+| --- | --- | --- |
+| 内核 `defaultConfig` | `growthFloor:5e4,growthCap:5e4` | `growthFloor:8e4,growthCap:8e4` |
+| 配置页常量 | `const NUDGE_DEFAULT = 50000, NUDGE_STEP = 5000` | `const NUDGE_DEFAULT = 80000, NUDGE_STEP = 5000` |
+| 中文提示 | `内核默认 50000` | `内核默认 80000` |
+| 英文提示 | `kernel default 50000` | `kernel default 80000` |
+
+内核侧只有配置里没有 `compress.nudgeGrowthTokens` 时才走 `defaultConfig`；写了值的时候映射逻辑本来就会把 floor 与 cap 都设成那个值（见 `buildNudgeConfig` 那段），所以显式配置的语义不变。
+
+中文词条在 bundle 里是反斜杠 u 转义存的，补丁用同一套转义生成查找串，避免把中文直接写进锚点。
+
+### 22.3 生效与回滚
+
+- 只影响「没有写 `compress.nudgeGrowthTokens`」的配置。已经写 80000 的本机配置不变；写了别的值也照旧。
+- Web UI 快速配置把数字删回默认（或点步进按钮回到 80000）时，保存后这个键会从文件里消失，行为回到 80000。
+- 回滚：删掉 `scripts/patch-bili-build.mjs` 第 18 节与 `scripts/check-views.mjs` 里那条断言，从干净构建重打补丁即可；版本号仍是 0.6.3。
+- 这条补丁不覆盖环境变量：nudge 阈值没有对应的环境变量，只有配置文件。
+
+### 22.4 验证
+
+- `scripts/check-views.mjs` 增加一条「nudge growth default is 80k」：断言 `growthFloor:8e4,growthCap:8e4`、`NUDGE_DEFAULT = 80000`、英文提示 80000 与中文转义 80000 都在，且旧的 5e4 / 50000 都不在。
+- `node scripts/check-image-card.mjs` 仍要过：页面内联脚本整体解析，`hydrateQuickConfig` 读的常量换了值不能把脚本写坏。
+- `node scripts/install.mjs --build` 的冒烟序列（视图 → 图像卡 → 请求体压缩）全绿才算装得上。
+- 页面级检查：隔离 HOME 起一个代理取 `/__bili/`，页面里应出现 `const NUDGE_DEFAULT = 80000` 和「内核默认 80000」，不再出现 50000。
