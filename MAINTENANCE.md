@@ -47,7 +47,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 | W1 | 一张插件卡挂 bili、compaction gate、accelerator 三个子插件；显式导出 Config，传递活访问器时不二次解析 schema | `lib/index.js`、`lib/upstream.js`；需真机检查设置即时生效 |
 | W2 | 合并两个客户端工厂，inject 取并集；改加速器的设置命名空间、版本路由和提示文案 | `lib/client.template.js`、安装脚本 extractFactory/rewriteOnce；前两字面量恰好一次，否则失败 |
 | W3 | 重写组合层只留包装包 insert，保留上游 compaction-basic、四个 preset 的闸门注入、两项 DeepSeek retryPolicy | `dsh.bundle.patch.yml` 由 vendor 层生成；升级要人工比对层，避免替换 inject/config 时丢新字段 |
-| W4 | 启动前扫描与运行期跟踪，抑制重复的上游条目；销毁时取消排队启动 | `lib/index.js`；`check-wrapper.mjs` 检查取消启动，重复条目与热重载需真机验证 |
+| W4 | 抑制重复的上游条目：组合层静态 disabled 行在层合成期关掉排在包装包前面的上游，`loader/entry-init` 的 guard 改写 `entry.update` 关掉排在后面的上游，启动扫描与 `_initTask` 等待仅作兜底；销毁时取消排队启动 | `dsh.bundle.patch.yml`、`lib/merge.js`、`lib/index.js`；`check-wrapper.mjs` 覆盖 guard、挂载后 dispose 与取消启动，重复条目与热重载需真机验证 |
 | W5 | fork 经 AsyncLocalStorage 给 seeded create 补 parentSession，尊重已有父字段；销毁时恢复服务 | `lib/fork-lineage.js`；`check-wrapper.mjs` 检查并发隔离、普通创建和恢复 |
 | W6 | 包装包自己的版本检查和更新接口；串行共享更新；checkout 安装用 git pull --ff-only + installer；无 patchRepo 提示走插件管理器 | `lib/index.js`；与客户端 W2 配对；版本提示、更新成功/失败需人工验证，四项自动检查不覆盖接口 |
 | W7 | （补丁 B17）bili Web UI「配置」页里的「图像」卡：四个控件（折叠总开关、上传豁免、首传最长边、图像约定）只编辑页面上的配置草稿，保存沿用页面原有的 `PUT /__bili/config`；边长只收不小于 128 的整数，非法就地提示并回填；恢复默认只删四个键；中英词条随补丁注入 bundle 级 `MESSAGES`，位置必须在 `translate` 定义之前 | `patches/image-card.{markup,script,listeners}.block.js`、`scripts/patch-bili-build.mjs` 第 17 节、`scripts/install.mjs`；`check-image-card.mjs` 覆盖结构、内联脚本解析与假 DOM 行为，真实浏览器里的保存与重启后显示需人工确认 |
@@ -58,8 +58,8 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 | --- | --- | --- |
 | I1 | 自带 vendor 优先于 profile 旧副本；显式外部来源必须是补丁构建；支持 --build/--out、--profile | `scripts/install.mjs`；检查来源清单/agent/client/dist 必须同基线 |
 | I2 | 临时副本先打补丁，做视图与压缩检查后替换 dist；文本工厂先解析；退出清理临时目录 | installer；`check-wrapper.mjs` 检查不兼容补丁不覆盖；不宣称整个多文件安装具备事务原子性 |
-| I3 | dependencies/bundles 合并为包装包，保留其他插件；配置改寻址、旧 !!js 跟随行迁移；已有 disabled/config 保留；备份保留最近 3 份 | installer；`check-wrapper.mjs` 覆盖重装幂等、禁用与渠道配置保留，旧配置迁移仍需审阅 |
-| I4 | 两个指定中转主机的渠道仅补缺失 enabled/encoding，不覆盖用户值 | installer 的 COMPRESS_HOSTS；这是包装包默认规则，不是 bili 原生默认，也不是所有渠道都开 |
+| I3 | dependencies/bundles 合并为包装包，保留其他插件；配置改寻址、旧 !!js 跟随行迁移；已有 disabled/config 保留；备份保留最近 3 份。管理器安装不跑脚本，包装包首次启动时自行从 `dsh.profile.bundles` 移除两个上游、保留 `dependencies`，幂等 | installer、`lib/merge.js`；`check-wrapper.mjs` 覆盖重装幂等、禁用与渠道配置保留、首次启动合并，旧配置迁移仍需审阅 |
+| I4 | 两个指定中转主机的渠道仅补缺失 enabled/encoding，不覆盖用户值；管理器安装由包装包首次启动补齐缺失键 | installer 的 COMPRESS_HOSTS、`lib/index.js` 的 `seedCompressionDefaults`；这是包装包默认规则，不是 bili 原生默认，也不是所有渠道都开；首次启动补齐需真机验证 |
 | I5 | 发现实际端口；核对替换 instanceId；一次性探针；备用 vendor 路径；精确收尾自建失败进程，保留服务报告 PID/端口 | `scripts/restart.mjs`；`check-restart.mjs` 只自动覆盖端口发现/实例替换；自建启动、看护与清理需真机验证 |
 
 ### 已失效描述与本地配置

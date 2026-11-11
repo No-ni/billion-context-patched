@@ -6,6 +6,19 @@
 - insert:
     - id: bili-context-patch
       name: bili-context-patch
+# A package-manager install (Settings > Plugins) never runs this script, so
+# the standalone packages stay in dsh.profile.bundles until the first start
+# merges the profile. These rows switch their entries off while the layers
+# are composed, before any of them can mount a second copy beside the child
+# fibers. A row whose entry is absent is skipped with a warning; the host
+# half (lib/merge.js) covers the other bundle order. The gate row only ever
+# hits the standalone gate - this package mounts the gate service it replaces.
+- id: bili-native
+  disabled: true
+- id: bili-compaction-gate
+  disabled: true
+- id: model-request-accelerator
+  disabled: true
 # billion-context dsh bundle layer (#949).
 # Mounted automatically when the profile's package.json lists billion-context
 # in dsh.profile.bundles (`dsh plugin --profile <name> add billion-context`);

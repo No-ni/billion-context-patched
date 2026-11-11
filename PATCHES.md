@@ -16,7 +16,7 @@
 
 | 层 | 文件 | 改了什么 | 上游升级时怎么重打 |
 | --- | --- | --- | --- |
-| 包装包（我们自己的代码） | `lib/index.js`、`lib/fork-lineage.js`、`lib/client.template.js`、`package.json` | 一个 Loader 条目里挂 bili、压缩闸门、加速器；把两个客户端 bundle 的工厂体合成一个 `id`；fork 时补父会话血缘；`/api/bili-context-patch/version` 的版本与更新接口；启动时把仍然开着的上游条目关掉 | 与上游无关，不用重打 |
+| 包装包（我们自己的代码） | `lib/index.js`、`lib/fork-lineage.js`、`lib/client.template.js`、`package.json` | 一个 Loader 条目里挂 bili、压缩闸门、加速器；把两个客户端 bundle 的工厂体合成一个 `id`；fork 时补父会话血缘；`/api/bili-context-patch/version` 的版本与更新接口；组合层静态 disabled 行与启动时 guard 关掉上游条目 | 与上游无关，不用重打 |
 | 组合层 | `dsh.bundle.patch.yml`（生成物） | 只保留自己那条 `insert`，其余是 bili 原有的层：`compaction-basic auto: false`、四个 preset 注入 `biliBasicCompactionPolicy`、`llm-deepseek`/`llm-deepseek-account` 的 retry 策略（含 `MALFORMED_RESPONSE`）；两个上游 insert 行删掉 | `install.mjs` 重跑一次即按新层重新生成 |
 | bili 构建产物 | `vendor/billion-context/dist/index.js` | 十八组文本补丁（0.2 的表） | `node scripts/patch-bili-build.mjs`，锚点对不上会报错退出 |
 | 安装期 | `scripts/install.mjs`、`scripts/check-views.mjs`、`scripts/check-image-card.mjs`、`scripts/smoke.mjs`、`scripts/restart.mjs` | 取源顺序、构建校验与冒烟（视图 → 图像卡 → 请求体压缩）、客户端 bundle 合成、profile 改写（dependencies / bundles / 渠道开关）、`--build` 产物生成 | 与上游无关；上游客户端 bundle 封装格式变了会直接报错退出 |
@@ -61,7 +61,7 @@
 | 做法 | 为什么不用 |
 | --- | --- |
 | 在 profile 的 `cordis.patch.yml` 里写跟随行（`!!js` 按条件禁用） | 依赖条目创建顺序，行会落到还不存在的条目上，日志 `patch: entry "bili-native" not found`，规则空转 |
-| 在我们自己的层文件里写 `disabled: true` 压住上游条目 | 层按 `dsh.profile.bundles` 顺序合成，包装包排在原版前面时那几行同样落空（重启后三套一起起来） |
+| 只在我们自己的层文件里写 `disabled: true` 压住上游条目 | 单靠它不够：层按 `dsh.profile.bundles` 顺序合成，包装包排在原版前面时那几行落空。现在与 entry-init guard 合用——静态行管排在包装包前面的上游，guard 管排在后面的（第 5 节「兜底」） |
 | 靠运行时 `entry.update()` 关原版 | 插件页的卡片和开关是 `dsh.profile.bundles` 的投影，运行时关不掉卡片；只保留作为「用户又把手装回来了」的兜底 |
 | 直接安装未打补丁的上游 dist | 会丢本仓库能力；正确流程是先从选定上游源码构建，再重打补丁和检查，见 MAINTENANCE |
 | 只打开上游 `snapshotRender` 灰度，不打补丁 | `maybeSnapshotView` 对插件道第一句就 `return clientMsgs`，开关对我们这条路无效（第 13 节） |
@@ -150,7 +150,7 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 - `lib/client.template.js`（浏览器半侧）——安装时把两个包客户端 bundle 的工厂体（`window.__ModuleLoader__.load({id, factory})` 里面的那段）切出来，合进同一个 `id: "bili-context-patch"` 的工厂，两个 half 依次 apply、`inject` 取并集。加速器客户端 `lib/client.js:23` 的 `const NS = "model-request-accelerator"` 会被改写成 `"bili-context-patch"`（它按命名空间找文档、注册分区），原文必须恰好出现一次，否则脚本报错退出；包装清单补上 `dsh.client.inject: ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-ui-settings"]`，客户端模块按它决定到达顺序；
 - **组合层**——复制 bili 的 `dsh.bundle.patch.yml`，删掉开头那条 `- insert:`（`bili-native` 与 `bili-compaction-gate` 改由代码挂载），换成本包装包自己的一条 `insert`（被列进 `dsh.profile.bundles` 的包只提供 patch 层，不会自己变成 Loader 条目），`compaction-basic.auto:false`、四个 preset 的 `inject: [biliBasicCompactionPolicy]`、`llm-deepseek(-account)` 的 retryPolicy 全部保留。
 
-**上游两个包怎么不见的**：不是被关掉，是**不再被装**。安装脚本从 `dependencies` 删掉 `billion-context` 与 `dsh-plugin-model-request-accelerator` 两行（它们不再是运行时依赖），`dsh.profile.bundles` 里同样只留包装包。没有依赖就没有卡片，没有清单项就没有 Loader 条目。
+**上游两个包怎么不见的**：脚本安装时不是被关掉，是**不再被装**——安装脚本从 `dependencies` 删掉 `billion-context` 与 `dsh-plugin-model-request-accelerator` 两行，`dsh.profile.bundles` 里同样只留包装包。没有依赖就没有卡片，没有清单项就没有 Loader 条目。插件管理器安装不跑脚本，两行仍在 `dependencies` 里：卡片保留，但首次启动会把两个 bundle 从清单删掉，条目由下面的 guard 关掉。
 
 **兜底：每次启动都自检一遍（0.2.1）**。正常安装没有上游条目，这三道只在有人把上游装回来、或清单里还留着旧行时才起作用。
 

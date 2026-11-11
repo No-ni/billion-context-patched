@@ -442,6 +442,26 @@ const stripInserts = (text) => {
 };
 
 
+// A package-manager install (Settings > Plugins) never runs this script, so the
+// package built here has to carry the switches for the standalone entries with
+// it. Installer mode removes those entries from dsh.profile.bundles instead, and
+// a row that lands on nothing would only add a startup warning.
+const disableRows = buildMode
+  ? "# A package-manager install (Settings > Plugins) never runs this script, so\n" +
+    "# the standalone packages stay in dsh.profile.bundles until the first start\n" +
+    "# merges the profile. These rows switch their entries off while the layers\n" +
+    "# are composed, before any of them can mount a second copy beside the child\n" +
+    "# fibers. A row whose entry is absent is skipped with a warning; the host\n" +
+    "# half (lib/merge.js) covers the other bundle order. The gate row only ever\n" +
+    "# hits the standalone gate - this package mounts the gate service it replaces.\n" +
+    "- id: bili-native\n" +
+    "  disabled: true\n" +
+    "- id: bili-compaction-gate\n" +
+    "  disabled: true\n" +
+    "- id: model-request-accelerator\n" +
+    "  disabled: true\n"
+  : "";
+
 const layerSource = readFileSync(layerPath, "utf8");
 const layerHead = layerSource.includes(MARKER)
   ? layerSource.slice(0, layerSource.indexOf(MARKER))
@@ -460,6 +480,7 @@ const wrapperLayer =
   "- insert:\n" +
   "    - id: " + WRAPPER + "\n" +
   "      name: " + WRAPPER + "\n" +
+  disableRows +
   stripInserts(layerHead).replace(/\s+$/, "") +
   "\n";
 
@@ -492,6 +513,7 @@ const wrapperFiles = [
   ...(buildMode ? [] : [[join(wrapperDir, "package.json"), JSON.stringify(wrapperManifest, null, 2) + "\n"]]),
   [join(wrapperDir, "lib", "index.js"), readFileSync(join(here, "..", "lib", "index.js"), "utf8")],
   [join(wrapperDir, "lib", "fork-lineage.js"), readFileSync(join(here, "..", "lib", "fork-lineage.js"), "utf8")],
+  [join(wrapperDir, "lib", "merge.js"), readFileSync(join(here, "..", "lib", "merge.js"), "utf8")],
   [join(wrapperDir, "lib", "upstream.js"), upstreamModule],
   [join(wrapperDir, "lib", "client.js"), mergedClient],
   [join(wrapperDir, "dsh.bundle.patch.yml"), wrapperLayer],
@@ -702,7 +724,7 @@ if (!buildMode) {
     //     first, do not see it yet, and stay on — three copies at once. The rows are
     //     removed here; the switching now lives in the wrapper's own bundle layer
     //     (step 4), which is applied only while the wrapper is listed, and the host
-    //     half adds a runtime check for the ordering case (package/lib/index.js).
+    //     half adds a runtime check for the ordering case (lib/merge.js).
     blocks = blocks.filter((block) => {
       if (!pinned.includes(block.id)) return true;
       if (block.body.some((line) => !/^\s+disabled:/.test(line))) return true;

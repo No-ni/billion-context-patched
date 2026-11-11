@@ -8,7 +8,7 @@
 
 项目行为要求与验收条件见 [SPEC.md](SPEC.md)，覆盖全部定制功能及“缓存钥匙默认开启”的明确约定；后续 AI 每次合并前后必须按 SPEC 核对，执行规则见 [AGENTS.md](AGENTS.md)。当前差异与升级流程见 [MAINTENANCE.md](MAINTENANCE.md)；历史排查和实现细节见 [PATCHES.md](PATCHES.md)。
 
-当前版本 **0.6.4**。
+当前版本 **0.6.5**。
 
 0.6.0 起还多一件事：**同一张图只在它被看过的那一次上送**。模型请求每轮全量重发，一张整页截图的 base64 会让之后每一轮请求体多出几百 KB；现在成功发送一次之后，后续请求里它会变成一行占位说明（尺寸、引用号、已看过、以及 `acp_read_original_image("<ref>")` 的取回方式），原图随时可按 ref 取回。首次上送前先用宿主自带的编码器试着压到 `imageRetentionMaxDim`（默认 1200）并转 JPEG：macOS 用 `/usr/bin/sips`，Windows 用 PowerShell 里的 `System.Drawing`，其它平台找 PATH 上的 ImageMagick，都不给运行环境新增依赖（0.6.1 起覆盖三平台，0.6.0 只有 macOS）。同时系统提示尾部追加一段恒定的图像使用约定（能不用图就不用、要看就一次看够、出图够判断即可）。这些开关都在配置里：`imageRetention`、`imageRetentionKeepLastUser`、`imageRetentionMaxDim`、`imagePrompt`，默认全开，设 false 即回到旧行为，详见 [PATCHES.md](PATCHES.md) 第 20 节。
 
@@ -25,6 +25,8 @@ github:No-ni/billion-context-patched
 ```
 
 包里自带运行所需的一切（两个上游的运行文件副本、合并后的客户端包、组合层），装完不需要再跑任何脚本，也不需要先装 billion-context。
+
+设置 → 插件这条路径不会执行仓库里的脚本，所以第一次启动时包装包会自己做两件事：把 `billion-context` 与 `dsh-plugin-model-request-accelerator` 从 `dsh.profile.bundles` 删掉（`dependencies` 里那两行保留，插件页的卡片还在，但条目被关掉），并按 SPEC 的 I4 给两个中转主机的渠道补上缺失的 `enabled` / `encoding` 默认值。改的是 profile 里的清单行，下一次启动就不再组合这两个条目；已有渠道配置一律不覆盖。
 
 已经 clone 了这个仓库的话，也可以直接把它装进本机 profile：
 
@@ -45,7 +47,7 @@ dsh plugin --profile desktop remove bili-context-patch
 
 ## 目录
 
-- `lib/` —— 主机入口 `index.js`、fork 血缘补丁 `fork-lineage.js`、客户端合并包 `client.js`、上游转发 `upstream.js`
+- `lib/` —— 主机入口 `index.js`、上游条目合并与抑制 `merge.js`、fork 血缘补丁 `fork-lineage.js`、客户端合并包 `client.js`、上游转发 `upstream.js`
 - `vendor/` —— 两个上游的运行文件副本，自包含，不依赖 profile 里的其他包；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
 - `dsh.bundle.patch.yml` —— 组合层
 - `patches/` —— 我们对 bili 构建做的改动：`outbound-encoding.block.js` 是请求体压缩那一整块代码，其余由脚本按锚点插入
