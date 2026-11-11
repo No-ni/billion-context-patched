@@ -152,42 +152,42 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 
 **上游两个包怎么不见的**：脚本安装时不是被关掉，是**不再被装**——安装脚本从 `dependencies` 删掉 `billion-context` 与 `dsh-plugin-model-request-accelerator` 两行，`dsh.profile.bundles` 里同样只留包装包。没有依赖就没有卡片，没有清单项就没有 Loader 条目。插件管理器安装不跑脚本，两行仍在 `dependencies` 里：卡片保留，但首次启动会把两个 bundle 从清单删掉，条目由下面的 guard 关掉。
 
-**兜底：每次启动都自检一遍（0.2.1）**。正常安装没有上游条目，这三道只在有人把上游装回来、或清单里还留着旧行时才起作用。
+**当前启动去重（2026-11-12，仍为 0.6.5）**：旧的“一帧足够”结论已被实际 Loader 的并发初始化否定。三层共同处理：
 
-1. **启动扫描**：`apply()` 不就地挂载子插件，而是 `queueMicrotask` 一帧之后再干活——先遍历 `ctx.get("loader").store.include.subtree.store`，把仍开着的 `bili-native` / `bili-compaction-gate` / `model-request-accelerator` 用 `entry.update({ ...entry.options, disabled: true })` 关掉，再 `ctx.plugin()` 挂三个子插件。为什么必须晚一帧：条目按 `dsh.profile.bundles` 顺序创建，**上游排在包装包之后**时（把上游重新装回来，新行追加在末尾），同步扫描根本看不到它，等它启动就已经抢走同一批服务与路由。一帧足够——loader 整棵树是一口气建完的；再晚就会让等 `biliBasicCompactionPolicy` 的四个 preset 在启动摘要里报 pending。
-2. **运行期跟踪**：`ctx.on("loader/entry-init", …)` 跟着 loader 每建一个条目的事件走，在微任务里把上游条目重新关掉。插件页把那张卡点开时条目是立刻创建的，不必等重启。（该事件在条目的构造期发出，此时 `options` 还没写入，所以处理函数必须延迟到微任务里再读 `entry.options.id`。）
-3. **只在内存里改**：`entry.update` 不落盘（落盘只发生在 `EntryTree.create/remove` 调 `commit` 的时候），关掉的是运行中的条目，profile 里用户写的一个字都没动。
+1. 组合层保留三条静态 `disabled: true`，关掉已经组合出来的原版。
+2. `loader/entry-init` 同步安装 `entry.update` guard，在新条目第一次写入 options 时强制禁用。每个 owner 独立释放 guard，使用 Cordis `effect` 清理；宿主不发 `dispose` 事件，监听该事件无法撤销补丁。
+3. 初始加载时 Loader 已并发创建整树，两种顺序的原版都可能已经开始 import。`lib/startup.js` 先扫描、捕获并等待原版 `_initTask`，再等待 `fiber.dispose()` 释放资源，最后才挂三个 children。关闭包装包时取消排队启动；停止原版失败时不继续挂重复资源。
 
-顺序仍然必须在挂载之前：两边注册同一批服务和 HTTP 路由，晚一步关会把已注册的接口一起带走——实测 `/api/model-request-accelerator/version` 变 404。
+`entry.update` 的去重只改内存。首次启用还会用 `lib/profile.js` 合并 profile、迁移旧配置并协调宿主重载，详见第 24 节；这一步才让插件页的原版卡片显示关闭。
 
-验证（`/tmp` 里的 profile 副本 + 真机启动，两个方向都跑过）：① 上游三行排在包装包**之后** → 日志三条 `switching off the standalone …`，只下发一个客户端包，`/api/bili-context-patch/version` 与 `/api/model-request-accelerator/version` 都正常，无重复域、无 `patch: entry … not found`；② 正常安装（上游不在清单里）→ 一条 `switching off` 都没有，启动摘要只剩与本改动无关的缺包提示。
+历史验证（0.2.1 的 `/tmp` profile 与真机启动）：两种配置顺序当时都能启动。它不构成本轮的真机验证，也不能证明当前 Loader 的 import 竞态已处理；本轮自动检查直接使用实际 Loader，并明确列出其余替身。
 
-**profile 侧的改写**（由脚本完成、幂等、带 `.bak-<时间戳>` 备份）：
+**profile 侧的改写**（CLI 与运行期共用配置迁移，幂等，带 `.bak-bili-context-patch-<UTC 时间戳>` 备份）：
 
 1. `dependencies`：只留 `bili-context-patch`（`link:` 到 `plugins/`），两个上游那两行删掉（0.2.0 起）；其余依赖一律不动。
 2. `dsh.profile.bundles`：只留包装包，且排在**最后**——条目配置按清单顺序合成，包装包的层若排在别的条目之前，它写的行只能落到还不存在的条目上，日志打印 `patch: entry ... not found`，规则空转。
-3. `cordis.patch.yml` 里按 id 定位的渠道配置改成 `- id: bili-context-patch`——只改**带 `config:`** 的那一行。早先的实现按"第一行同 id"改名，会连别行的钉子一起改名，结果把包装包自己写成 `disabled: true`。
-4. 清掉更早版本写进 profile 的 `!!js` 跟随行（三个 id）。那套做法依赖条目创建顺序，已废弃。
+3. `cordis.patch.yml` 用 YAML AST 迁移旧加速器配置，包装包已有字段优先、缺失字段递归补入；最新的分行 disabled/inject/intercept/isolate 状态同样迁移，包装包显式状态优先。别名/合并键、标签、注释及无关配置保持语义，循环别名拒绝写入。
+4. 只清掉更早版本由本包生成的纯 disabled `!!js` 跟随行（三个 id，表达式引用 bili-context-patch）；用户自己的条件表达式保留，不按 id 一概删除。
 
 **代价**：`vendor/` 是最后一次重建时的那一版上游，上游发新版不会自动进来。要跟上就按 README「维护：上游发新版」重做一次补丁，再 `node scripts/install.mjs --build --bili <新的 billion-context 目录>`，然后提交。
 ## 6. 没有改动的部分
 
 - 入站解压（客户端发来的 gzip / br / zstd）仍用上游实现
 - 折叠策略、健康检查、其他 `/__bili/*` 接口均未改动
-- 除了 `vendor/` 里那两个上游副本，仓库不保存别的上游代码；仓库根本身就是成品，安装时整包复制进 profile（包管理器安装则拷进 `node_modules`）
+- `vendor/` 包含两个上游运行副本与 yaml 2.9.1 Node runtime（ISC）；解析器仅清除一处行末空格，来源见 `vendor/yaml/SOURCE.md`。仓库根本身就是成品，包管理器装进 `node_modules` 后不需运行安装脚本
 - 本包只复制 installer 的 BILI_FILES 与加速器 package.json/lib 文件；不分发完整上游源码、hermes-plugin 或整套上游文档
 
 ## 7. 默认值：历史与当前
 
 - **默认开启缓存钥匙（0.5.4 恢复，B11）**：旧提交 `537d590` 把 `parsePromptCacheRouting` 兜底从 disabled 改成 enabled；`f2b9fd6` 刷新基线时意外漏迁。现已作为第 11 步重打并回归检查。未配置或无效值默认 enabled；显式 disabled 不发、auto 按上游判定、enabled 开启，环境变量优先级不变。第 6 组只决定盖章时选择哪个 key。
-- **中转站渠道自动开请求压缩**：`install.mjs` 扫描 profile 的 `cordis.yml` 与 `cordis.patch.yml`，把 `baseURL` 命中 `www.didudidu.asia` 或 `154.219.111.56` 的渠道名挑出来，在包装包条目的 `config.providers.<渠道>` 下仅补缺失的 `enabled: true` 与 `encoding: auto`（优先 brotli，运行时缺 brotli 或上游拒绝时回落 gzip）。匹配用的是**主机名**，渠道改名不影响；渠道换了别的域名要重跑一次脚本。
+- **中转站渠道自动开请求压缩**：CLI 从 profile 读取渠道；管理器安装在首次启用时按真实 LLM 目录补齐，并跟踪迟到服务/渠道。`baseURL` 主机命中 `www.didudidu.asia` 或 `154.219.111.56` 时，在包装包 `config.providers.<渠道>` 下逐字段补缺失的 `enabled: true` 与 `encoding: auto`（优先 brotli）。显式 false/gzip/null/表达式保持不变；显式全局 gzip 的有效选择保留。schema 自动生成的 false 不是用户配置。算法选择与上游拒绝的具体处理由 vendored 加速器负责。
 
 ## 8. 已知限制
 
 - `vendor/billion-context/dist/index.js` 是构建产物，补丁按**文本锚点**落在 0.1.213 上；上游一旦改动这些函数，需要按上面列的位置手工重做
-- br 是否被上游网关接受取决于网关版本，这里不做自动降级
+- br 是否被上游网关接受及拒绝后的处理取决于网关与 vendored 加速器策略；默认值检查不等于真实压缩回执
 - 包装包的浏览器半侧按**工厂体文本**切分上游 bundle：上游如果改了客户端 bundle 的封装格式（不再是 `factory: (require) => {...}`），安装脚本会直接报错退出，不会生成半成品
-- 安装脚本会改写 profile 的 `package.json` 与 `cordis.patch.yml`（均保留 `.bak-<时间戳>` 备份）；用 DSH 插件管理器更新 bili 或增删别的插件时它不会自动重做这些，做完需要自己跑一次 `install.mjs`
+- 首次启用和配置重载会协调 profile 合并；运行期改写使用官方锁与原子写入。CLI 在复制运行文件前预检 profile；整个多文件 CLI 安装仍不宣称具备事务原子性。两条路径只轮换自己生成的三份备份，既有其他备份不删除
 - 关掉 `bili-context-patch` 会一起带走：条目本身、它挂的三个子插件、以及这一层里注入 preset 的 `biliBasicCompactionPolicy`。三者同生共死，所以 preset 会退回复用 dsh 自带的压缩策略，不会卡在等一个没人提供的服务上（上游 #3662 描述的是闸门与注入分离的情形）。要回到独立插件形态，得先把 `billion-context` / 加速器重新装成依赖（0.2.0 起它们不再是依赖条目，插件页没有那两张卡可点）
 - 一体化之后，卸载 `bili-context-patch` 等于同时停掉三项能力；这是「一张卡」的代价，也是它的定义
 - 0.2.0 起两个上游只存在于 `plugins/bili-context-patch/vendor/`：`dsh plugin add billion-context` 之后不会自动接上，须按 MAINTENANCE 显式选定来源；默认重跑 `install.mjs` 会优先保留本仓库 vendor，并不会自动采用刚安装的新版
@@ -196,7 +196,7 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 
 包装包自带一个更新入口，路径 `/api/bili-context-patch/version`：`GET` 查版本，`POST ?action=update` 执行更新，由 `lib/index.js` 通过 `connection.fetch.register` 注册。
 
-- `GET` 读本机 `plugins/bili-context-patch/package.json` 的 `version`，再读 `https://raw.githubusercontent.com/No-ni/billion-context-patched/main/package.json` 的 `version`；两边都是三位数字才比较，返回 `{ version, latest, updateAvailable }`。
+- `GET` 读实际安装目录的 `package.json`，再读远端 main 清单；先比较三位数字版本，再用有效 SHA-256 `patchBuild.id` 与 `createdAt` 检测同版较新的修复，坏元数据不抛错，较旧远端不误报。返回仍为 `{ version, latest, updateAvailable }`。
 - `POST ?action=update` 在安装时记下的 `patchRepo` 里跑 `git pull --ff-only`，随后用同一个 Node 进程执行 `scripts/install.mjs`（`ELECTRON_RUN_AS_NODE=1`），返回 `{ ok, from, to, output }`。同一时刻只跑一个更新，第二个请求等第一个。
 
 设置页那行「版本 / 检查更新」是加速器自带的 UI。安装脚本在合并客户端 bundle 时改写三个字面量，让它指向本补丁包：
@@ -664,3 +664,37 @@ function __biliForkTranscriptSource(session,store){
 验收：`check-image-retention.mjs` 覆盖四协议折叠、记账时机、上传豁免、总开关、三平台后端顺序、本机后端真实压缩与约定文本；`check-image-card.mjs` 覆盖卡片标记与词条、内联脚本整体解析、假 DOM 上的 21 项行为；`check-views.mjs` 共 18 项，含 B18 的默认值断言；`smoke.mjs` 三例压缩传输。安装脚本按「视图 → 图像卡 → 请求体压缩」顺序串联，任何一步失败都不替换正式 dist。真实浏览器里的保存与重启后显示、Windows 上的端到端压缩仍需人工确认。
 
 本版没有正式发布的 0.6.3 可供对比；回滚任一项都只删对应补丁节与检查断言，从干净上游构建重打，不需要改代理行为代码。
+
+## 24. 2026-11-12：插件页安装与 Windows 编码修复（仍为 0.6.5）
+
+### 24.1 上次报告的核查
+
+插件管理器确实不运行 `scripts/install.mjs`；历史压缩回执出现 br，只能证明该次请求，不能证明新安装完成默认配置。此前 0.6.5 的入口还调用了不存在的 `suppress()`，会报 `startup failed: suppress is not defined`，三个 children 全部没有挂载。此前认为同步 guard 足以覆盖另一种初始加载顺序也不成立：实际 Loader 用并发初始化，包装包 apply 时两侧原版都可能已经开始 import。
+
+### 24.2 启动、销毁和宿主重载
+
+`lib/startup.js` 等待原版初始化与资源释放后再挂 children；新条目用作用域 guard 防止第一轮挂载。清理通过 Cordis effect，撤销 guard、fork 包装和排队任务；宿主没有可依赖的 dispose 事件。
+
+`lib/profile.js` 在首次启用及插件/配置变化时协调 profile：管理器路径保留 dependencies，只删除原版 bundles，迁移旧加速器设置。锁顺序与宿主一致：先进入 HMR 独占队列，再取 package.json 文件锁，写完后在同一 HMR 事务内 reconcile。apply 可能继承管理器的 AsyncLocalStorage 标记；用 `hmr.executing.exit()` 排入新的事务，不能嵌套 `runExclusive()`，也不能在事务外调用 `reconcileProfile()`。重载失败保留待协调状态并退避重试；需要重启的 package-moved 不提前放行默认值。YAML 写完而清单写失败时回滚 YAML；本包备份只留三份。
+
+### 24.3 默认值保留用户选择
+
+`lib/defaults.js` 使用真实 LLM 目录和原始 entry.options.config，按精确 hostname 计算缺失字段。两指定主机通常补 enabled=true、encoding=auto（优先 br）；显式全局 gzip、渠道 false/gzip/null 与表达式保持不变。已有 provider 对象也逐字段补缺，不能整块跳过；schema 自动给出的 false 不能当作用户关闭。等待 settings/llm/configEditor 服务，监听迟到渠道、配置变化与文档更新；写入串行化，SETTINGS_CONFLICT 时重新读最新 revision 和用户选择再算。
+
+### 24.4 安装脚本与配置迁移
+
+CLI 与运行期共用 vendored yaml 2.9.1 Node runtime（ISC，仅清除一处行末空格）及 YAML AST 迁移。旧配置递归补缺，包装包显式字段优先；最新分行状态也迁移，保留 alias/merge/tag/comment 和无关数据。删除有 anchor 的旧行前先保留外部 alias 的值，循环别名拒绝写入。自定义 JS 条件行保留，只有旧包装包跟随行被清理。
+
+CLI 在复制运行文件前预检 profile；自己的 accelerator vendor 优先，已有真实 node_modules 安装也更新，dangling link 可修复。`--out` 正确消费参数并输出完整 package.json。整个多文件 CLI 安装仍不是事务安装；官方文件锁与回滚用于运行期 profile 合并。
+
+### 24.5 Windows 图片首传编码
+
+全量检查实际发现 PowerShell JPEG 保存失败：`New-Object ... -ArgumentList $q,[long]80` 没有形成预期的 long 参数，保存时报参数无效；改为 `$q,([long]80)` 后实际编码成功。ImageMagick 检测新增 `-version` 校验，Windows 的系统 convert.exe 不再被当成图片编码器。辅助进程隐藏窗口，清理前确认目录在本包临时目录范围。
+
+图像缩放缓存补上 maxDim：原先只按图片与 MIME 缓存，设置页从 1200 改为 600 后仍返回旧图；现在下一请求重新按新上限编码。检查脚本修正 Windows 路径分隔符假设，比较最终 dist 的整个图片块与检查源码，并将“有后端但编码失败”记为失败。installer 候选冒烟新增图像折叠/编码检查，不能再绕过该故障。
+
+### 24.6 版本与规范记录
+
+用户本次明确要求不升版本，保留 0.6.5。构建以稳定 SHA-256 内容标识和首次创建时间记录 patchBuild；同版较新的远端可被识别，重复构建不改变时间，较旧远端不误提示更新。bili 与 accelerator 的选定上游基线没有升级；bili dist 只通过补丁脚本刷新 B13 所在的图片哨兵块。
+
+完整条款核对、检查命令、真实宿主模块与替身范围、本机同步及未覆盖的真机项见 [AUDIT-2026-11-12.md](AUDIT-2026-11-12.md)。历史命中率与历史真机记录不能代替本轮验证。

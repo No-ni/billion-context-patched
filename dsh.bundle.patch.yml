@@ -11,8 +11,8 @@
 # merges the profile. These rows switch their entries off while the layers
 # are composed, before any of them can mount a second copy beside the child
 # fibers. A row whose entry is absent is skipped with a warning; the host
-# half (lib/merge.js) covers the other bundle order. The gate row only ever
-# hits the standalone gate - this package mounts the gate service it replaces.
+# half awaits already-starting originals in either bundle order. The gate row
+# only hits the standalone gate; the wrapper supplies the replacement service.
 - id: bili-native
   disabled: true
 - id: bili-compaction-gate

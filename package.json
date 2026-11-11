@@ -36,5 +36,9 @@
         "@deepseek-ai/dsh-client-ui-settings"
       ]
     }
+  },
+  "patchBuild": {
+    "id": "397b6a38d5c81ab641412899d4d2a67d817760494ac355be6866f710244280a9",
+    "createdAt": "2026-11-11T16:55:59.398Z"
   }
 }

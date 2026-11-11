@@ -129,13 +129,13 @@ var biliRetentionBackendsCache;
 
 function biliRetentionIsFile(p) {
   try {
-    return require("node:fs").existsSync(p);
+    return require("node:fs").statSync(p).isFile();
   } catch (err) {
     return false;
   }
 }
 
-function biliRetentionPathBin(names) {
+function biliRetentionPathBin(names, accept) {
   try {
     const path2 = require("node:path");
     const dirs = String(process.env.PATH || "").split(path2.delimiter);
@@ -145,7 +145,7 @@ function biliRetentionPathBin(names) {
       for (const name of names) {
         for (const ext of exts) {
           const full = path2.join(dir, name + ext);
-          if (biliRetentionIsFile(full)) return full;
+          if (biliRetentionIsFile(full) && (!accept || accept(full))) return full;
         }
       }
     }
@@ -173,7 +173,17 @@ function biliRetentionBackendOrder(platform) {
 function biliRetentionBackendBin(id) {
   if (id === "sips") return process.platform === "darwin" && biliRetentionIsFile("/usr/bin/sips") ? "/usr/bin/sips" : null;
   if (id === "powershell") return process.platform === "win32" ? biliRetentionPowerShellBin() : null;
-  if (id === "magick" || id === "convert") return biliRetentionPathBin([id]);
+  if (id === "magick" || id === "convert") return biliRetentionPathBin([id], function (bin) {
+    // Windows also ships convert.exe for filesystem conversion. Only accept
+    // an actual ImageMagick executable, and keep trying later PATH candidates.
+    try {
+      const version = require("node:child_process").execFileSync(bin, ["-version"], {
+        timeout: 2500, windowsHide: true, encoding: "utf8", maxBuffer: 16384,
+        stdio: ["ignore", "pipe", "ignore"]
+      });
+      return /\bImageMagick\b/.test(version);
+    } catch (err) { return false; }
+  });
   return null;
 }
 
@@ -191,7 +201,7 @@ function biliRetentionBackends() {
 function biliRetentionExec(bin, args) {
   return new Promise(function (resolve) {
     try {
-      require("node:child_process").execFile(bin, args, { timeout: 20000 }, function (err) {
+      require("node:child_process").execFile(bin, args, { timeout: 20000, windowsHide: true }, function (err) {
         resolve(err ? false : true);
       });
     } catch (err) {
@@ -241,7 +251,7 @@ function biliRetentionPowerShellScript(src, jpg, png, maxDim) {
     "$codec=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders()|Where-Object{$_.MimeType -eq 'image/jpeg'}|Select-Object -First 1;",
     "$q=[System.Drawing.Imaging.Encoder]::Quality;",
     "$ep=New-Object System.Drawing.Imaging.EncoderParameters -ArgumentList 1;",
-    "$ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter -ArgumentList $q,[long]80;",
+    "$ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter -ArgumentList $q,([long]80);",
     "$bmp.Save(" + biliRetentionPsQuote(jpg) + ",$codec,$ep);",
     "$bmp.Dispose();$src.Dispose();"
   ].join(" ");
@@ -322,6 +332,11 @@ async function biliRetentionShrinkOne(mediaType, b64, maxDim) {
   } finally {
     if (dir !== null) {
       try {
+        const path2 = require("node:path");
+        const tempRoot = path2.resolve(require("node:os").tmpdir()) + path2.sep;
+        if (!path2.resolve(dir).startsWith(tempRoot) || !path2.basename(dir).startsWith("bili-retention-")) {
+          throw new Error("refusing image cleanup outside its temporary directory");
+        }
         await require("node:fs/promises").rm(dir, { recursive: true, force: true });
       } catch (err) {}
     }
@@ -330,10 +345,11 @@ async function biliRetentionShrinkOne(mediaType, b64, maxDim) {
 
 function biliRetentionShrink(mediaType, b64) {
   if (biliRetentionBackends().length === 0) return Promise.resolve(null);
-  const key = biliRetentionHash(b64) + ":" + mediaType;
+  const maxDim = biliRetentionMaxDim();
+  const key = biliRetentionHash(b64) + ":" + mediaType + ":" + maxDim;
   let pending = biliRetentionShrinkCache.get(key);
   if (pending === void 0) {
-    pending = biliRetentionShrinkOne(mediaType, b64, biliRetentionMaxDim());
+    pending = biliRetentionShrinkOne(mediaType, b64, maxDim);
     biliRetentionShrinkCache.set(key, pending);
     while (biliRetentionShrinkCache.size > BILI_RETENTION_SHRINK_CACHE_CAP) {
       const oldest = biliRetentionShrinkCache.keys().next().value;

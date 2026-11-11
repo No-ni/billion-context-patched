@@ -18,7 +18,7 @@
 
 ## 安装
 
-设置 → 插件 → 安装，填仓库地址即可，装完重启 DSH：
+设置 → 插件 → 安装，填仓库地址即可，安装后启用；如果 DSH 提示需要重启，按提示重启：
 
 ```
 github:No-ni/billion-context-patched
@@ -26,7 +26,9 @@ github:No-ni/billion-context-patched
 
 包里自带运行所需的一切（两个上游的运行文件副本、合并后的客户端包、组合层），装完不需要再跑任何脚本，也不需要先装 billion-context。
 
-设置 → 插件这条路径不会执行仓库里的脚本，所以第一次启动时包装包会自己做两件事：把 `billion-context` 与 `dsh-plugin-model-request-accelerator` 从 `dsh.profile.bundles` 删掉（`dependencies` 里那两行保留，插件页的卡片还在，但条目被关掉），并按 SPEC 的 I4 给两个中转主机的渠道补上缺失的 `enabled` / `encoding` 默认值。改的是 profile 里的清单行，下一次启动就不再组合这两个条目；已有渠道配置一律不覆盖。
+设置 → 插件这条路径不会执行仓库里的脚本，所以首次启用时包装包自行完成合并：把 `billion-context` 与 `dsh-plugin-model-request-accelerator` 从 `dsh.profile.bundles` 删掉（保留 `dependencies`，原版卡片显示关闭），将旧加速器配置补入包装包已有配置，再通过宿主重载应用。包装包的显式配置优先，禁用状态和渠道选择保留；写入使用宿主文件锁与原子替换，并保留最近三份本包备份。
+
+`www.didudidu.asia` 与 `154.219.111.56` 对应渠道会逐字段补上 `enabled: true`、`encoding: auto`，设置页显示「自动（优先 br）」。按主机名匹配，渠道改名也适用；服务或渠道稍后出现也会补齐。手动关闭、选择 gzip 或写入配置表达式后不会被默认值覆盖；显式全局 gzip 同样保留其有效选择。
 
 已经 clone 了这个仓库的话，也可以直接把它装进本机 profile：
 
@@ -47,15 +49,15 @@ dsh plugin --profile desktop remove bili-context-patch
 
 ## 目录
 
-- `lib/` —— 主机入口 `index.js`、上游条目合并与抑制 `merge.js`、fork 血缘补丁 `fork-lineage.js`、客户端合并包 `client.js`、上游转发 `upstream.js`
-- `vendor/` —— 两个上游的运行文件副本，自包含，不依赖 profile 里的其他包；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
+- `lib/` —— 主机入口、启动与上游去重、profile 迁移、渠道默认值、fork 血缘、版本检查，以及生成的客户端与上游转发
+- `vendor/` —— 两个上游的运行文件副本及 YAML 解析器；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
 - `dsh.bundle.patch.yml` —— 组合层
 - `patches/` —— 我们对 bili 构建做的改动：`outbound-encoding.block.js` 是请求体压缩那一整块代码，其余由脚本按锚点插入
 - `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`patch-bili-build.mjs`（给 bili 构建按锚点应用补丁，逐项见 [PATCHES.md](PATCHES.md) 第 0.2 节）、`restart.mjs`、`smoke.mjs`
 
 `vendor/` 从选定来源复制，其中 bili 代理构建由补丁脚本修改；`lib/client.js`、`lib/upstream.js`、根 `dsh.bundle.patch.yml` 由 `node scripts/install.mjs --build` 生成。具体来源规则见 MAINTENANCE，不要只手改生成物。
 
-当前清单覆盖 16 组 bili 补丁、7 项包装能力、5 项安装与运维行为，并逐项列出检查方法和未覆盖部分。上游已吸收的能力与本包新增能力分开记录。
+当前清单覆盖 18 组 bili 补丁、7 项包装能力、5 项安装与运维行为，并逐项列出检查方法和未覆盖部分。上游已吸收的能力与本包新增能力分开记录。
 
 ## 插件道的快照渲染（0.4.3，可关）
 
@@ -93,11 +95,13 @@ dsh 这条道每轮整份重发历史，而 billion-context 的插件道默认�
 ```sh
 node scripts/check-views.mjs
 node scripts/check-wrapper.mjs
+node scripts/check-image-retention.mjs
+node scripts/check-image-card.mjs
 node scripts/check-restart.mjs
 node scripts/smoke.mjs
 ```
 
-细节见 [PATCHES.md](PATCHES.md) 第 18 节。
+宿主模块检查另用 `node scripts/check-runtime.mjs --host-modules <DSH 的 node_modules 目录>`；它使用实际 Loader、Cordis、SettingsForms 与原子写入模块，其余替身范围在脚本开头列明。检查结果不能代替真实模型与整机重启验证。细节见 [PATCHES.md](PATCHES.md) 第 18、24 节。
 
 ## 0.5.0：跟上上游主线
 
@@ -122,8 +126,8 @@ node scripts/smoke.mjs
 
 ## 许可
 
-本仓库的补丁与包装层：MIT。`vendor/billion-context` 来自 [ranxianglei/billion-context](https://github.com/ranxianglei/billion-context)（MIT），`vendor/dsh-plugin-model-request-accelerator` 来自 [No-ni/dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator)，其中的压缩闸门 vendored 自 deshark42/dsh-compaction-basic-disable（MIT）。
+本仓库的补丁与包装层：MIT。`vendor/billion-context` 来自 [ranxianglei/billion-context](https://github.com/ranxianglei/billion-context)（MIT），`vendor/dsh-plugin-model-request-accelerator` 来自 [No-ni/dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator)，其中的压缩闸门 vendored 自 deshark42/dsh-compaction-basic-disable（MIT）。`vendor/yaml` 为 yaml 2.9.1（ISC），来源与分发范围见 [SOURCE.md](vendor/yaml/SOURCE.md)。
 
 ## 版本
 
-版本号是根目录 `package.json` 里的三位 semver，发一版把最后一位加一。设置 → 模型请求加速 页面底部那行「检查更新」查的就是这个仓库。
+版本号是根目录 `package.json` 里的三位 semver，通常发一版把最后一位加一。2026-11-12 按用户要求，本次修复仍为 0.6.5；构建写入稳定的 `patchBuild.id` 与 `createdAt`，同版的新修复也能被检查更新识别，重复构建不会制造新更新。设置 → 模型请求加速 页面底部那行「检查更新」查的就是这个仓库。

@@ -43,6 +43,10 @@ ok("dist: the macOS-only helper is gone", !dist.includes("function biliRetention
 // ── the block under test ────────────────────────────────────────────────────
 const blockText = readFileSync(join(here, "patches", "image-retention.block.js"), "utf8")
   + "\n" + readFileSync(join(here, "patches", "image-convention.block.js"), "utf8");
+const publishedBlock = "// <bili-image-blocks begin>\n" + ["image-convention.block.js", "image-retention.block.js"]
+  .map((file) => readFileSync(join(here, "patches", file), "utf8").replace(/\s+$/, "")).join("\n")
+  + "\n// <bili-image-blocks end>";
+ok("dist: image helpers match the checked sources", dist.includes(publishedBlock));
 
 function decodePngOrJpegDims(b64) {
   const buf = Buffer.from(b64, "base64");
@@ -89,7 +93,7 @@ function makeApi(config, cfgState) {
     refForItemBytes: () => "m00042",
     READ_ORIGINAL_IMAGE_TOOL_NAME: "acp_read_original_image"
   };
-  const body = blockText + "\nreturn { biliRetentionApply, biliRetentionCommit, biliRetentionNote, biliRetentionEnabled, biliImageConventionText, biliRetentionShrinkOne, biliRetentionMaxDim, biliRetentionBackendOrder, biliRetentionBackendSteps, biliRetentionBackends };";
+  const body = blockText + "\nreturn { biliRetentionApply, biliRetentionCommit, biliRetentionNote, biliRetentionEnabled, biliImageConventionText, biliRetentionShrinkOne, biliRetentionShrink, biliRetentionMaxDim, biliRetentionBackendOrder, biliRetentionBackendSteps, biliRetentionBackends };";
   const fn = new Function(...Object.keys(shims), body);
   const api = fn(...Object.values(shims));
   api.state = state;
@@ -313,7 +317,7 @@ async function main() {
     const quoted = api.biliRetentionBackendSteps({ id: "powershell", bin: "x" }, "C:\\O'Brien\\in.png", "C:\\t", 900);
     ok("powershell escapes apostrophes", quoted[0].args[3].includes("'C:\\O''Brien\\in.png'"), quoted[0].args[3].slice(0, 120));
     const quotedOut = api.biliRetentionBackendSteps({ id: "powershell", bin: "x" }, "/tmp/in.png", "/tmp/it's", 900);
-    ok("powershell escapes output paths too", quotedOut[0].args[3].includes("/tmp/it''s/out.jpg"));
+    ok("powershell escapes output paths too", quotedOut[0].args[3].includes(join("/tmp", "it''s", "out.jpg")));
 
     const magick = api.biliRetentionBackendSteps({ id: "magick", bin: "magick" }, "/tmp/in.png", "/tmp", 1200);
     ok("magick only shrinks", magick[0].args.join(" ").includes("-resize 1200x1200>"));
@@ -331,9 +335,12 @@ async function main() {
     const api = makeApi({});
     ok("max dim default", api.biliRetentionMaxDim() === 1200);
     const shrunk = await api.biliRetentionShrinkOne("image/png", bigPng, 1200);
-    if (shrunk === null) {
+    if (api.biliRetentionBackends().length === 0) {
       console.log("SKIP shrink (no encoder backend on this host)");
     } else {
+      ok("available encoder must resize the fixture", shrunk !== null, JSON.stringify(api.biliRetentionBackends()));
+    }
+    if (shrunk !== null) {
       ok("shrink keeps the ratio", shrunk.bytes <= shrunk.origBytes * 0.8, shrunk.bytes + " vs " + shrunk.origBytes);
       ok("shrink bounds the long edge", Math.max(shrunk.width ?? 0, shrunk.height ?? 0) <= 1200, JSON.stringify([shrunk.width, shrunk.height]));
       ok("shrink returns a known mime", shrunk.mime === "image/jpeg" || shrunk.mime === "image/png", shrunk.mime);
@@ -341,6 +348,17 @@ async function main() {
       if (process.platform === "darwin" || process.platform === "win32") {
         okEq("shrink used the platform backend", api.biliRetentionBackends()[0]?.id, process.platform === "darwin" ? "sips" : "powershell");
       }
+      console.log("encoder: " + api.biliRetentionBackends()[0].id + " resized 1500x1000 to " + shrunk.width + "x" + shrunk.height + ", " + shrunk.origBytes + " -> " + shrunk.bytes + " bytes");
+      api.state.config = { imageRetentionMaxDim: 1200 };
+      const first = await api.biliRetentionShrink("image/png", bigPng);
+      api.state.config = { imageRetentionMaxDim: 600 };
+      const second = await api.biliRetentionShrink("image/png", bigPng);
+      ok("updated maxDim takes effect for a cached image", first !== null && second !== null &&
+        Math.max(first.width, first.height) === 1200 && Math.max(second.width, second.height) <= 600);
+    }
+    if (process.platform === "win32") {
+      ok("Windows filesystem convert is not an encoder", !api.biliRetentionBackends().some((backend) =>
+        /[\\/](?:System32|SysWOW64)[\\/]convert\.exe$/i.test(backend.bin)));
     }
   }
 

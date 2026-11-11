@@ -10,6 +10,7 @@
 | --- | --- | --- |
 | [billion-context](https://github.com/ranxianglei/billion-context) | 0.1.213，master `406193b202c13248241f25201e1c6bbda747c99b` | 上游源码构建后，对代理 `dist/index.js` 应用 B1–B18；agent、client、层和清单也随该基线复制 |
 | [dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator) | 2.3.0，`e8c30af1f2b5cffa6749d032f0f296e17d4e26d0` | 2026-11-09 逐文件比对：当前 vendor 的 package.json 和全部 8 个 lib/*.js 与该提交完全一致；其功能独立维护，包装包仅在生成客户端时改写三个字面量 |
+| [yaml](https://github.com/eemeli/yaml) | 2.9.1，ISC | 从 2026-11-11 审计的 DSH settings 随附版本复制 Node runtime，仅清除 Document.js 一处行末空格；CLI 与运行期共用解析器，来源范围见 `vendor/yaml/SOURCE.md` |
 
 bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整提交通过上游提交接口核对；本轮未重新构建该基线做逐字节比对，不将整个二进制声明为已独立验证可复现。版本号相同不代表提交相同，不能只按 0.1.213 判断是否需要升级。
 
@@ -31,7 +32,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 | B10 | SHA-256 校验完整客户端前缀；旧画面所有摘要块仍 active；跳过块全部消息必须在实际追加尾部；复用时补 tailStart | `patches/view-safety.block.js`；步骤 10 同时修改普通与 WS/增量拼接点 | `check-views.mjs` 检查历史编辑、长文本编辑、失效摘要、拼接点前遗漏、部分覆盖、两种请求路径 |
 | B11 | prompt_cache_key 路由默认 enabled；显式 disabled/auto/enabled 原样保留，环境变量优先级不变；设置页缺省选项及中英文默认文案同步 | 步骤 11，parsePromptCacheRouting | check-views.mjs 提取真实解析与生效函数检查缺省、无效值及三档显式设置 |
 | B12 | 图片在首次成功发送后折叠成一行占位说明（尺寸、ref、已看过提示、可选的 acp_read_original_image 取回方式）；四协议全覆盖，含 tool_result 与原图回执图 | `patches/image-retention.block.js`；步骤 12、14 | `check-image-retention.mjs` 检查四种请求形状与关机行为 |
-| B13 | 首次上送按需压缩：长边 > imageRetentionMaxDim（默认 1200）或 > 100 KB 时，按平台顺序借宿主编码器（macOS `/usr/bin/sips`、Windows PowerShell `System.Drawing`、其它 ImageMagick）试 JPEG(q80) 与 PNG 取小，且 ≤ 原图 × 0.8 才采纳；一个都没有则静默跳过 | 同一个块的 `biliRetentionShrinkOne`、`biliRetentionBackends`；步骤 12 | `check-image-retention.mjs` 核对三平台命令行并用自造 PNG 真跑本机后端 |
+| B13 | 首次上送按需压缩：长边 > imageRetentionMaxDim（默认 1200）或 > 100 KB 时，按平台顺序借宿主编码器试 JPEG(q80)/PNG 取小，且 ≤ 原图 × 0.8 才采纳。Windows quality 参数用 long 表达式；ImageMagick 按版本验证，排除系统 convert；缓存包含 maxDim，修改后下一请求生效；无后端静默跳过 | `patches/image-retention.block.js`；步骤 12 的可替换哨兵块 | `check-image-retention.mjs` 比较最终构建与当前块，核对三平台命令行、本机真实压缩、maxDim 更新；有后端但编码失败须报失败，不能记为 skip |
 | B14 | 两个压缩提示构建器的返回尾部追加恒定图像约定；覆盖四协议与两种 strategy，不受 `applySectionOverrides` 影响 | `patches/image-convention.block.js`；步骤 13 的两处 seam | `check-image-retention.mjs` 检查文本开头、关键词、稳定性与关闭 |
 | B15 | 折叠记账挂在 `noteSuccessfulForward`：只有上游真正接收后才算看过，失败请求下一轮仍发原图 | 步骤 15 | `check-image-retention.mjs` 检查首次不折叠、记账后再见折叠 |
 | B16 | 新增顶层配置键（imageRetention / imageRetentionKeepLastUser / imageRetentionMaxDim / imagePrompt / imageRescaleMaxDim）登记，避免启动未知键警告 | 步骤 16 | `check-image-retention.mjs` 结构检查 |
@@ -47,9 +48,9 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 | W1 | 一张插件卡挂 bili、compaction gate、accelerator 三个子插件；显式导出 Config，传递活访问器时不二次解析 schema | `lib/index.js`、`lib/upstream.js`；需真机检查设置即时生效 |
 | W2 | 合并两个客户端工厂，inject 取并集；改加速器的设置命名空间、版本路由和提示文案 | `lib/client.template.js`、安装脚本 extractFactory/rewriteOnce；前两字面量恰好一次，否则失败 |
 | W3 | 重写组合层只留包装包 insert，保留上游 compaction-basic、四个 preset 的闸门注入、两项 DeepSeek retryPolicy | `dsh.bundle.patch.yml` 由 vendor 层生成；升级要人工比对层，避免替换 inject/config 时丢新字段 |
-| W4 | 抑制重复的上游条目：组合层静态 disabled 行在层合成期关掉排在包装包前面的上游，`loader/entry-init` 的 guard 改写 `entry.update` 关掉排在后面的上游，启动扫描与 `_initTask` 等待仅作兜底；销毁时取消排队启动 | `dsh.bundle.patch.yml`、`lib/merge.js`、`lib/index.js`；`check-wrapper.mjs` 覆盖 guard、挂载后 dispose 与取消启动，重复条目与热重载需真机验证 |
+| W4 | 组合层静态 disabled 行、作用域 guard 与启动屏障共同去重：真实 Loader 并发构造全部条目，两个方向的原版都可能已在 import；必须等待 `_initTask` 与 fiber.dispose 完成后才挂 children。销毁用 Cordis effect 清理并取消排队启动 | `lib/startup.js`、`lib/merge.js`、组合层；`check-wrapper` 检查 guard 多 owner；`check-runtime` 使用实际 Loader 检查两种顺序与资源释放，完整热重载仍需真机 |
 | W5 | fork 经 AsyncLocalStorage 给 seeded create 补 parentSession，尊重已有父字段；销毁时恢复服务 | `lib/fork-lineage.js`；`check-wrapper.mjs` 检查并发隔离、普通创建和恢复 |
-| W6 | 包装包自己的版本检查和更新接口；串行共享更新；checkout 安装用 git pull --ff-only + installer；无 patchRepo 提示走插件管理器 | `lib/index.js`；与客户端 W2 配对；版本提示、更新成功/失败需人工验证，四项自动检查不覆盖接口 |
+| W6 | 包装包自己的版本检查和更新接口；串行共享更新；checkout 安装用 git pull --ff-only + installer；无 patchRepo 提示走插件管理器。同版较新的有效 patchBuild 也提示更新，重复构建保持时间和标识 | `lib/index.js`、`lib/version.js`、installer；`check-wrapper` 检查比较及构建幂等，真实接口更新仍需验证 |
 | W7 | （补丁 B17）bili Web UI「配置」页里的「图像」卡：四个控件（折叠总开关、上传豁免、首传最长边、图像约定）只编辑页面上的配置草稿，保存沿用页面原有的 `PUT /__bili/config`；边长只收不小于 128 的整数，非法就地提示并回填；恢复默认只删四个键；中英词条随补丁注入 bundle 级 `MESSAGES`，位置必须在 `translate` 定义之前 | `patches/image-card.{markup,script,listeners}.block.js`、`scripts/patch-bili-build.mjs` 第 17 节、`scripts/install.mjs`；`check-image-card.mjs` 覆盖结构、内联脚本解析与假 DOM 行为，真实浏览器里的保存与重启后显示需人工确认 |
 
 ### 安装与运维：I1–I5
@@ -57,9 +58,9 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 | ID | 保留的能力 | 维护位置与验证 |
 | --- | --- | --- |
 | I1 | 自带 vendor 优先于 profile 旧副本；显式外部来源必须是补丁构建；支持 --build/--out、--profile | `scripts/install.mjs`；检查来源清单/agent/client/dist 必须同基线 |
-| I2 | 临时副本先打补丁，做视图与压缩检查后替换 dist；文本工厂先解析；退出清理临时目录 | installer；`check-wrapper.mjs` 检查不兼容补丁不覆盖；不宣称整个多文件安装具备事务原子性 |
-| I3 | dependencies/bundles 合并为包装包，保留其他插件；配置改寻址、旧 !!js 跟随行迁移；已有 disabled/config 保留；备份保留最近 3 份。管理器安装不跑脚本，包装包首次启动时自行从 `dsh.profile.bundles` 移除两个上游、保留 `dependencies`，幂等 | installer、`lib/merge.js`；`check-wrapper.mjs` 覆盖重装幂等、禁用与渠道配置保留、首次启动合并，旧配置迁移仍需审阅 |
-| I4 | 两个指定中转主机的渠道仅补缺失 enabled/encoding，不覆盖用户值；管理器安装由包装包首次启动补齐缺失键 | installer 的 COMPRESS_HOSTS、`lib/index.js` 的 `seedCompressionDefaults`；这是包装包默认规则，不是 bili 原生默认，也不是所有渠道都开；首次启动补齐需真机验证 |
+| I2 | 临时副本先打补丁，依次做视图、图像折叠/编码、图像卡与压缩检查后替换 dist；文本工厂先解析；退出清理临时目录 | installer；`check-wrapper` 检查不兼容补丁不覆盖；不宣称整个多文件安装具备事务原子性 |
+| I3 | CLI 合并 dependencies/bundles；管理器首次启用只移除上游 bundles，保留依赖卡片。共用 YAML AST 迁移，包装包显式键优先，保留别名/合并/标签/注释和分行状态；只移除旧包装包跟随表达式。运行期使用官方锁、原子写入、回滚及本包备份轮换 | `lib/profile.js`、installer；重载在 HMR 独占队列内执行，离开继承的 AsyncLocalStorage 标记再排队，失败退避重试后才允许 defaults。`check-wrapper`、`check-runtime` 覆盖迁移、并发、回滚和重载失败 |
+| I4 | 两个指定主机逐字段补 enabled=true/encoding=auto，尊重显式 false/gzip/null/表达式与全局 gzip。以原始配置判缺失，等待服务与迟到渠道，冲突重读再补 | `lib/defaults.js`、`lib/profile.js`、installer；`check-wrapper` 检查纯规则与真实 CLI，`check-runtime` 用实际 SettingsForms 检查活配置、持久化及并发选择；真实 br 回执仍需验证 |
 | I5 | 发现实际端口；核对替换 instanceId；一次性探针；备用 vendor 路径；精确收尾自建失败进程，保留服务报告 PID/端口 | `scripts/restart.mjs`；`check-restart.mjs` 只自动覆盖端口发现/实例替换；自建启动、看护与清理需真机验证 |
 
 ### 已失效描述与本地配置
@@ -77,7 +78,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 2. bili 在选定源码提交运行上游自己的 `npm ci`、`npm run build`。记录 commit、Node/npm 版本和构建命令；**从源码构建是当前流程，不是禁用方案**。
 3. 在新构建运行 `node scripts/patch-bili-build.mjs <新目录>/dist/index.js`。逐项看 B1–B18；任何 skipped、缺锚点或行为变化都须判明。尤其步骤 6/7 当前缺锚点只打印 skipped，不会强制失败；后续视图检查会使用其函数，但不能只依赖脚本退出码。
 4. 若上游已提供等价功能，记录哪个上游提交替代哪个 ID，调整补丁与检查后再移除重复实现。不要在未比较输入、配置和降级边界前直接删补丁。
-5. 需要升级加速器时，显式指定 `--accelerator <选定提交目录>`；省略该选项可能沿用 profile/旧 vendor，不代表自动升级。它的压缩、预传输、HTTP/2、计时和账本功能来自第二个仓库，不要误归为 bili 的差异。
+5. 需要升级加速器时，显式指定 `--accelerator <选定提交目录>`；省略该选项优先本仓库 vendor，其次 profile，不能当作自动升级。它的压缩、预传输、HTTP/2、计时和账本功能来自第二个仓库，不要误归为 bili 的差异。
 6. 构建仓库产物（在本仓库运行，示例目录替换成实际路径）：
 
    ```sh
@@ -91,22 +92,24 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
    node --check vendor/billion-context/dist/index.js
    node scripts/check-views.mjs
    node scripts/check-wrapper.mjs
+   node scripts/check-image-retention.mjs
+   node scripts/check-image-card.mjs
    node scripts/check-restart.mjs
    node scripts/smoke.mjs
    git diff --check
    ```
 
-   `check-wrapper` 在临时 profile 运行真实 installer；`check-restart`/smoke 只开本地模拟服务。它们不调用真实模型。外部候选可先用 `check-views.mjs <dist>`、`smoke.mjs <dist>`。再次打补丁比较文件哈希，确认幂等。
+   `check-wrapper` 在临时 profile 运行真实 installer；`check-restart`/smoke 只开本地模拟服务。它们不调用真实模型。宿主整合另运行 `node scripts/check-runtime.mjs --host-modules <实际 DSH node_modules>`：Loader/Cordis/SettingsForms/atomic-write 用实际模块，LLM 目录、配置编辑持久化、HMR 与模型插件用脚本列明的替身。外部候选可先用 `check-views.mjs <dist>`、`smoke.mjs <dist>`。再次打补丁比较文件哈希，确认幂等。
 8. 审阅新增/删除的文件和生成物，不能只看 GitHub 隐藏的二进制 diff。bili 清单、build-info、agent、client、层与 dist 必须来自同一源码基线；当前没有全自动验证这一点。
 9. 真机验证才安装到本地：`node scripts/install.mjs`，`node scripts/restart.mjs`。包装包宿主/客户端改动还需重载插件或重启 DSH，代理重启本身不重载宿主代码。检查普通续聊、fork 首轮/后续轮、重启首轮、修改历史、开关即时生效、禁用/重新启用、重复上游条目、压缩回执和按来源支持的缓存命中。
-10. 记录已做与未做的验证；运行行为变化升三段版本号，防止 W6 检查不到更新。提交完整产物；发布前核对远端提交与本地一致。清理本次临时资源，说明有意保留的服务。
+10. 记录已做与未做的验证；通常运行行为变化升三段版本号。2026-11-12 本次按用户要求保留 0.6.5，使用稳定 patchBuild 检测同版新修复（SPEC 第 9 节）。提交完整产物；发布前核对远端提交与本地一致。清理本次临时资源，说明有意保留的服务。
 
 ## 4. 修改文件时的来源规则
 
 | 内容 | 应修改哪里 | 后续动作 |
 | --- | --- | --- |
 | bili 代理差异 | 补丁脚本与 patches/*.block.js | 从干净上游重打或写旧版迁移，再检查最终 dist；只改块文件不会更新已有带标记的 dist |
-| 包装包宿主/分支血缘 | lib/index.js、lib/fork-lineage.js | 相关检查；装机后宿主重载 |
+| 包装包宿主/分支血缘/默认与迁移 | lib/index.js、fork-lineage.js、startup.js、merge.js、profile.js、defaults.js、version.js | wrapper/runtime 检查；装机后宿主重载 |
 | 合并客户端 | lib/client.template.js、installer 的重写逻辑 | --build；不要只手改 lib/client.js |
 | 组合层 | vendor 的选定上游层 + installer 生成规则 | --build；检查 inject/config 替换语义 |
 | 加速器自身功能 | 第二个来源仓库，选定提交再复制 | 记录新完整提交；运行其自身检查及本包装包检查 |
