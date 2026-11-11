@@ -1,6 +1,6 @@
 # 当前差异与上游升级指南
 
-本文是当前实现的维护入口，按 0.6.3 的代码核对。`PATCHES.md` 保存实现细节、历史故障和测量结果；发生冲突时先核查代码，再同步两份文档，不能把历史叙述当成当前保证。
+本文是当前实现的维护入口，按 0.6.4 的代码核对。`PATCHES.md` 保存实现细节、历史故障和测量结果；发生冲突时先核查代码，再同步两份文档，不能把历史叙述当成当前保证。
 
 [SPEC.md](SPEC.md) 规定必须保留的行为，本页记录当前实现与验证覆盖。发现代码偏离规范时登记并修复，不能仅通过修改说明把回归变成新默认。每次合并前后按 SPEC 第 7 节核对 PCK-01–PCK-05 和本页全部稳定 ID，并保存核对结果；不仅在上游升级时执行。
 
@@ -65,7 +65,8 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 ### 已失效描述与本地配置
 
 - **默认开启 prompt_cache_key 已恢复（0.5.4，B11）**：这是本分支要求。旧提交 `537d590` 的手改默认值在 `f2b9fd6`（0.5.0）刷新源码基线时意外丢失；现已纳入重打脚本和回归检查。B6 决定盖章时使用哪个 key，B11 决定未显式配置时启用路由；用户显式三档选择仍保留。
-- **配置页图像卡（0.6.3，B17）**：卡片属于当前实现，配置键和代理行为不受它影响；若要整张卡去掉，删除三个 `patches/image-card.*.block.js`、`scripts/patch-bili-build.mjs` 的第 17 节、`scripts/install.mjs` 里 `check-image-card.mjs` 那一行，再从干净构建重打补丁即可。四个配置键仍可手改文件或走环境变量。
+- **配置页图像卡（0.6.4，B17）**：卡片属于当前实现，配置键和代理行为不受它影响；若要整张卡去掉，删除三个 `patches/image-card.*.block.js`、`scripts/patch-bili-build.mjs` 的第 17 节、`scripts/install.mjs` 里 `check-image-card.mjs` 那一行，再从干净构建重打补丁即可。四个配置键仍可手改文件或走环境变量。
+- **折叠步长默认 80k（0.6.4，B18）**：`compress.nudgeGrowthTokens` 的缺省是 80000——内核 `defaultConfig` 的 floor/cap、配置页常量与中英文提示同步；用户明确要求对齐本机配置。显式配置优先，页面上删掉该键即回落 80000。回滚：删掉 `scripts/patch-bili-build.mjs` 第 18 节与 `scripts/check-views.mjs` 的默认值断言，从干净构建重打。
 - **图片折叠与压缩默认开启（0.6.0，B12–B15）**：`imageRetention` 关掉折叠与压缩、`imageRetentionKeepLastUser` 关掉上传豁免、`imagePrompt` 关掉约定，环境变量 `BILI_IMAGE_RETENTION` / `BILI_IMAGE_PROMPT` 优先。三条都是改配置即可回滚，不需要重打补丁。压缩只借宿主自带的编码器（macOS `sips`、Windows PowerShell `System.Drawing`、其它平台 ImageMagick），0.6.0 只覆盖 macOS，0.6.1 起三平台。上游 jimp 降采样链因依赖未安装而从未生效；不要为了恢复上游行为去改 `IMAGE_RESCALE_DEFAULT_MAX_DIM`，那个常量当前没有效果。
 - **不能称整个插件禁止 HTTP/2**：当前加速器保留按渠道启用 HTTP/2 的能力；它的 transport 与来源提交一致。bili 转发仍用当前上游的 fetch/transport 路径；十八组补丁里没有独立的 HTTP/2 禁用补丁。不要把旧描述当成重打要求。
 - 标记文件、rollout、代理、模型窗口和用户设置属于运行环境，不随 Git 安装自动复制。历史 99% 缓存命中、首轮耗时是特定配置下的测量，不能作为所有网关的发布通过阈值。

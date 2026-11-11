@@ -563,9 +563,9 @@ function __biliForkTranscriptSource(session,store){
 - 不按"是否有图"条件注入约定（见 20.4 的缓存理由）。
 - 用户明确不考虑"新开会话"作为解决方案，所以这里的默认值是"老会话里也立刻生效"。
 
-## 21. bili 配置页里的图像卡（0.6.3，B17）
+## 21. bili 配置页里的图像卡（0.6.4，B17）
 
-图像那几个开关原来只能改配置文件或环境变量。0.6.3 把它做成 bili Web UI「配置」页里的一张卡：内嵌 iframe 里点「配置」，快速配置卡下面就是「图像」，四个控件直接编辑同一份 `billion-context.json`，保存复用配置页原有的 `PUT /__bili/config`。
+图像那几个开关原来只能改配置文件或环境变量。0.6.4 把它做成 bili Web UI「配置」页里的一张卡：内嵌 iframe 里点「配置」，快速配置卡下面就是「图像」，四个控件直接编辑同一份 `billion-context.json`，保存复用配置页原有的 `PUT /__bili/config`。
 
 ### 21.1 为什么在配置页，不在 DSH 设置页
 
@@ -612,7 +612,7 @@ function __biliForkTranscriptSource(session,store){
 安装脚本把它接在 `check-views.mjs` 之后、`smoke.mjs` 之前，锚点漂移或卡片坏了都装不进去。
 
 
-## 22. 压缩增长阈值的默认值改成 80k（0.6.3，B18）
+## 22. 压缩增长阈值的默认值改成 80k（0.6.4，B18）
 
 ### 22.1 为什么改
 
@@ -643,7 +643,7 @@ function __biliForkTranscriptSource(session,store){
 
 - 只影响「没有写 `compress.nudgeGrowthTokens`」的配置。已经写 80000 的本机配置不变；写了别的值也照旧。
 - Web UI 快速配置把数字删回默认（或点步进按钮回到 80000）时，保存后这个键会从文件里消失，行为回到 80000。
-- 回滚：删掉 `scripts/patch-bili-build.mjs` 第 18 节与 `scripts/check-views.mjs` 里那条断言，从干净构建重打补丁即可；版本号仍是 0.6.3。
+- 回滚：删掉 `scripts/patch-bili-build.mjs` 第 18 节与 `scripts/check-views.mjs` 里那条断言，从干净构建重打补丁即可；版本号仍是 0.6.4。
 - 这条补丁不覆盖环境变量：nudge 阈值没有对应的环境变量，只有配置文件。
 
 ### 22.4 验证
@@ -652,3 +652,15 @@ function __biliForkTranscriptSource(session,store){
 - `node scripts/check-image-card.mjs` 仍要过：页面内联脚本整体解析，`hydrateQuickConfig` 读的常量换了值不能把脚本写坏。
 - `node scripts/install.mjs --build` 的冒烟序列（视图 → 图像卡 → 请求体压缩）全绿才算装得上。
 - 页面级检查：隔离 HOME 起一个代理取 `/__bili/`，页面里应出现 `const NUDGE_DEFAULT = 80000` 和「内核默认 80000」，不再出现 50000。
+
+
+## 23. 0.6.4 发布记录：图像与默认值（B12–B18）
+
+0.6.3 是内部构建、没有发布；0.6.4 是本轮全部改动第一次推上 GitHub 的版本。本版相对上游多出来的特殊修改集中在两处：
+
+- 图像：图片只在第一次成功上送时发原图，之后折叠成一行占位说明（B12/B15，0.6.0 起）；首次上送按 `imageRetentionMaxDim`（默认 1200）借宿主编码器压一次（B13，0.6.1 起覆盖 macOS / Windows / 其它平台）；系统提示尾部恒定注入图像使用约定（B14）；四个键登记为顶层配置键，避免启动告警（B16）；bili Web UI「配置」页新增「图像」卡，只编辑页面草稿、保存走 `PUT /__bili/config`（B17，详见第 21 节）。
+- 默认值：折叠提示的步长 `compress.nudgeGrowthTokens` 缺省从 50000 改为 80000，内核 `defaultConfig` 的 floor/cap、配置页常量与中英文提示同步（B18，详见第 22 节）。
+
+验收：`check-image-retention.mjs` 覆盖四协议折叠、记账时机、上传豁免、总开关、三平台后端顺序、本机后端真实压缩与约定文本；`check-image-card.mjs` 覆盖卡片标记与词条、内联脚本整体解析、假 DOM 上的 21 项行为；`check-views.mjs` 共 18 项，含 B18 的默认值断言；`smoke.mjs` 三例压缩传输。安装脚本按「视图 → 图像卡 → 请求体压缩」顺序串联，任何一步失败都不替换正式 dist。真实浏览器里的保存与重启后显示、Windows 上的端到端压缩仍需人工确认。
+
+本版没有正式发布的 0.6.3 可供对比；回滚任一项都只删对应补丁节与检查断言，从干净上游构建重打，不需要改代理行为代码。
