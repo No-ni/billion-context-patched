@@ -105,7 +105,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 
 ## 5. 环境与新电脑接手
 
-需要 Git 和 Node.js（精确支持范围见根 `package.json#engines`）；维护脚本使用 Node 标准库及仓库自带解析器，无需安装根 npm 依赖。GitHub 推送需要相应凭据，查看/发布使用已登录用户自己的 `gh`，CI 使用仓库令牌，不把凭据写进 Git。
+需要 Git 和 Node.js（精确支持范围见根 `package.json#engines`）；维护脚本使用 Node 标准库及仓库自带解析器，无需安装根 npm 依赖。GitHub 推送需要相应凭据，查看/发布使用已登录用户自己的 `gh`，CI 使用仓库令牌，不把凭据写进 Git。首次提交前在该电脑配置 Git 的 user.name/user.email，可用 GitHub 提供的 noreply 地址；不把特定电脑的账户配置作为项目依赖。
 
 首次接手：
 

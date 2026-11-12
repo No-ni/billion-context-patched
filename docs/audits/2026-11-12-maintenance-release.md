@@ -43,6 +43,10 @@
 
 本轮 package 增加维护入口及 Node 支持范围，最终 `patchBuild.id` 为 `4098655f8b7cf21ae0f9bbac06b31c740d1aa5824fc1327c7e027293a26c5ab5`，`createdAt` 为 `2026-11-12T10:10:53.848Z`；最终 dist SHA256 仍为 `6f8385a28f85c0f315b8b6600fc631236223366bb8d3b226c1d1b46908ccd5a6`。前阶段审计的旧 patchBuild 是当时证据，不是另一份当前版本来源。
 
-本记录的本地验证阶段尚未作为 GitHub 成功证据。分支 CI、标签、Release 及附件的实际结果在交付阶段继续核对，发布入口为 [v0.6.7](https://github.com/No-ni/billion-context-patched/releases/tag/v0.6.7)，工作流见 [Actions](https://github.com/No-ni/billion-context-patched/actions)。
+## GitHub 核对证据
+
+- 修复和维护提交 `0a8c8c92b2e435b20f5f50e2c170b77966571d1e` 已推送维护分支。[检查 43199221589](https://github.com/No-ni/billion-context-patched/actions/runs/43199221589) 成功，Ubuntu Node 22/24、Windows Node 24、macOS Node 24 四个组合全部完成。随后仅补充接手与交付证据，不修改已通过的运行实现。
+- [v0.6.6 Release](https://github.com/No-ni/billion-context-patched/releases/tag/v0.6.6) 已从原提交 `9e770a6b48dbe26b24561b28875a858e0feacc0c` 一次性补录；旧标签未移动，ZIP 清单与版本/dist 均按旧提交核对。草稿上传后重新下载，ZIP 与本地产物字节一致，校验和为 `532c7bba9888b013c3980870057499e08019f721f404ec06ec5717b5af133e7b`，确认非草稿且包含 ZIP/SHA256SUMS；未把该历史版本设为 Latest，临时打包/下载目录已清理。
+- 0.6.7 的正式交付入口为 [v0.6.7 Release](https://github.com/No-ni/billion-context-patched/releases/tag/v0.6.7)。最终版本标签、main 提交及工作流完成状态按 [RELEASING.md](../RELEASING.md) 查询 [Actions](https://github.com/No-ni/billion-context-patched/actions)，不另维护一份会过期的状态清单；仅有提交或 tag 不能宣称已发布。
 
 真实 DSH 冷加载/切模型、浏览器操作、真实摘要/模型、网关重试与缓存命中不在本轮自动检查范围内。已安装插件及旧检出不随仓库发布自动升级。
