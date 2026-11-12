@@ -1,133 +1,51 @@
 # bili-context-patch
 
-[billion-context](https://github.com/ranxianglei/billion-context)（命令名 `bili`）的自维护构建，代码取自上游 master `406193b2`（上游版本号仍是 0.1.213，但比 0.1.213 那次发版多 155 个提交），MIT 许可。
+**当前版本：0.6.5** · [更新记录](CHANGELOG.md) · [使用说明](docs/USAGE.md)
 
-相对上游，这个包多带一个[模型请求加速](https://github.com/No-ni/dsh-plugin-model-request-accelerator)插件：压缩请求体、预传输共享对话历史，并给出每次请求的耗时面板。两样东西装在一起，所以「设置 → 插件」里只有一张 `bili-context-patch`；bili 面板与「模型请求加速」两个设置页照旧各管各的。
+面向 DSH 的上下文压缩与请求加速插件。基于 [billion-context](https://github.com/ranxianglei/billion-context)，内置[模型请求加速器](https://github.com/No-ni/dsh-plugin-model-request-accelerator)，安装一个包即可使用两组功能。
 
-另外补了一处 DSH 的缺口：**fork 出来的会话现在会写明自己的父会话**（会话头的 `parentSession`）。bili 靠这个字段继承父会话的压缩状态；没有它，fork 出来的子会话会把继承来的上百万 token 正文从零重压一遍，首字要等好几分钟，甚至直接 413。这是包装包宿主半边自己做的（`lib/fork-lineage.js`），bili 的构建没有为此多打一行补丁。
+## 功能
 
-项目行为要求与验收条件见 [SPEC.md](SPEC.md)，覆盖全部定制功能及“缓存钥匙默认开启”的明确约定；后续 AI 每次合并前后必须按 SPEC 核对，执行规则见 [AGENTS.md](AGENTS.md)。当前差异与升级流程见 [MAINTENANCE.md](MAINTENANCE.md)；历史排查和实现细节见 [PATCHES.md](PATCHES.md)。
+- **长对话与 fork 继承**：上下文压缩、快照复用，补齐 fork 的父会话关系并继承已有压缩状态。快照渲染仍遵守标记与灰度开关。
+- **请求加速**：支持请求体压缩、共享历史预传输和每次请求的耗时面板，按渠道配置。
+- **图片减量**：图片成功发送后可折叠为占位说明，原图可按引用取回；首次发送按需缩放。当前回合上传的图片默认保留。
+- **集中设置**：插件卡片承载两项功能，bili 面板和「模型请求加速」设置页分别管理各自配置。
 
-当前版本 **0.6.5**。
+## 安装与更新
 
-0.6.0 起还多一件事：**同一张图只在它被看过的那一次上送**。模型请求每轮全量重发，一张整页截图的 base64 会让之后每一轮请求体多出几百 KB；现在成功发送一次之后，后续请求里它会变成一行占位说明（尺寸、引用号、已看过、以及 `acp_read_original_image("<ref>")` 的取回方式），原图随时可按 ref 取回。首次上送前先用宿主自带的编码器试着压到 `imageRetentionMaxDim`（默认 1200）并转 JPEG：macOS 用 `/usr/bin/sips`，Windows 用 PowerShell 里的 `System.Drawing`，其它平台找 PATH 上的 ImageMagick，都不给运行环境新增依赖（0.6.1 起覆盖三平台，0.6.0 只有 macOS）。同时系统提示尾部追加一段恒定的图像使用约定（能不用图就不用、要看就一次看够、出图够判断即可）。这些开关都在配置里：`imageRetention`、`imageRetentionKeepLastUser`、`imageRetentionMaxDim`、`imagePrompt`，默认全开，设 false 即回到旧行为，详见 [PATCHES.md](PATCHES.md) 第 20 节。
+在 DSH 插件商店安装 **bili-context-patch**，随后启用。也可在「设置 → 插件」使用 GitHub 安装源：
 
-0.6.4 起不用再翻配置文件：bili 自己的 Web UI（设置里的内嵌页面）的「配置」页多了一张「图像」卡，四行就是上面四个开关（开关、开关、一个不小于 128 的数字框、开关），下面还有「恢复默认」。改动先进页面草稿，点保存才随整份配置写进 `billion-context.json`（先备份 `.bili-bak`，临时文件 rename 原子替换），下一条请求生效，不用重启；同名环境变量仍然优先，卡片只展示文件里的值。手改 JSON 当然也可以，卡片不是唯一入口。
-
-0.6.4 还把「压缩增长阈值」的缺省步长从 50000 调到 80000（`compress.nudgeGrowthTokens`）：没写这个键的配置，两次折叠之间要涨满 80k token 才提示下一次；显式写过的值照旧以配置为准。这个缺省取自本机长期在用的配置，是按需求定下的插件默认值，不是上游默认。
-
-## 安装
-
-设置 → 插件 → 安装，填仓库地址即可，安装后启用；如果 DSH 提示需要重启，按提示重启：
-
-```
+```text
 github:No-ni/billion-context-patched
 ```
 
-包里自带运行所需的一切（两个上游的运行文件副本、合并后的客户端包、组合层），装完不需要再跑任何脚本，也不需要先装 billion-context。
+包内携带上游运行文件和必要解析器，无需先安装原版插件。
 
-设置 → 插件这条路径不会执行仓库里的脚本，所以首次启用时包装包自行完成合并：把 `billion-context` 与 `dsh-plugin-model-request-accelerator` 从 `dsh.profile.bundles` 删掉（保留 `dependencies`，原版卡片显示关闭），将旧加速器配置补入包装包已有配置，再通过宿主重载应用。包装包的显式配置优先，禁用状态和渠道选择保留；写入使用宿主文件锁与原子替换，并保留最近三份本包备份。
+首次启用会自动停用原版 `billion-context` 和 `dsh-plugin-model-request-accelerator`，迁移旧加速器设置并保留已有选择；原版卡片如果仍显示，应处于关闭状态。
 
-`www.didudidu.asia` 与 `154.219.111.56` 对应渠道会逐字段补上 `enabled: true`、`encoding: auto`，设置页显示「自动（优先 br）」。按主机名匹配，渠道改名也适用；服务或渠道稍后出现也会补齐。手动关闭、选择 gzip 或写入配置表达式后不会被默认值覆盖；显式全局 gzip 同样保留其有效选择。
+更新时在插件管理器更新本插件。DSH 提示重载或重启时按提示操作；加载本次宿主修复需要重载插件或重启 DSH，图片代理修复还需重新启动 bili 代理。手动安装与重启命令见[使用说明](docs/USAGE.md#手动安装)。
 
-已经 clone 了这个仓库的话，也可以直接把它装进本机 profile：
+## 开始使用
 
-```sh
-node scripts/install.mjs
-node scripts/restart.mjs
-```
+在设置中打开 bili 面板查看上下文状态，在 bili 的「配置」页调整压缩与图片设置；渠道开关、请求压缩算法与耗时信息在「模型请求加速」页管理。
 
-脚本以仓库自带的 `vendor/` 为准，所以在本机已经装过旧版的情况下，更新仓库后重跑这一条就够了，不用先卸。
-
-## 卸载
-
-```sh
-dsh plugin --profile desktop remove bili-context-patch
-```
-
-插件目录（`plugins/bili-context-patch` 或 pnpm 的 `node_modules/bili-context-patch`）会留在磁盘上，想清理直接删掉即可。
-
-## 目录
-
-- `lib/` —— 主机入口、启动与上游去重、profile 迁移、渠道默认值、fork 血缘、版本检查，以及生成的客户端与上游转发
-- `vendor/` —— 两个上游的运行文件副本及 YAML、Zod 解析器；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
-- `dsh.bundle.patch.yml` —— 组合层
-- `patches/` —— bili 构建补丁和加速器账本兼容补丁；`outbound-encoding.block.js` 是请求体压缩块，`accelerator-ledger.*.js` 保存新账本作用域和精确旧片段
-- `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`patch-bili-build.mjs`（给 bili 构建按锚点应用补丁，逐项见 [PATCHES.md](PATCHES.md) 第 0.2 节）、`restart.mjs`、`smoke.mjs`
-
-`vendor/` 从选定来源复制，其中 bili 代理构建和加速器账本兼容补丁分别由 `patch-bili-build.mjs`、`patch-accelerator.mjs` 重打；`lib/client.js`、`lib/upstream.js`、根 `dsh.bundle.patch.yml` 由 `node scripts/install.mjs --build` 生成。具体来源规则见 MAINTENANCE，不要只手改生成物。
-
-当前清单覆盖 18 组 bili 补丁、7 项包装能力、5 项安装与运维行为，并逐项列出检查方法和未覆盖部分。上游已吸收的能力与本包新增能力分开记录。
-
-## 插件道的快照渲染（0.4.3，可关）
-
-dsh 这条道每轮整份重发历史，而 billion-context 的插件道默认「客户端说了算」，于是每轮出站前缀都重新推导：折叠一动中段就位移，上游缓存从中间开始对不上。同一个 fork 会话实测头两轮命中 10.0% / 11.3%。
-
-仓库里的 bili 构建让这条道也能用服务端快照渲染：前缀由服务端统一表渲染，只有尾部追加。实测同一个会话出站 963 KiB → 328–340 KiB，命中 99.4%。
-
-两层开关都在本机，不动插件代码：
-
-| 开关 | 位置 | 作用 |
-| --- | --- | --- |
-| 标记文件 | `~/.config/billion-context/plugin-lane-snapshot.on` | 允许这条道走快照渲染；删掉即回退 |
-| 灰度 | `billion-context.json` 的 `rollout.features.snapshotRender` | 打开才真正改变出站字节；关着只做影子观测 |
-
-**fork 出来的会话第一轮也走这条路**（0.4.4）：子会话在第一次保存前没有自己的记录，会退回旧路径整段重推；现在改成先借用父会话的记录。实测新建 fork 第一轮命中 69%（改动前是 0%，输入 26.5 万），第二轮起 99–100%。
-
-**fork 第一轮也命中（0.5.1）**：只借记录还不够——出站字节、缓存钥匙、标签里的时间三样都得跟父会话一致。实测同一台机器上 fork 新会话的首轮：
-
-| 阶段 | 首轮命中率 |
+| 默认设置 | 行为 |
 | --- | --- |
-| 只借父会话记录 | 32% |
-| ＋复用父会话的渲染结果 | 27.8%（钥匙不同，白复用） |
-| ＋沿用父会话的缓存钥匙 | 58.1% |
-| ＋标签不再带时间（过渡做法） | 99.3% |
-| ＋fork 时沿用父会话的时刻，时间戳重新打开 | **99.4%** |
+| 缓存钥匙 | 默认开启，保留显式的 enabled / auto / disabled 选择 |
+| 压缩增长阈值 | 80,000 token，显式配置优先 |
+| 图片 | 默认开启折叠、当前上传豁免与图像使用约定；首次发送长边上限 1200 |
+| 指定中转渠道 | `www.didudidu.asia`、`154.219.111.56` 仅补缺失的开启与 auto 设置，auto 优先 br |
 
-最后一条是定稿做法：fork 时把父会话「每条消息的时刻」抄给子会话，标签里的时间与父会话逐字一致，所以时间戳照旧显示，不需要改任何配置。改动上线后每个会话的下一轮会冷一次（标签字节变了）。
+手动关闭、选择 gzip 或其他显式配置会保留。其他站点可在加速器设置中自行开启。详细配置与常见问题见[使用说明](docs/USAGE.md)。
 
-**临时缺行与旧画面复用（0.5.3）**：最新块暂时找不到消息行时，仅在确认该块的全部消息都位于客户端尾部后，才允许这一轮跳过它。旧画面复用改为校验完整历史前缀的 SHA-256，并确认它引用的摘要块仍然有效；历史被编辑、缺少消息或摘要已失效时不复用。重启后的首轮没有旧画面，无法证明完整性时仍可能拒绝请求，不能保证所有存储故障都能无损绕过。
+## 0.6.5 更新
 
-安装会先在临时文件中应用补丁并运行消息完整性、请求压缩检查，再替换正式构建；重装保留手动禁用状态和渠道配置。重启脚本自动读取当前代理端口。
+修复插件页安装后原版未停用、两个指定站点未补默认值的问题，并修复启动竞态、账本资源释放、安装依赖遗漏和 Windows 图片编码。完整变化见 [CHANGELOG](CHANGELOG.md)。
 
-维护检查：
+## 文档与维护
 
-```sh
-node scripts/check-views.mjs
-node scripts/check-wrapper.mjs
-node scripts/check-image-retention.mjs
-node scripts/check-image-card.mjs
-node scripts/check-restart.mjs
-node scripts/smoke.mjs
-```
-
-宿主模块检查另用 `node scripts/check-runtime.mjs --host-modules <DSH 的 node_modules 目录>`；它使用实际 Loader、Cordis、SettingsForms 与原子写入模块。`node scripts/check-ledger-runtime.mjs --host-modules <同一目录>` 使用实际加速器、存储设施和自带 schema 依赖，检查异步打开与释放；替身范围分别在脚本开头列明。检查结果不能代替真实模型与整机重启验证。细节见 [PATCHES.md](PATCHES.md) 第 18、24 节。
-
-## 0.5.0：跟上上游主线
-
-0.1.213 之后上游又走了 155 个提交，这一版把它们全部吸收进来，我们的三处改动（请求体压缩、快照渲染开关、fork 首轮借用父会话记录）改成脚本对构建产物按锚点重打，不再是一份手改的二进制。
-
-用户能感觉到的变化：
-
-| 变化 | 说明 |
-| --- | --- |
-| fork 继承的折叠块不再丢 | 从父会话分出来时，父会话里已经折叠的段落一起带过来 |
-| 折叠摘要挪到折叠处 | 摘要落在它替代的那段内容的位置，原位留一个指针，前缀更稳 |
-| 出站不以 assistant 结尾 | 历史尾部是助手消息时自动补齐，避免上游不认这条前缀 |
-| 被切断的重放更聪明 | 只被切断的推理内容可以原样重放，不必整轮重来 |
-| 请求体上限 | 新增单条会话消息上限开关（默认关闭）＋ 32MiB 解码准入 |
-| 端口被占会强接管 | bili 进程端口卡死时直接接管，不用手杀 |
-
-## 维护：上游再发新版
-
-按 [MAINTENANCE.md](MAINTENANCE.md) 的来源基线、逐项清单和升级流程处理；仓库 [AGENTS.md](AGENTS.md) 要求后续修改同步记录差异及验证。
-
-当前构建默认开启 `prompt_cache_key`（0.5.4 已恢复并纳入补丁脚本），保留用户显式的 disabled/auto/enabled 设置。加速器仍支持按渠道启用 HTTP/2。本页缓存命中率是历史环境测量，不能保证新网关也相同。
+[文档目录](docs/README.md)提供使用说明、[行为规范](docs/SPEC.md)、[维护流程](docs/MAINTENANCE.md)、[实现历史](docs/PATCHES.md)和[本版核对记录](docs/audits/2026-11-12-release.md)。维护入口为 [AGENTS.md](AGENTS.md)。
 
 ## 许可
 
-本仓库的补丁与包装层：MIT。`vendor/billion-context` 来自 [ranxianglei/billion-context](https://github.com/ranxianglei/billion-context)（MIT），`vendor/dsh-plugin-model-request-accelerator` 来自 [No-ni/dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator)，其中的压缩闸门 vendored 自 deshark42/dsh-compaction-basic-disable（MIT）。`vendor/yaml` 为 yaml 2.9.1（ISC），`vendor/zod` 为 Zod 4.4.3（MIT），来源与分发范围见各目录的 SOURCE.md 与 LICENSE。
-
-## 版本
-
-版本号是根目录 `package.json` 里的三位 semver，通常发一版把最后一位加一。2026-11-12 按用户要求，本次修复仍为 0.6.5；构建写入稳定的 `patchBuild.id` 与 `createdAt`，同版的新修复也能被检查更新识别，重复构建不会制造新更新。设置 → 模型请求加速 页面底部那行「检查更新」查的就是这个仓库。
+补丁与包装层采用 [MIT](LICENSE)。上游项目及内置 YAML、Zod 的来源与许可见[维护说明](docs/MAINTENANCE.md#1-两个来源分别锁定)。
