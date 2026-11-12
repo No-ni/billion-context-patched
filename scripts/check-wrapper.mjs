@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
@@ -13,6 +13,7 @@ import { mountMergedPlugins } from "../lib/startup.js";
 import { compressionDefaultOps, compressionPolicyDefaultOps } from "../lib/defaults.js";
 import { relayChannelsFromProfile, rewriteUpstreamPatch } from "../lib/profile.js";
 import { hasPublishedUpdate } from "../lib/version.js";
+import { assertUpstreamUx } from "./check-upstream-ux.mjs";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
 // Vendor manifests are not dependency-install roots for npm/Git installs.
@@ -285,7 +286,8 @@ try {
   assert(existsSync(join(stale, "vendor/yaml/LICENSE")));
   assert(existsSync(join(stale, "vendor/zod/index.js")));
   assert.equal(JSON.parse(readFileSync(join(stale, "vendor/dsh-plugin-model-request-accelerator/package.json"))).version, "2.3.0");
-  assert.equal(createRequire(join(root, "package.json")).resolve("bili-context-patch"), join(stale, "lib/index.js"));
+  // macOS resolves the tmpdir through /var -> /private/var, so compare real paths.
+  assert.equal(realpathSync(createRequire(join(root, "package.json")).resolve("bili-context-patch")), realpathSync(join(stale, "lib/index.js")));
   const bytes = readFileSync(join(root, "cordis.patch.yml"));
   const dist = join(root, "plugins/bili-context-patch/vendor/billion-context/dist/index.js");
   const installed = readFileSync(dist);
@@ -309,9 +311,10 @@ try {
   execFileSync(process.execPath, [join(repo, "scripts/install.mjs"), "--build", "--out", output],
     { timeout: 45000, stdio: "pipe" });
   const built = JSON.parse(readFileSync(join(output, "package.json")));
-  assert.equal(built.version, "0.6.5");
+  assert.equal(built.version, JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).version);
   assert.match(built.patchBuild.id, /^[a-f0-9]{64}$/);
   for (const file of ["lib/index.js", "lib/upstream.js", "lib/defaults.js", "lib/client.js", "vendor/yaml/LICENSE", "vendor/zod/index.js", "dsh.bundle.patch.yml"]) assert(existsSync(join(output, file)));
+  assertUpstreamUx(join(output, "vendor/billion-context/dist/index.js"), join(output, "lib/client.js"));
   execFileSync(process.execPath, [join(repo, "scripts/install.mjs"), "--build", "--out", output],
     { timeout: 45000, stdio: "pipe" });
   assert.deepEqual(JSON.parse(readFileSync(join(output, "package.json"))).patchBuild, built.patchBuild);

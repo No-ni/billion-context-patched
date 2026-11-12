@@ -6,9 +6,9 @@
 
 - 上游：<https://github.com/ranxianglei/billion-context>（MIT，Copyright (c) 2026 ranxianglei）
 - 本分支基线：上游 `master` 的 `406193b2`（上游版本号仍是 0.1.213，比那次发版多 155 个提交，见第 15 节）
-- 我们的改动不是一份 diff：bili 构建上的十八组补丁由 `scripts/patch-bili-build.mjs` 按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
+- 我们的改动不是一份 diff：bili 构建上的二十一组补丁由 `scripts/patch-bili-build.mjs`（B20 在 `scripts/patch-bili-client.mjs`）按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
 
-项目需求及验收以 [SPEC.md](SPEC.md) 为准。当前维护分为 bili 构建 B1–B18、包装包 W1–W7、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
+项目需求及验收以 [SPEC.md](SPEC.md) 为准。当前维护分为 bili 构建 B1–B21、包装包 W1–W7、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
 
 ## 0. 一页看完（改了什么、下次怎么核对）
 
@@ -20,12 +20,12 @@
 | --- | --- | --- | --- |
 | 包装包（我们自己的代码） | `lib/index.js`、`lib/fork-lineage.js`、`lib/client.template.js`、`package.json` | 一个 Loader 条目里挂 bili、压缩闸门、加速器；把两个客户端 bundle 的工厂体合成一个 `id`；fork 时补父会话血缘；`/api/bili-context-patch/version` 的版本与更新接口；组合层静态 disabled 行与启动时 guard 关掉上游条目 | 与上游无关，不用重打 |
 | 组合层 | `dsh.bundle.patch.yml`（生成物） | 只保留自己那条 `insert`，其余是 bili 原有的层：`compaction-basic auto: false`、四个 preset 注入 `biliBasicCompactionPolicy`、`llm-deepseek`/`llm-deepseek-account` 的 retry 策略（含 `MALFORMED_RESPONSE`）；两个上游 insert 行删掉 | `install.mjs` 重跑一次即按新层重新生成 |
-| bili 构建产物 | `vendor/billion-context/dist/index.js` | 十八组文本补丁（0.2 的表） | `node scripts/patch-bili-build.mjs`，锚点对不上会报错退出 |
+| bili 构建产物 | `vendor/billion-context/dist/index.js` | 二十组文本补丁（0.2 的表；B20 改的是客户端 bundle `lib/client.js`） | `node scripts/patch-bili-build.mjs`，锚点对不上会报错退出 |
 | 安装期 | `scripts/install.mjs`、`scripts/check-views.mjs`、`scripts/check-image-card.mjs`、`scripts/smoke.mjs`、`scripts/restart.mjs` | 取源顺序、构建校验与冒烟（视图 → 图像卡 → 请求体压缩）、客户端 bundle 合成、profile 改写（dependencies / bundles / 渠道开关）、`--build` 产物生成 | 与上游无关；上游客户端 bundle 封装格式变了会直接报错退出 |
 
 当前仍保留指定中转主机渠道的压缩缺省值规则（仅补缺失键）。`promptCache.routing=enabled` 默认值已在 0.5.4 恢复并纳入第 11 组补丁，见第 7、19 节；显式配置优先。
 
-### 0.2 我们对 bili 构建的十八组补丁
+### 0.2 我们对 bili 构建的二十一组补丁
 
 改的都是 `vendor/billion-context/dist/index.js`，由 `scripts/patch-bili-build.mjs` 按顺序重打。多数新插入位置要求唯一命中；步骤 6/7 在缺少锚点时仍可能打印 skipped。必须逐项检查输出并验证最终构建，不能把退出码当成十一项全齐的证明。
 
@@ -49,6 +49,9 @@
 | 16 | 新增顶层配置键登记，避免启动警告 | `,"autoModeForge","imageRescale","guardrails","cacheKeepalive"]);` | imageRetention / imageRetentionKeepLastUser / imageRetentionMaxDim / imagePrompt / imageRescaleMaxDim | 第 20 节 |
 | 17 | bili Web UI「配置」页新增「图像」卡（四个开关 + 保存 + 恢复默认），中英词条一并补齐 | `function translate(locale,key2,vars){`、`<div class="card" id="summary-settings">`、`    function hydrateQuickConfig(cfg) {`、`            await putCfg(sq, { file: raw });` 那段的 `});` 之后、初始化调用点、两处 id 列表 | `patches/image-card.{markup,script,listeners}.block.js`；带哨兵，重复运行按整段替换或跳过 | 第 21 节 |
 | 18 | 压缩增长阈值（`compress.nudgeGrowthTokens`）的默认值改成 80000：内核 `defaultConfig` 的 floor/cap、Web UI 快速配置的默认值、中英文提示里的「内核默认 50000」一起对齐 | `growthFloor:5e4,growthCap:5e4`、`const NUDGE_DEFAULT = 50000, NUDGE_STEP = 5000`、`内核默认 50000`（zh）、`kernel default 50000`（en） | 只改缺省值，配置文件或环境变量里的显式值照旧优先；页面删掉该键即回落到 80000 | 第 22 节 |
+| 19 | 删掉上游熔断：不再按主机累计失败、不提前失败、不发 503 与 retry-after，连接类失败按普通失败交给 DSH 重试 | `var CIRCUIT_OPEN_AFTER=3;`、`function recordUpstreamCircuitFailure(url,error,viaProxy,detail){`、`function getOpenUpstreamCircuits(){`、`const circuitBlock=upstreamCircuitBlockReason(upstreamUrl);`、`const openCircuits=getOpenUpstreamCircuits();`、`/__bili/upstreams` 路由、`clearUpstreamAlertsForHost(...);recordUpstreamCircuitSuccess(upstreamUrl)`、`recordUpstreamCircuitFailure(...)` 整句 | 第 19 节；幂等判据是没有 `CIRCUIT_OPEN_AFTER` 与 `/__bili/upstreams`。保留 `classifyUpstreamFailure`、`describeUpstreamFailure`、`isFailFastUpstreamKind` 与 alerts | 第 25 节 |
+| 20 | 删掉客户端 shell 上的上游红框横幅、10 秒轮询与四个词条；页面里的连接失败提示改成读者能看懂的说法 | 客户端 bundle `dist/agent/dsh-native-client.js`：`var UPSTREAM_POLL_MS = 1e4;`、`function parseUpstreamHealth(raw)`、`const upstreamBanner = ...`、`ctx.slots.inject("shell.overlay", ...)` 那四行、`upstreams_label`/`upstreams_down_one`/`upstreams_down_many`/`upstream_retry_hint`（中英各一份） | `scripts/patch-bili-client.mjs`，由 `install.mjs` 合并客户端 bundle 前施加；幂等，二次运行打印 already removed | 第 25 节 |
+| 21 | 代理失败与流内联错误改成中文短句，英文诊断只进 detail 与日志；413 保留、其余 502，不再发 retry-after | `function buildProxyFailureResponse(msg,err2){`、`var TRANSPORT_FAILURE_LABELS={`、两处 `adapter.emitError(`、`upstream stream truncated (`、`ended before a completion event`、`[ACP] stream error:`、note 三元与“the follow-up request to the model failed”句 | 第 21 节，新增 `__biliFailureTextZh(msg,uf)`；<b>不能改</b> `[ACP] ... FAILED:` 里的 `FAILED`（吸收判定依赖它） | 第 25 节 |
 
 第 4 组依赖第 2、3 组，第 8 组依赖 pin，第 10 组升级第 4、8、9 组并同时检查普通与增量拼接点；按脚本顺序执行，所有步骤支持重复运行。
 
@@ -714,3 +717,31 @@ CLI 在复制运行文件前预检 profile；自己的 accelerator vendor 优先
 另一个独立安装隐患是 ledger 的静态 zod 导入：嵌套 accelerator/package.json 中的依赖不会由包装包根清单安装，旧测试又绕开 ledger，可能依赖机器上恰好残留的原版依赖。现在自带 Zod 4.4.3 Node ESM runtime（MIT），账本用相对路径导入；CLI、管理器、--out 和现有安装镜像都携带它，构建标识也包括其文件。无需 profile 级 npm 安装。来源与精确范围在 vendor/zod/SOURCE.md。
 
 check-ledger-runtime.mjs 用实际 Cordis、Loader、Storage、DomainFacility、内置加速器与 Zod 验证：关闭等待迟到打开；精确旧片段先打开再自己关闭，合并账本无重复占用；设施迟到/重载；排队写入早于关闭；读失败后延迟写不抛错、owned handle 仍释放；表解析失败不泄漏；外部账本不被包装包关闭。介质、连接路由及模型迭代器是隔离替身，不调用真实模型。
+
+## 25. 2026-11-12：去掉熔断与上游横幅，失败文案中文化（B19–B21，0.6.6）
+
+### 25.1 起因与用户判断
+
+「1 个上游不可用」这条红框横幅、以及 `LlmError: 503 "acp-proxy failure: connect-timeout <host> (circuit open, next probe +46s)"` 这类报错，都是我们在 bili 里加的熔断与健康上报自己造出来的（词条在客户端 i18n 里写成 `\u4E2A\u4E0A\u6E38` 转义，早期按中文字面全盘搜索查不到）。用户要求：不要熔断（重试交给 DSH，它有自己的退避与上限）、横幅整个剥离干净（太丑且消不掉）、报错统一翻译成看得懂的话、不做额外探测。
+
+熔断原本是 `CIRCUIT_OPEN_AFTER=3`、`circuitProbeCooldownMs=60000`、`MAX_CIRCUITS=32`：同一主机连续三次连接类失败后进入熔断，60 秒内直接 503 不发请求；到点的 half-open 用一条真实请求当探测。它不额外探活、不额外发流量，原本是避免整包上下文反复重发，但把“连不上”变成了插件自己的失败语义，还重复了 DSH 已有的状态显示。按用户判断删除。
+
+### 25.2 删了什么、留了什么
+
+删（dist，第 19 节）：`CIRCUIT_OPEN_AFTER` 起的整块（`blockReasonText`、`upstreamCircuitBlockReason`、`upstreamCircuitLastFailureKind`、`FAIL_FAST_LOG_INTERVAL_MS`、`noteCircuitFailFastLog`、`upstreamCircuitRetryAfterSeconds`）、`recordUpstreamCircuitFailure`、`recordUpstreamCircuitSuccess`、`getOpenUpstreamCircuits`、`getUpstreamHealthReport`、`/__bili/upstreams` 路由，以及 fetch 路径上的四处调用（提前失败、成功清理、失败记账、把 OPEN 状态拼进 `handleAcpStatus`）。
+
+删（client，第 20 节）：`UPSTREAM_POLL_MS`、`parseUpstreamHealth`、`upstreamBanner`、`shell.overlay` 注入四行、`upstreams_label`/`upstreams_down_one`/`upstreams_down_many`/`upstream_retry_hint`（中英各一份）。十秒轮询与覆盖层一起消失，不留开关。
+
+留：`classifyUpstreamFailure`、`describeUpstreamFailure` 与 `isFailFastUpstreamKind`（出站重放梯子还在用）；alerts（`noteUpstreamAlert`、`clearUpstreamAlertsForHost`、`pruneStaleAlerts`）只进 `/__bili/diagnostics`，是本地诊断，不上屏、不影响请求；502/413 语义与英文 `detail`、`upstreamFailure`、日志行保留，便于反馈时对上游。
+
+### 25.3 报错口径
+
+`buildProxyFailureResponse` 的 error 字段改成 `__biliFailureTextZh(msg,uf)`：连接超时、拒绝连接、DNS/TLS、代理重置、响应超时等给出「主机 + 中文短句 + 错误码 + ——dsh 会自动重试」；本机取消只说取消（不承诺重试）；请求体过大说清已经压过一遍仍超限；错误上没有任何上游标记时（例如插件自身出错）统一说「bili 代理请求失败，详情见日志」，既不把本地错误说成上游失败，也不谎称会自动重试。请求体过大仍是 413，其余 502，`retry-after` 响应头与 `circuitOpen`、`retryAfterSeconds` 字段一并去掉。流内联错误（两处 `adapter.emitError`、`upstream stream truncated (`、`ended before a completion event`、`[ACP] stream error:`）同样中文化；`[ACP] ... FAILED:` 里的 `FAILED` 是吸收判定依赖（`!pr2.result.includes("FAILED")`），保持原样。dest 用 latin1 读写，中文一律写成反斜杠 u 转义。
+
+### 25.4 验证与回滚
+
+- `node scripts/install.mjs --build --out <dir>` 的冒烟链新增 `check-upstream-ux.mjs`，顺序为 视图 → 图像卡 → upstream ux → 请求体压缩；`check-wrapper.mjs` 对生成产物再断言一次。
+- `check-upstream-ux.mjs` 断言 dist 没有熔断常量、路由、`circuit open`、`retryAfterSeconds`、`circuitOpen`，客户端没有横幅与四个词条，并实跑 `__biliFailureTextZh` 验证六类文案。注意 `retry-after` 字符串在 dist 里还有 8 处（限流与 `UpstreamHttpError` 的既有语义），不能直接断言它消失。
+- 提交前从 HEAD 的 dist 重新跑 `node scripts/install.mjs --build`，产物与 `--build --out` 临时目录的结果字节一致（`lib/client.js`、`vendor/billion-context/dist/index.js`、`dsh.bundle.patch.yml` 与 `patchBuild` 全同），说明补丁脚本与已提交产物没有脱节。
+- `check-wrapper.mjs` 第 289 行的路径断言原先在 macOS 上恒红（tmpdir 经 `/var → /private/var`，`git archive HEAD` 的干净副本同样失败，属既有环境问题），改用 `realpathSync` 比较两侧，整套检查恢复全绿。
+- 回滚任一项只删对应补丁节（第 19、21 节）或 `scripts/patch-bili-client.mjs` 里的横幅步骤，从干净上游重打；不影响代理其它行为，版本号按发布规则处理（本次为 0.6.6）。

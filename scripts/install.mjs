@@ -38,6 +38,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { relayChannelsFromProfile, rewriteUpstreamPatch } from "../lib/profile.js";
 import { patchAcceleratorSources } from "./patch-accelerator.mjs";
+import { patchBiliClientBundle } from "./patch-bili-client.mjs";
 
 const WRAPPER = "bili-context-patch";
 const UPSTREAM = "billion-context";
@@ -235,6 +236,10 @@ if (!dryRun && !argv.includes("--skip-smoke") && smokeTarget) {
       stdio: "inherit", timeout: 30000,
       env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
     });
+    execFileSync(process.execPath, [join(here, "check-upstream-ux.mjs"), smokeTarget], {
+      stdio: "inherit", timeout: 30000,
+      env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
+    });
     execFileSync(process.execPath, [join(here, "smoke.mjs"), smokeTarget], {
       stdio: "inherit",
       timeout: 30000,
@@ -419,10 +424,19 @@ const extractFactory = (source, label) => {
 const biliVersion = JSON.parse(readFileSync(join(target, "package.json"), "utf8")).version;
 const templatePath = join(here, "..", "lib", "client.template.js");
 const template = readFileSync(templatePath, "utf8");
-const biliClientBody = extractFactory(
-  readFileSync(join(target, "dist", "agent", "dsh-native-client.js"), "utf8"),
-  UPSTREAM,
-);
+// The upstream client bundle ships a status panel for the proxy's own upstream
+// host and a poll behind it. It is removed here rather than in the vendor tree:
+// the vendored file stays the untouched upstream artifact, and every install
+// rebuilds the same bundle from it (scripts/patch-bili-client.mjs).
+let biliClientSource;
+try {
+  const patched = patchBiliClientBundle(readFileSync(join(target, "dist", "agent", "dsh-native-client.js"), "utf8"));
+  for (const step of patched.steps) say("bili client: " + step);
+  biliClientSource = patched.text;
+} catch (error) {
+  fail("bili client bundle could not be patched: " + error.message);
+}
+const biliClientBody = extractFactory(biliClientSource, UPSTREAM);
 const acceleratorClientBody = extractFactory(
   readFileSync(join(acceleratorPath, "lib", "client.js"), "utf8"),
   ACCELERATOR,

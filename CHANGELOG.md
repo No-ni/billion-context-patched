@@ -2,6 +2,16 @@
 
 版本号以根目录 [package.json](package.json) 为准。这里记录用户可见的变化；实现过程见 [docs/PATCHES.md](docs/PATCHES.md)，规范与验证见 [docs/](docs/README.md)。
 
+## 0.6.6 · 2026-11-12
+
+- 去掉 bili 自己的上游熔断：连接类失败不再累计、不再提前失败，不再返回 503 与 retry-after；失败按普通错误交给 DSH 自己的退避重试。告警记录保留，只进 `/__bili/diagnostics`（B19）。
+- 去掉 shell 上「N 个上游不可用」的红色横幅与十秒轮询，`/__bili/upstreams` 接口一并删除；连接失败提示改成读者能看懂的中文（B20）。
+- 模型请求失败的报错改成中文短句（超时、拒绝连接、DNS/TLS、代理重置、请求体过大等），`acp-proxy failure: ...` 这类内部措辞只留在 detail 与日志里（B21）。
+- 新增 `scripts/check-upstream-ux.mjs`，把上述三条纳入安装冒烟链与包装包检查。
+- 错误上没有上游失败标记时给出「bili 代理请求失败，详情见日志」，不再把本地错误说成上游失败、也不谎称会自动重试。
+- `check-wrapper.mjs` 的临时目录路径断言改用 `realpathSync`：macOS 的 tmpdir 经 `/var → /private/var`，旧写法在干净副本上也是红的，属既有环境问题。整套检查恢复为绿。
+- 版本号从 0.6.5 升到 0.6.6，B19–B21 从工作树进入提交。
+
 ## 0.6.5 · 2026-11-12
 
 - 修复从插件页安装后原版插件仍启用的问题。首次启用自动停用 `billion-context` 与 `dsh-plugin-model-request-accelerator`，迁移旧加速器设置并保留用户已有配置。

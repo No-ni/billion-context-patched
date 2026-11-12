@@ -38,7 +38,9 @@
 //      rendered view is reused instead.
 //
 // Usage: node scripts/patch-bili-build.mjs [dist/index.js]
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -572,7 +574,115 @@ for (const [label, find, replacement] of NUDGE_EDITS) {
   nudged++;
 }
 console.log("nudge growth default: " + (nudged > 0 ? "patched (" + nudged + "/" + NUDGE_EDITS.length + ")" : "already patched"));
+// ── 19. no upstream circuit breaker ────────────────────────────────────────
+// The proxy counted pre-response failures per upstream host and, after three,
+// stopped contacting that host for a minute: every request then failed with
+// "503 acp-proxy failure: connect-timeout <host> (circuit open, next probe +46s)"
+// before a socket was opened, and a half-open probe let exactly one real request
+// through. dsh already retries with its own backoff and cap, so this was a
+// second, invisible retry policy; its only visible effects were that wording and
+// a red banner (B20) nobody could dismiss. Requests fail normally now, and dsh's
+// retry policy decides what happens next. What stays: classifyUpstreamFailure,
+// isFailFastUpstreamKind (the outbound replay ladder shares it), the alert
+// ledger (diagnostics only) and the English hints.
+const cutSpan = (label, from, to, insert = "") => {
+  const start = text.indexOf(from);
+  const end = start < 0 ? -1 : text.indexOf(to, start + from.length);
+  if (start < 0 || end < 0) {
+    console.error(label + ': anchor "' + from.slice(0, 56) + '..." not found — upstream changed, re-derive the patch');
+    process.exit(1);
+  }
+  text = text.slice(0, start) + insert + text.slice(end);
+  changed = true;
+};
+const circuitGone = !text.includes("function upstreamCircuitBlockReason(url,now=Date.now())") && !text.includes("/__bili/upstreams");
+if (circuitGone) {
+  console.log("upstream circuit: already removed");
+} else {
+  cutSpan("upstream circuit", "var CIRCUIT_OPEN_AFTER=3;", "function truncateAtBoundary(s3,max){");
+  cutSpan("upstream circuit", "function recordUpstreamCircuitFailure(url,error,viaProxy,detail){", "function getOpenUpstreamCircuits(){");
+  cutSpan("upstream circuit", "function getOpenUpstreamCircuits(){", "init_logger();init_knobs();");
+  cutSpan("upstream circuit", "const circuitBlock=upstreamCircuitBlockReason(upstreamUrl);", "const throttleModel=throttleModelHint??");
+  cutSpan("upstream circuit", "const openCircuits=getOpenUpstreamCircuits();", "const throttleHolds=activeThrottleHolds();");
+  cutSpan("upstream circuit", 'if(req.method==="GET"&&req.url==="/__bili/upstreams"){', 'if(req.method==="GET"&&(req.url==="/__bili/sessions"||');
+  replaceOnce("upstream circuit", "clearUpstreamAlertsForHost(upstreamUrl);recordUpstreamCircuitSuccess(upstreamUrl)", "clearUpstreamAlertsForHost(upstreamUrl)");
+  replaceOnce("upstream circuit", "recordUpstreamCircuitFailure(upstreamUrl,error,proxyUrl!==void 0,failure.message);", "");
+  console.log("upstream circuit: removed");
+}
+
+// ── 21. upstream failures read in Chinese ──────────────────────────────────
+// dsh prints the error field of a proxy 5xx straight into the transcript, so a
+// failed request used to read "acp-proxy failure: connect-timeout ETIMEDOUT
+// <host> (circuit open, next probe +46s)": internal vocabulary, and since patch
+// 19 describing a mechanism that no longer exists at all. The in-band stream
+// errors have the same problem. Everything the reader can see is one Chinese
+// sentence now; the English diagnostic stays in detail, in upstreamFailure and
+// in the log.
+const ZH = escapedCopy;
+const FAIL_LABELS_ZH = {
+  "client-abort": "：请求被本机取消了",
+  "upstream-timeout": "响应超时，一直等不到数据",
+  "upstream-headers-timeout": "迟迟没有返回第一个字节",
+  "proxy-reset": "连接被中间代理掐断",
+  "upstream-reset": "连接被上游掐断",
+  "connect-refused": "拒绝连接",
+  "connect-timeout": "连接超时，三次握手没有完成",
+  "upstream-unreachable": "网络不可达",
+  dns: "域名解析失败",
+  tls: "TLS 握手失败",
+  unknown: "连接失败"
+};
+const ZH_FAILURE_FN = [
+  "function __biliFailureTextZh(msg,uf){",
+  'const kind=uf&&typeof uf.kind==="string"?uf.kind:void 0;',
+  'const host=uf&&typeof uf.host==="string"&&uf.host.length>0?uf.host:void 0;',
+  'const code=uf&&typeof uf.code==="string"&&uf.code.length>0?uf.code:"";',
+  'const who=host!==void 0?host:"' + ZH("上游端点") + '";',
+  'if(msg.indexOf("exceeds")>=0)return"' + ZH("请求体太大：bili 已经压过一遍，仍然超过这个端点允许的上限") + '";',
+  'if(uf===void 0)return"' + ZH("bili 代理请求失败，详情见日志") + '";',
+  "const labels=" + asciiJson(FAIL_LABELS_ZH) + ";",
+  'const known=kind!==void 0&&typeof labels[kind]==="string";',
+  'if(kind==="client-abort")return who+labels[kind];',
+  'const tail=code!==""?" ["+code+"]":"";',
+  'if(!known)return who+"' + ZH(" 请求失败") + '"+tail+"' + ZH("——dsh 会自动重试") + '";',
+  'return who+" "+labels[kind]+tail+"' + ZH("——dsh 会自动重试") + '"}',
+].join("");
+
+if (text.includes("__biliFailureTextZh")) {
+  console.log("upstream failure text: already translated");
+} else {
+  cutSpan("upstream failure text", "function buildProxyFailureResponse(msg,err2){", "let status;const headers=", ZH_FAILURE_FN + "function buildProxyFailureResponse(msg,err2){const uf=upstreamFailureOf(err2);const errorField=__biliFailureTextZh(msg,uf);");
+  replaceOnce("upstream failure text", '}else if(uf&&uf.circuitOpen===true){status=503;if(typeof uf.retryAfterSeconds==="number")headers["retry-after"]=String(Math.max(1,Math.ceil(uf.retryAfterSeconds)))}else{status=502}', "}else{status=502}");
+  replaceOnce("upstream failure text", 'if(uf&&uf.circuitOpen===true)diag.circuitOpen=true;if(uf&&typeof uf.retryAfterSeconds==="number")diag.retryAfterSeconds=uf.retryAfterSeconds;', "");
+  cutSpan("upstream failure text", "var TRANSPORT_FAILURE_LABELS={", ";function activeAbsorbToolName(", "var TRANSPORT_FAILURE_LABELS=" + asciiJson(FAIL_LABELS_ZH));
+  const noteZh = 'const note=committedTokens>0?`' + ZH("已压缩并提交（约省 ") + '${committedTokens.toLocaleString("en-US")} tokens' + '${committedBlocks>0?`' + ZH("，共 ") + '${committedBlocks}' + ZH(" 块") + '`:' + '""}' + ZH("）；") + '`:absorbed?"' + ZH("上下文已提交，继续。 ") + '":"";';
+  cutSpan("upstream failure text", "const note=committedTokens>0?", "const msg=", noteZh);
+  replaceOnce("upstream failure text", "the follow-up request to the model failed (${TRANSPORT_FAILURE_LABELS[kind]}) before any response \\u2014 your context is intact, resend your last message to continue", ZH("发给模型的后续请求失败了（") + "${TRANSPORT_FAILURE_LABELS[kind]}" + ZH("）；还没有收到任何响应，上下文没有被破坏，重发上一条消息即可继续"));
+  replaceOnce("upstream failure text", 'adapter.emitError(`upstream error ${e.status}${suffix}: ${e.body.slice(0,200)}`)', 'adapter.emitError(`' + ZH("上游返回错误 ") + '${e.status}${suffix}' + ZH("：") + '${e.body.slice(0,200)}`)');
+  replaceOnce("upstream failure text", 'adapter.emitError(`upstream error ${respResult.response.status}: empty response body`)', 'adapter.emitError(`' + ZH("上游返回错误 ") + '${respResult.response.status}' + ZH("：响应体为空") + '`)');
+  replaceOnce("upstream failure text", 'const detail=streamError!==void 0?`upstream stream error: ${streamError}`:"no completion event";', 'const detail=streamError!==void 0?`' + ZH("上游流错误：") + '${streamError}`:"' + ZH("没有收到结束事件") + '";');
+  replaceOnce("upstream failure text", 'const msg=`upstream stream truncated (${detail}; round ${round}, ${partialText} text chars + ${partialReasoning} reasoning chars received)`', 'const msg=`' + ZH("上游响应中断（") + '${detail}' + ZH("；第 ") + '${round}' + ZH(" 轮，已收到 ") + '${partialText}' + ZH(" 字正文、") + '${partialReasoning}' + ZH(" 字推理）") + '`');
+  replaceOnce("upstream failure text", '"upstream stream ended before a completion event; this turn may be incomplete"', '"' + ZH("上游在结束事件之前就断流了，这一轮可能不完整") + '"');
+  replaceOnce("upstream failure text", "[ACP] stream error: ${message}", "[ACP] " + ZH("流错误：") + "${message}");
+  console.log("upstream failure text: translated");
+}
 if (changed) {
+  // The harness loads this build as a module, and a script-mode check is not the
+  // same grammar: an anchor that leaves an extra brace can pass one and fail the
+  // other, and the smoke chain then dies far away with a raw V8 position. Check
+  // it as a module before anything is written.
+  const probe = join(tmpdir(), "bili-parse-check-" + process.pid + ".mjs");
+  writeFileSync(probe, text, "latin1");
+  try {
+    execFileSync(process.execPath, ["--check", probe], { stdio: "pipe" });
+  } catch (error) {
+    rmSync(probe.replace(/\.mjs$/, ".keep.mjs"), { force: true });
+    renameSync(probe, probe.replace(/\.mjs$/, ".keep.mjs"));
+    const detail = String(error.stderr ?? error).split("\n").slice(0, 4).join("\n");
+    console.error("patched build does not parse as a module; nothing written\n" + detail);
+    process.exit(1);
+  }
+  rmSync(probe, { force: true });
   writeFileSync(target, text, "latin1");
   console.log("written " + target);
 }
