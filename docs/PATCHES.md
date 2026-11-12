@@ -1,14 +1,14 @@
 # 相对上游的实现细节与历史
 
-当前差异清单、完整来源提交、覆盖范围与升级流程统一见 [MAINTENANCE.md](MAINTENANCE.md)。下文包含历史方案；各节的旧假设和测量不能替代当前实现，第 16、17 节的复用条件以第 18 节为准。
+独立修改和既定行为的唯一清单是 [SPEC.md](SPEC.md)；实现映射、完整来源提交、覆盖范围与升级流程见 [MAINTENANCE.md](MAINTENANCE.md)。下文包含历史方案；各节的旧假设和测量不能替代当前实现，第 16、17 节的复用条件以第 18 节为准。
 
 文中的代码路径与命令均相对于仓库根目录。用户说明见 [USAGE.md](USAGE.md)，版本摘要见 [CHANGELOG.md](../CHANGELOG.md)。
 
 - 上游：<https://github.com/ranxianglei/billion-context>（MIT，Copyright (c) 2026 ranxianglei）
 - 本分支基线：上游 `master` 的 `406193b2`（上游版本号仍是 0.1.213，比那次发版多 155 个提交，见第 15 节）
-- 我们的改动不是一份 diff：bili 构建上的二十一组补丁由 `scripts/patch-bili-build.mjs`（B20 在 `scripts/patch-bili-client.mjs`）按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
+- 我们的改动不是一份 diff：bili 构建上的二十二组补丁由 `scripts/patch-bili-build.mjs`（B20 在 `scripts/patch-bili-client.mjs`）按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
 
-项目需求及验收以 [SPEC.md](SPEC.md) 为准。当前维护分为 bili 构建 B1–B21、包装包 W1–W7、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
+项目需求及验收以 [SPEC.md](SPEC.md) 为准。当前维护分为 bili 构建 B1–B22、包装包 W1–W7、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
 
 ## 0. 一页看完（改了什么、下次怎么核对）
 
@@ -745,3 +745,23 @@ check-ledger-runtime.mjs 用实际 Cordis、Loader、Storage、DomainFacility、
 - 提交前从 HEAD 的 dist 重新跑 `node scripts/install.mjs --build`，产物与 `--build --out` 临时目录的结果字节一致（`lib/client.js`、`vendor/billion-context/dist/index.js`、`dsh.bundle.patch.yml` 与 `patchBuild` 全同），说明补丁脚本与已提交产物没有脱节。
 - `check-wrapper.mjs` 第 289 行的路径断言原先在 macOS 上恒红（tmpdir 经 `/var → /private/var`，`git archive HEAD` 的干净副本同样失败，属既有环境问题），改用 `realpathSync` 比较两侧，整套检查恢复全绿。
 - 回滚任一项只删对应补丁节（第 19、21 节）或 `scripts/patch-bili-client.mjs` 里的横幅步骤，从干净上游重打；不影响代理其它行为，版本号按发布规则处理（本次为 0.6.6）。
+
+## 26. 2026-11-12：快照降级后的预检恢复（B22，0.6.7）
+
+故障证据见[预检超窗审计](audits/2026-11-12-preflight-compression.md)。冷加载首轮可能有 active 压缩块，但当前 transcript 不能锚住它们，快照因此回落到原始历史。已有块仍占据压缩范围，预检可能得到零进展；旧逻辑只在新增压缩成功后重新准备，保存稍后落定也不能救回本轮。只有 reasoning 缺失被原代码明确容忍，不能据此判断全部引用失效。
+
+第 22 节在四协议共用的预检入口调用 `__biliRecoverSnapshot`：仅 live 快照降级、active 块存在且没有合格画面时，等待 `getStore().afterNextFlush(session.id)`，最多一秒；保存成功后重新调用现有 `runPrepare` 一次。重做继续执行原有 seam、前缀与跳过块覆盖校验，不修改引用或清空块；请求统计在 finally 恢复。等待失败、超时或客户端断开时清理本轮定时器和关闭监听，不循环等待；断开不再转发。
+
+重做后的完整预算仍由原预检判断。持续的 `block-unanchored`、`store-unavailable`、`transcript-empty`、`transcript-error`、`view-pointer-missing-row` 可在没有确定性过大、图片/协议开销独自超限或终止性上游错误时保留可重试标记；seam/覆盖失败不因此自动重试。窗口和 413 保护保留。
+
+同节落实 B19/B21 遗漏的响应：HTTP 与四种已提交流错误共用中文构造器，英文放 detail，保留 retryable 与 413/502；摘要 429 不再映射本地 503，不再写固定 retry-after；本地解码繁忙同样改为中文 502 + retryable，原内存准入限制保持。真实上游限流的既有 hold/转发不属于连接熔断，继续保留。
+
+`patches/preflight.block.js` 使用可替换哨兵，其余入口用精确旧/新片段迁移。`check-preflight.mjs` 执行最终构建的真实渲染、外层预检及响应函数，模拟存储/摘要，接入安装候选冒烟链；检查块与产物一致。修复证据、全部条款核对、迁移幂等与未覆盖项见[0.6.7 核对](audits/2026-11-12-preflight-fix.md)。回滚须移除第 22 节并从上一构建或干净上游重建，单删 helper 会留下调用。
+
+## 27. 2026-11-12：文档分工、统一检查与发布
+
+README 去掉版本号和逐版摘要，CHANGELOG 只保留用户可见变化并加入 Unreleased；原有 SPEC 继续作为唯一独立修改清单，保留全部稳定编号。MAINTENANCE 去掉重复行为叙述，只保留来源、环境、实现/检查映射与操作；AGENTS 明确每次更新、修复、合并或升级前必读及防覆盖规则，接手不再依赖外层工作区。
+
+统一检查复用既有脚本：offline 不访问用户 profile/真实模型，但允许本机模拟端口与系统编码器；host 显式指定实际模块，缺依赖不能记为通过。维护检查核对全部稳定 ID 与文档链接，版本检查共用 CHANGELOG 提取器。CI 检查先构建最终产物，再要求生成物无差异并运行完整 offline 链。
+
+本地 `release.mjs` 只准备版本文件、构建和验证，不自动提交、推送或发布。CI 是新版本的唯一发布者：从干净 tag 用 `git archive` 打包，建立草稿，上传并下载核对 ZIP/SHA256SUMS 后公开；已公开版本重跑只校验，不覆盖附件。0.6.6 旧标签没有这些脚本，本轮从旧标签内容一次性补录 Release，保持标签不变；后续版本只走新流程。具体步骤见 [RELEASING.md](RELEASING.md)，验证及交付结果见[本轮审计](audits/2026-11-12-maintenance-release.md)。

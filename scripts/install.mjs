@@ -49,7 +49,7 @@ const MARKER = "# --- model-request-accelerator: merged by billion-context-patch
 // by host, not by provider name: rename a provider or add another one later and
 // the same rule still applies, as long as it points at one of these relays.
 // The wrapper's version lives in its own package.json (three parts, e.g. 0.1.0)
-// and is bumped by hand when a patch is published: the version this repo shows
+// and is prepared by scripts/release.mjs: the version this repo shows
 // and the one the update check compares against are the same field.
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -237,6 +237,10 @@ if (!dryRun && !argv.includes("--skip-smoke") && smokeTarget) {
       env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
     });
     execFileSync(process.execPath, [join(here, "check-upstream-ux.mjs"), smokeTarget], {
+      stdio: "inherit", timeout: 30000,
+      env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
+    });
+    execFileSync(process.execPath, [join(here, "check-preflight.mjs"), smokeTarget], {
       stdio: "inherit", timeout: 30000,
       env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
     });

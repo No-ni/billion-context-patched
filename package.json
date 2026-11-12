@@ -1,6 +1,6 @@
 {
   "name": "bili-context-patch",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "description": "billion-context, patched: verified snapshot reuse, fork inheritance, request-body compression, and the model-request accelerator in one plugin.",
   "license": "MIT",
   "repository": {
@@ -8,6 +8,17 @@
     "url": "git+https://github.com/No-ni/billion-context-patched.git"
   },
   "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "node scripts/install.mjs --build",
+    "check": "node scripts/check-all.mjs --offline",
+    "check:host": "node scripts/check-all.mjs --host",
+    "check:release": "node scripts/check-release.mjs",
+    "release:prepare": "node scripts/release.mjs",
+    "release:package": "node scripts/package-release.mjs"
+  },
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
@@ -38,7 +49,7 @@
     }
   },
   "patchBuild": {
-    "id": "c610b0fd7a8c2a33bb1e11db62a3a74965e57acb915a9e01bea1d5f2a99fc70b",
-    "createdAt": "2026-11-12T08:24:41.384Z"
+    "id": "4098655f8b7cf21ae0f9bbac06b31c740d1aa5824fc1327c7e027293a26c5ab5",
+    "createdAt": "2026-11-12T10:10:53.848Z"
   }
 }

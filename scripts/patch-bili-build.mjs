@@ -666,6 +666,46 @@ if (text.includes("__biliFailureTextZh")) {
   replaceOnce("upstream failure text", "[ACP] stream error: ${message}", "[ACP] " + ZH("流错误：") + "${message}");
   console.log("upstream failure text: translated");
 }
+// 22. Recover a degraded snapshot once, before judging the rebuilt payload.
+// B21 also covers every preflight response, including committed streams.
+const PREFLIGHT_BLOCK = readFileSync(join(here, "patches", "preflight.block.js"), "utf8").trimEnd();
+cardUpsert("preflight helpers", "// <bili-preflight begin>", "// <bili-preflight end>",
+  escapedCopy(PREFLIGHT_BLOCK).replace(/\\u000A/g, "\n"), "function emitPreflightError(", false);
+const PREFLIGHT_ENTRY = "async function preflightCompressIfNeeded(prepared,runPrepare,req,inboundBody,res,opts,core,config,configuredWindow,model,resolvedNativeWindow,windowShrinkReason,route,affinity,anonymous,log2,instanceId){";
+const PREFLIGHT_RECOVERED = PREFLIGHT_ENTRY + 'prepared=await __biliRecoverSnapshot(prepared,runPrepare,res,log2);if(prepared===null)return{failFast:true,status:0,message:"snapshot recovery aborted",retryable:false,respond:false};';
+const PREFLIGHT_HTTP_OLD = 'if(res.headersSent){if(prepared.stream){emitPreflightError(res,prepared.protocol,{message:outcome.message,retryable:outcome.retryable},m2=>log2("warn",m2))}else{try{res.end(JSON.stringify({error:{type:"server_error",code:"preflight_compress_failed",message:outcome.message,retryable:outcome.retryable}}))}catch{}}}else{res.writeHead(outcome.status,{"content-type":"application/json",...outcome.status===503?{"retry-after":"30"}:{}});res.end(JSON.stringify({error:{type:"server_error",code:"preflight_compress_failed",message:outcome.message,retryable:outcome.retryable}}))}';
+const PREFLIGHT_HTTP_NEW = 'if(res.headersSent&&prepared.stream){emitPreflightError(res,prepared.protocol,outcome,m2=>log2("warn",m2))}else{__biliReplyPreflight(res,outcome)}';
+const PREFLIGHT_EDITS = [
+  ["snapshot recovery entry", PREFLIGHT_ENTRY, PREFLIGHT_RECOVERED],
+  ["snapshot retry classification",
+    "const ff=failFast(status,ffDetail,retryable,",
+    'const ff=failFast(status,ffDetail,retryable||status===502&&imageTokens+overheadEstimate<limit&&(f2===void 0||f2.kind==="exhausted"&&!f2.deterministic)&&__biliSnapshotRetryable(prepared),'],
+  ["preflight status",
+    'const status=f2?.kind==="upstream"&&f2.status===429?503:f2?.kind==="exhausted"&&f2.deterministic&&!payloadFitsWindow?413:502;',
+    'const status=f2?.kind==="exhausted"&&f2.deterministic&&!payloadFitsWindow?413:502;'],
+  ["preflight HTTP response", PREFLIGHT_HTTP_OLD, PREFLIGHT_HTTP_NEW],
+  ["preflight stream error",
+    'function emitPreflightError(res,protocol,error,log2){const err2={type:"server_error",code:"preflight_compress_failed",message:error.message,retryable:error.retryable};',
+    'function emitPreflightError(res,protocol,error,log2){const err2=__biliPreflightError(error);'],
+  ["preflight responses stream metadata",
+    '{type:"error",code:err2.code,message:err2.message}',
+    '{type:"error",code:err2.code,message:err2.message,retryable:err2.retryable,detail:err2.detail}'],
+  ["preflight google stream metadata",
+    '{error:{code:error.retryable?503:500,message:error.message,status:error.retryable?"UNAVAILABLE":"INTERNAL"}}',
+    '{error:{code:error.status===413?413:502,message:err2.message,status:err2.retryable?"UNAVAILABLE":"INTERNAL",retryable:err2.retryable,detail:err2.detail}}'],
+  ["preflight anthropic stream metadata",
+    '{type:"error",error:{type:"server_error",code:err2.code,message:err2.message}}',
+    '{type:"error",error:err2}'],
+  ["decoded request backpressure",
+    'log2("warn","503: large decoded request budget is busy");res.writeHead(503,{"content-type":"application/json","retry-after":"1"});res.end(JSON.stringify({error:{type:"request_body_busy",stage:"decode",message:err2.message}}));',
+    'log2("warn","502: large decoded request budget is busy");res.writeHead(502,{"content-type":"application/json"});res.end(JSON.stringify({error:{type:"request_body_busy",stage:"decode",message:"' + ZH("请求处理资源暂时繁忙，DSH 会自动重试。") + '",detail:err2.message,retryable:true}}));'],
+];
+for (const [label, old, next] of PREFLIGHT_EDITS) {
+  if (text.includes(next)) continue;
+  replaceOnce(label, old, next);
+}
+console.log("preflight recovery and errors: patched");
+
 if (changed) {
   // The harness loads this build as a module, and a script-mode check is not the
   // same grammar: an anchor that leaves an extra brace can pass one and fail the

@@ -1,6 +1,6 @@
 # bili-context-patch
 
-**当前版本：0.6.6** · [更新记录](CHANGELOG.md) · [使用说明](docs/USAGE.md)
+[更新记录](CHANGELOG.md) · [使用说明](docs/USAGE.md)
 
 面向 DSH 的上下文压缩与请求加速插件。基于 [billion-context](https://github.com/ranxianglei/billion-context)，内置[模型请求加速器](https://github.com/No-ni/dsh-plugin-model-request-accelerator)，安装一个包即可使用两组功能。
 
@@ -23,7 +23,7 @@ github:No-ni/billion-context-patched
 
 首次启用会自动停用原版 `billion-context` 和 `dsh-plugin-model-request-accelerator`，迁移旧加速器设置并保留已有选择；原版卡片如果仍显示，应处于关闭状态。
 
-更新时在插件管理器更新本插件。DSH 提示重载或重启时按提示操作；加载本次宿主修复需要重载插件或重启 DSH，图片代理修复还需重新启动 bili 代理。手动安装与重启命令见[使用说明](docs/USAGE.md#手动安装)。
+更新时在插件管理器更新本插件，按 DSH 提示重载或重启。宿主代码和代理代码的生效方式见[使用说明](docs/USAGE.md#更新与重载)，手动部署见[手动安装](docs/USAGE.md#手动安装)。
 
 ## 开始使用
 
@@ -38,15 +38,9 @@ github:No-ni/billion-context-patched
 
 手动关闭、选择 gzip 或其他显式配置会保留。其他站点可在加速器设置中自行开启。详细配置与常见问题见[使用说明](docs/USAGE.md)。
 
-## 0.6.6 更新
-
-去掉 bili 自己的上游熔断与「N 个上游不可用」横幅，连接失败交给 DSH 自己的退避重试；模型请求失败的提示改成中文短句，`acp-proxy failure: ...` 这类内部措辞只留在详情与日志里。完整变化见 [CHANGELOG](CHANGELOG.md)。
-
-0.6.5 修复了插件页安装后原版未停用、两个指定站点未补默认值，以及启动竞态、账本资源释放、安装依赖遗漏和 Windows 图片编码。
-
 ## 文档与维护
 
-[文档目录](docs/README.md)提供使用说明、[行为规范](docs/SPEC.md)、[维护流程](docs/MAINTENANCE.md)、[实现历史](docs/PATCHES.md)和[本版核对记录](docs/audits/2026-11-12-release.md)。维护入口为 [AGENTS.md](AGENTS.md)。
+[文档目录](docs/README.md)提供使用、维护和审计入口。[独立修改清单](docs/SPEC.md)记录必须保留的定制行为；[维护流程](docs/MAINTENANCE.md)说明来源与检查；[发布流程](docs/RELEASING.md)说明交付步骤。维护者从 [AGENTS.md](AGENTS.md) 开始，最新变化统一见 [CHANGELOG](CHANGELOG.md)。
 
 ## 许可
 

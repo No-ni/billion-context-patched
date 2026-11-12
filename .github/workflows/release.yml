@@ -1,0 +1,62 @@
+name: 发布
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 已存在的版本标签（重跑补全用）
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node scripts/check-release.mjs --tag "$RELEASE_TAG"
+      - run: node scripts/install.mjs --build
+      - run: git diff --exit-code
+      - run: node scripts/check-all.mjs --offline
+      - run: node scripts/package-release.mjs --tag "$RELEASE_TAG"
+      - name: 上传并核验附件后公开版本
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          published=false
+          if gh release view "$RELEASE_TAG" --json isDraft > "$RUNNER_TEMP/release-state.json"; then
+            if jq -e '.isDraft == false' "$RUNNER_TEMP/release-state.json" > /dev/null; then published=true; fi
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" --notes-file release-artifacts/release-notes.md
+          fi
+          zip="bili-context-patch-${RELEASE_TAG#v}.zip"
+          if [ "$published" = false ]; then
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file release-artifacts/release-notes.md
+            gh release upload "$RELEASE_TAG" "release-artifacts/$zip" release-artifacts/SHA256SUMS --clobber
+          fi
+          gh release view "$RELEASE_TAG" --json body > "$RUNNER_TEMP/release-body.json"
+          node --input-type=module -e 'import {readFileSync as read} from "node:fs"; import assert from "node:assert/strict"; assert.equal(JSON.parse(read(process.env.RUNNER_TEMP+"/release-body.json","utf8")).body.trim(),read("release-artifacts/release-notes.md","utf8").trim(),"published release notes differ from the tag");'
+          verify="$RUNNER_TEMP/release-verify"
+          mkdir -p "$verify"
+          gh release download "$RELEASE_TAG" --pattern "$zip" --pattern SHA256SUMS --dir "$verify"
+          cmp release-artifacts/SHA256SUMS "$verify/SHA256SUMS"
+          (cd "$verify" && sha256sum --check SHA256SUMS)
+          if [ "$published" = false ]; then gh release edit "$RELEASE_TAG" --draft=false --latest; fi
+          gh release view "$RELEASE_TAG" --json url,tagName,isDraft,assets
