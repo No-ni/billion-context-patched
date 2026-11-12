@@ -61,7 +61,7 @@
 | 做法 | 为什么不用 |
 | --- | --- |
 | 在 profile 的 `cordis.patch.yml` 里写跟随行（`!!js` 按条件禁用） | 依赖条目创建顺序，行会落到还不存在的条目上，日志 `patch: entry "bili-native" not found`，规则空转 |
-| 只在我们自己的层文件里写 `disabled: true` 压住上游条目 | 单靠它不够：层按 `dsh.profile.bundles` 顺序合成，包装包排在原版前面时那几行落空。现在与 entry-init guard 合用——静态行管排在包装包前面的上游，guard 管排在后面的（第 5 节「兜底」） |
+| 只在我们自己的层文件里写 `disabled: true` 压住上游条目 | 单靠它不够：包装包排在原版前面时行会落空，热安装直接禁用又可能泄漏迟到账本。现在组合层提前禁用冷启动原版；已运行原版由 guard 与启动屏障等待资源释放后接管（第 5 节「兜底」、第 24.7 节） |
 | 靠运行时 `entry.update()` 关原版 | 插件页的卡片和开关是 `dsh.profile.bundles` 的投影，运行时关不掉卡片；只保留作为「用户又把手装回来了」的兜底 |
 | 直接安装未打补丁的上游 dist | 会丢本仓库能力；正确流程是先从选定上游源码构建，再重打补丁和检查，见 MAINTENANCE |
 | 只打开上游 `snapshotRender` 灰度，不打补丁 | `maybeSnapshotView` 对插件道第一句就 `return clientMsgs`，开关对我们这条路无效（第 13 节） |
@@ -154,9 +154,9 @@ __biliEncPush({ rid, ts, url, origBytes, wireBytes, encoding, dir })
 
 **当前启动去重（2026-11-12，仍为 0.6.5）**：旧的“一帧足够”结论已被实际 Loader 的并发初始化否定。三层共同处理：
 
-1. 组合层保留三条静态 `disabled: true`，关掉已经组合出来的原版。
+1. 组合层根据条目是否已有活跃 fiber，提前禁用冷启动原版；已运行条目保留到启动屏障等待账本打开完成后再禁用。热安装不能直接用静态 `disabled: true` 绕过这一步。
 2. `loader/entry-init` 同步安装 `entry.update` guard，在新条目第一次写入 options 时强制禁用。每个 owner 独立释放 guard，使用 Cordis `effect` 清理；宿主不发 `dispose` 事件，监听该事件无法撤销补丁。
-3. 初始加载时 Loader 已并发创建整树，两种顺序的原版都可能已经开始 import。`lib/startup.js` 先扫描、捕获并等待原版 `_initTask`，再等待 `fiber.dispose()` 释放资源，最后才挂三个 children。关闭包装包时取消排队启动；停止原版失败时不继续挂重复资源。
+3. 初始加载时 Loader 已并发创建整树，两种顺序的原版都可能已经开始 import。`lib/startup.js` 同步停止尚未执行的原版 fiber，并在 `internal/plugin` 阻止 import 后的迟到执行；已经运行的原版加速器先完成账本打开链，再禁用让它自行关闭。等 `_initTask` 与 `fiber.dispose()` 完成后才挂三个 children。关闭包装包时取消等待和排队启动；停止原版失败时不继续挂重复资源。
 
 `entry.update` 的去重只改内存。首次启用还会用 `lib/profile.js` 合并 profile、迁移旧配置并协调宿主重载，详见第 24 节；这一步才让插件页的原版卡片显示关闭。
 
@@ -698,3 +698,17 @@ CLI 在复制运行文件前预检 profile；自己的 accelerator vendor 优先
 用户本次明确要求不升版本，保留 0.6.5。构建以稳定 SHA-256 内容标识和首次创建时间记录 patchBuild；同版较新的远端可被识别，重复构建不改变时间，较旧远端不误提示更新。bili 与 accelerator 的选定上游基线没有升级；bili dist 只通过补丁脚本刷新 B13 所在的图片哨兵块。
 
 完整条款核对、检查命令、真实宿主模块与替身范围、本机同步及未覆盖的真机项见 [AUDIT-2026-11-12.md](AUDIT-2026-11-12.md)。历史命中率与历史真机记录不能代替本轮验证。
+
+### 24.7 异步账本打开、释放及独立安装依赖
+
+收尾检查确认 accelerator 2.3.0 的 storage 注入回调只调用 openLedger().then()，未把打开任务交给 Cordis。禁用时账本尚未打开，原 cleanup 看到 undefined 就结束；后来打开的 model_request_timings 留在设施里，合并插件再开时报已打开。实际 DomainFacility 明确由调用者关闭资源，不会随消费者 fiber 自动关闭。
+
+包装层同步停止已排队原版 fiber，并在 internal/plugin（apply 之前）取消 import 后的迟到原版。已经运行的旧加速器若在打开账本，先根据所审计设施的 reserved/get 诊断面等待整条 Promise 链落定，再禁用，让旧加速器用自己的 disposer 关闭自己的 handle。这里只等待，不从共享设施取得 handle 后擅自关闭；外部 owner 的账本保持原状。包装包关闭会取消等待和后续挂载。
+
+组合层的三条禁用行按当前 entry 的 fiber 判定：冷启动没有活跃 fiber 时提前禁用；热安装保留已运行原版，交给上述等待流程。`check-ledger-runtime.mjs` 直接执行最终组合层里的表达式，覆盖冷启动不挂载和热安装先释放后接管，避免只测宿主函数而漏掉组合层提前销毁。
+
+内置加速器的本地补丁由 scripts/patch-accelerator.mjs 重打：在可选 storage/storageDomain 作用域内返回异步 setup 与 disposer，关闭时等待打开、先冲刷排队写入，再关闭捕获的 owned handle；读失败清掉 live ledger 后仍能释放它。延迟写回调重新检查 live handle，表解析失败也关闭已经取得的域。storageDomain 的注入还覆盖设施迟到与独立重载，并使消费者先于设施销毁。旧片段精确保存在 patches/accelerator-ledger.legacy.js，未识别的新上游语义拒绝改写。installer 先在临时目录检查补丁后的两个候选模块语法，再复制到派生 vendor，不改显式外部来源。
+
+另一个独立安装隐患是 ledger 的静态 zod 导入：嵌套 accelerator/package.json 中的依赖不会由包装包根清单安装，旧测试又绕开 ledger，可能依赖机器上恰好残留的原版依赖。现在自带 Zod 4.4.3 Node ESM runtime（MIT），账本用相对路径导入；CLI、管理器、--out 和现有安装镜像都携带它，构建标识也包括其文件。无需 profile 级 npm 安装。来源与精确范围在 vendor/zod/SOURCE.md。
+
+check-ledger-runtime.mjs 用实际 Cordis、Loader、Storage、DomainFacility、内置加速器与 Zod 验证：关闭等待迟到打开；精确旧片段先打开再自己关闭，合并账本无重复占用；设施迟到/重载；排队写入早于关闭；读失败后延迟写不抛错、owned handle 仍释放；表解析失败不泄漏；外部账本不被包装包关闭。介质、连接路由及模型迭代器是隔离替身，不调用真实模型。

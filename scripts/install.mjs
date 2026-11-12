@@ -37,6 +37,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { relayChannelsFromProfile, rewriteUpstreamPatch } from "../lib/profile.js";
+import { patchAcceleratorSources } from "./patch-accelerator.mjs";
 
 const WRAPPER = "bili-context-patch";
 const UPSTREAM = "billion-context";
@@ -303,6 +304,27 @@ if (existsSync(acceleratorManifest)) {
   say("accelerator: " + acceleratorPath);
 }
 
+// Stage the local ledger compatibility patch before changing any vendor files.
+// Explicit upstream inputs remain untouched; the derived copy always carries
+// the lifecycle fix even when a maintainer selects the same clean 2.3.0 source.
+let patchedAccelerator;
+try {
+  patchedAccelerator = patchAcceleratorSources(
+    readFileSync(join(acceleratorPath, "lib/index.js"), "utf8"),
+    readFileSync(join(acceleratorPath, "lib/ledger.js"), "utf8"),
+  );
+  if (!dryRun) {
+    const stage = dirname(stagedBuild);
+    for (const [file, source] of [["accelerator-index.mjs", patchedAccelerator.index], ["accelerator-ledger.mjs", patchedAccelerator.ledger]]) {
+      const candidate = join(stage, file);
+      writeFileSync(candidate, source);
+      execFileSync(process.execPath, ["--check", candidate], { stdio: ["ignore", "ignore", "inherit"], timeout: 10000 });
+    }
+  }
+} catch (error) {
+  fail("accelerator candidate rejected: " + error.message);
+}
+
 // ── 2b. the vendored copy this install carries ──────────────────────────────
 // Anything the profile declares becomes a card in the plugin list, so neither
 // upstream package stays declared. Their files are copied in here instead, and
@@ -350,10 +372,17 @@ const fileList = (from, prefix = "") => readdirSync(join(from, prefix), { withFi
 );
 const yamlFiles = fileList(join(here, "..", "vendor", "yaml"));
 copyInto(join(here, "..", "vendor", "yaml"), join(vendorDir, "yaml"), yamlFiles);
+const zodFiles = fileList(join(here, "..", "vendor", "zod"));
+copyInto(join(here, "..", "vendor", "zod"), join(vendorDir, "zod"), zodFiles);
 if (resolve(acceleratorPath) !== resolve(vendorAccelerator)) {
   copyInto(acceleratorPath, vendorAccelerator, acceleratorFiles(acceleratorPath));
 } else {
   say("accelerator: already vendored at " + vendorAccelerator);
+}
+for (const [file, source] of [["lib/index.js", patchedAccelerator.index], ["lib/ledger.js", patchedAccelerator.ledger]]) {
+  const destination = join(vendorAccelerator, file);
+  if (dryRun) say("would patch accelerator " + file + " ledger lifecycle");
+  else if (readFileSync(destination, "utf8") !== source) writeFileSync(destination, source);
 }
 
 // The wrapper's layer is rebuilt from bili's own: the vendored copy first (a
@@ -478,17 +507,18 @@ const stripInserts = (text) => {
 // a row that lands on nothing would only add a startup warning.
 const disableRows = "# A package-manager install (Settings > Plugins) never runs this script, so\n" +
     "# the standalone packages stay in dsh.profile.bundles until the first start\n" +
-    "# merges the profile. These rows switch their entries off while the layers\n" +
-    "# are composed, before any of them can mount a second copy beside the child\n" +
-    "# fibers. A row whose entry is absent is skipped with a warning; the host\n" +
-    "# half awaits already-starting originals in either bundle order. The gate row\n" +
+    "# merges the profile. Cold-start entries are disabled before they mount.\n" +
+    "# Already-running entries stay alive until the host half waits for their\n" +
+    "# pending ledger opens and then disposes them; disabling at composition\n" +
+    "# would bypass that wait during a hot install. Missing entries are skipped\n" +
+    "# with a warning. The host handles either bundle order. The gate row\n" +
     "# only hits the standalone gate; the wrapper supplies the replacement service.\n" +
     "- id: bili-native\n" +
-    "  disabled: true\n" +
+    "  disabled: !!js '!ctx[Symbol.for(\"cordis.entry\")]?.fiber?.uid'\n" +
     "- id: bili-compaction-gate\n" +
-    "  disabled: true\n" +
+    "  disabled: !!js '!ctx[Symbol.for(\"cordis.entry\")]?.fiber?.uid'\n" +
     "- id: model-request-accelerator\n" +
-    "  disabled: true\n";
+    "  disabled: !!js '!ctx[Symbol.for(\"cordis.entry\")]?.fiber?.uid'\n";
 
 const layerSource = readFileSync(layerPath, "utf8");
 const layerHead = layerSource.includes(MARKER)
@@ -564,6 +594,7 @@ if (!dryRun) {
       join("vendor", UPSTREAM, "dist/index.js"),
       ...acceleratorFiles(vendorAccelerator).map((file) => join("vendor", ACCELERATOR, file)),
       ...yamlFiles.map((file) => join("vendor", "yaml", file)),
+      ...zodFiles.map((file) => join("vendor", "zod", file)),
     ].sort();
     for (const file of files) digest.update(file.split(sep).join("/") + "\0").update(readFileSync(join(wrapperDir, file))).update("\0");
     const id = digest.digest("hex");
@@ -598,6 +629,7 @@ if (!buildMode) {
           "vendor/" + UPSTREAM + "/dist/index.js",
           ...acceleratorFiles(vendorAccelerator).map((file) => "vendor/" + ACCELERATOR + "/" + file),
           ...yamlFiles.map((file) => join("vendor", "yaml", file)),
+          ...zodFiles.map((file) => join("vendor", "zod", file)),
         ]);
       }
       say((dryRun ? "would update" : "updated") + " the existing package-manager runtime at " + linkPath);

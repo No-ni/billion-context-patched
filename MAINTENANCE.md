@@ -1,6 +1,6 @@
 # 当前差异与上游升级指南
 
-本文是当前实现的维护入口，按 0.6.4 的代码核对。`PATCHES.md` 保存实现细节、历史故障和测量结果；发生冲突时先核查代码，再同步两份文档，不能把历史叙述当成当前保证。
+本文是当前实现的维护入口，按 0.6.5 的代码核对。`PATCHES.md` 保存实现细节、历史故障和测量结果；发生冲突时先核查代码，再同步两份文档，不能把历史叙述当成当前保证。
 
 [SPEC.md](SPEC.md) 规定必须保留的行为，本页记录当前实现与验证覆盖。发现代码偏离规范时登记并修复，不能仅通过修改说明把回归变成新默认。每次合并前后按 SPEC 第 7 节核对 PCK-01–PCK-05 和本页全部稳定 ID，并保存核对结果；不仅在上游升级时执行。
 
@@ -9,8 +9,9 @@
 | 来源 | 当前版本 / 提交 | 本仓库的关系 |
 | --- | --- | --- |
 | [billion-context](https://github.com/ranxianglei/billion-context) | 0.1.213，master `406193b202c13248241f25201e1c6bbda747c99b` | 上游源码构建后，对代理 `dist/index.js` 应用 B1–B18；agent、client、层和清单也随该基线复制 |
-| [dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator) | 2.3.0，`e8c30af1f2b5cffa6749d032f0f296e17d4e26d0` | 2026-11-09 逐文件比对：当前 vendor 的 package.json 和全部 8 个 lib/*.js 与该提交完全一致；其功能独立维护，包装包仅在生成客户端时改写三个字面量 |
+| [dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator) | 2.3.0，`e8c30af1f2b5cffa6749d032f0f296e17d4e26d0` | 来源未升级；2026-11-12 在 lib/index.js、lib/ledger.js 加本地账本生命周期与依赖寻址补丁，其余文件保留基线。补丁由 scripts/patch-accelerator.mjs 重打，客户端仍只改三个字面量 |
 | [yaml](https://github.com/eemeli/yaml) | 2.9.1，ISC | 从 2026-11-11 审计的 DSH settings 随附版本复制 Node runtime，仅清除 Document.js 一处行末空格；CLI 与运行期共用解析器，来源范围见 `vendor/yaml/SOURCE.md` |
+| [zod](https://github.com/colinhacks/zod) | 4.4.3，MIT | 原加速器清单里的嵌套依赖不会由根包装包自动安装。自带 Node ESM runtime，账本显式用相对路径导入，管理器与 CLI 均不依赖原版或 profile 残留；范围见 vendor/zod/SOURCE.md |
 
 bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整提交通过上游提交接口核对；本轮未重新构建该基线做逐字节比对，不将整个二进制声明为已独立验证可复现。版本号相同不代表提交相同，不能只按 0.1.213 判断是否需要升级。
 
@@ -48,7 +49,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 | W1 | 一张插件卡挂 bili、compaction gate、accelerator 三个子插件；显式导出 Config，传递活访问器时不二次解析 schema | `lib/index.js`、`lib/upstream.js`；需真机检查设置即时生效 |
 | W2 | 合并两个客户端工厂，inject 取并集；改加速器的设置命名空间、版本路由和提示文案 | `lib/client.template.js`、安装脚本 extractFactory/rewriteOnce；前两字面量恰好一次，否则失败 |
 | W3 | 重写组合层只留包装包 insert，保留上游 compaction-basic、四个 preset 的闸门注入、两项 DeepSeek retryPolicy | `dsh.bundle.patch.yml` 由 vendor 层生成；升级要人工比对层，避免替换 inject/config 时丢新字段 |
-| W4 | 组合层静态 disabled 行、作用域 guard 与启动屏障共同去重：真实 Loader 并发构造全部条目，两个方向的原版都可能已在 import；必须等待 `_initTask` 与 fiber.dispose 完成后才挂 children。销毁用 Cordis effect 清理并取消排队启动 | `lib/startup.js`、`lib/merge.js`、组合层；`check-wrapper` 检查 guard 多 owner；`check-runtime` 使用实际 Loader 检查两种顺序与资源释放，完整热重载仍需真机 |
+| W4 | 冷启动由组合层提前禁用原版，热安装将已运行原版交给作用域 guard 与启动屏障：同步停止已排队 fiber，internal/plugin 阻止 import 后的迟到原版执行。对已运行的 2.3.0 原版，先等待账本打开链落定，再禁用让它自己关闭资源；等 `_initTask` 与 dispose 完成后挂 children。内置加速器跟踪异步账本并依赖可迟到的 storageDomain，销毁清理排队任务 | `lib/startup.js`、`lib/merge.js`、组合层及 accelerator 补丁；check-wrapper/runtime/ledger-runtime 覆盖两顺序、最终组合层冷启动/热安装行、延迟打开、读失败、服务重载、写后关闭和不关闭外部账本；完整热重载仍需真机 |
 | W5 | fork 经 AsyncLocalStorage 给 seeded create 补 parentSession，尊重已有父字段；销毁时恢复服务 | `lib/fork-lineage.js`；`check-wrapper.mjs` 检查并发隔离、普通创建和恢复 |
 | W6 | 包装包自己的版本检查和更新接口；串行共享更新；checkout 安装用 git pull --ff-only + installer；无 patchRepo 提示走插件管理器。同版较新的有效 patchBuild 也提示更新，重复构建保持时间和标识 | `lib/index.js`、`lib/version.js`、installer；`check-wrapper` 检查比较及构建幂等，真实接口更新仍需验证 |
 | W7 | （补丁 B17）bili Web UI「配置」页里的「图像」卡：四个控件（折叠总开关、上传豁免、首传最长边、图像约定）只编辑页面上的配置草稿，保存沿用页面原有的 `PUT /__bili/config`；边长只收不小于 128 的整数，非法就地提示并回填；恢复默认只删四个键；中英词条随补丁注入 bundle 级 `MESSAGES`，位置必须在 `translate` 定义之前 | `patches/image-card.{markup,script,listeners}.block.js`、`scripts/patch-bili-build.mjs` 第 17 节、`scripts/install.mjs`；`check-image-card.mjs` 覆盖结构、内联脚本解析与假 DOM 行为，真实浏览器里的保存与重启后显示需人工确认 |
@@ -99,7 +100,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
    git diff --check
    ```
 
-   `check-wrapper` 在临时 profile 运行真实 installer；`check-restart`/smoke 只开本地模拟服务。它们不调用真实模型。宿主整合另运行 `node scripts/check-runtime.mjs --host-modules <实际 DSH node_modules>`：Loader/Cordis/SettingsForms/atomic-write 用实际模块，LLM 目录、配置编辑持久化、HMR 与模型插件用脚本列明的替身。外部候选可先用 `check-views.mjs <dist>`、`smoke.mjs <dist>`。再次打补丁比较文件哈希，确认幂等。
+   `check-wrapper` 在临时 profile 运行真实 installer；`check-restart`/smoke 只开本地模拟服务。它们不调用真实模型。宿主整合另运行 `node scripts/check-runtime.mjs --host-modules <实际 DSH node_modules>`：Loader/Cordis/SettingsForms/atomic-write 用实际模块，LLM 目录、配置编辑持久化、HMR 与模型插件用脚本列明的替身。再运行 `node scripts/check-ledger-runtime.mjs --host-modules <实际 DSH node_modules>`，使用实际加速器、Cordis、Storage/DomainFacility 和自带 zod；介质、路由与模型迭代器是替身，旧账本片段来自被替换的精确基线。外部候选可先用 `check-views.mjs <dist>`、`smoke.mjs <dist>`。再次打补丁比较文件哈希，确认幂等。
 8. 审阅新增/删除的文件和生成物，不能只看 GitHub 隐藏的二进制 diff。bili 清单、build-info、agent、client、层与 dist 必须来自同一源码基线；当前没有全自动验证这一点。
 9. 真机验证才安装到本地：`node scripts/install.mjs`，`node scripts/restart.mjs`。包装包宿主/客户端改动还需重载插件或重启 DSH，代理重启本身不重载宿主代码。检查普通续聊、fork 首轮/后续轮、重启首轮、修改历史、开关即时生效、禁用/重新启用、重复上游条目、压缩回执和按来源支持的缓存命中。
 10. 记录已做与未做的验证；通常运行行为变化升三段版本号。2026-11-12 本次按用户要求保留 0.6.5，使用稳定 patchBuild 检测同版新修复（SPEC 第 9 节）。提交完整产物；发布前核对远端提交与本地一致。清理本次临时资源，说明有意保留的服务。
@@ -112,6 +113,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。完整�
 | 包装包宿主/分支血缘/默认与迁移 | lib/index.js、fork-lineage.js、startup.js、merge.js、profile.js、defaults.js、version.js | wrapper/runtime 检查；装机后宿主重载 |
 | 合并客户端 | lib/client.template.js、installer 的重写逻辑 | --build；不要只手改 lib/client.js |
 | 组合层 | vendor 的选定上游层 + installer 生成规则 | --build；检查 inject/config 替换语义 |
-| 加速器自身功能 | 第二个来源仓库，选定提交再复制 | 记录新完整提交；运行其自身检查及本包装包检查 |
+| 加速器账本兼容 | scripts/patch-accelerator.mjs、patches/accelerator-ledger.*.js | installer 对临时候选重打并检查语法；保留精确旧片段，锚点不兼容拒绝；check-ledger-runtime 验证资源生命周期 |
+| 加速器其余功能 | 第二个来源仓库，选定提交再复制 | 记录新完整提交；运行其自身检查及本包装包检查 |
 
 已有标记只表明补丁曾插入过，**不证明当前块文件与 dist 一致**；`patch-bili-build` 也不是通用反向补丁工具。不能在旧 dist 上改完源块，再跑一次看到 already patched 就发布。

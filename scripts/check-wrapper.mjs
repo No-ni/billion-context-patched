@@ -15,6 +15,10 @@ import { relayChannelsFromProfile, rewriteUpstreamPatch } from "../lib/profile.j
 import { hasPublishedUpdate } from "../lib/version.js";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
+// Vendor manifests are not dependency-install roots for npm/Git installs.
+// Carry the ledger schema runtime for both manager and CLI installations.
+assert.equal(JSON.parse(readFileSync(join(repo, "vendor/zod/package.json"), "utf8")).version, "4.4.3");
+assert(readFileSync(join(repo, "vendor/dsh-plugin-model-request-accelerator/lib/ledger.js"), "utf8").includes('from "../../zod/index.js"'));
 const parse = (text) => yaml.parse(text, { merge: true, customTags: [{
   tag: "tag:yaml.org,2002:js", resolve: (value) => ({ __jsExpr: value }),
 }] });
@@ -279,6 +283,7 @@ try {
   assert.equal(readFileSync(join(stale, "lib/index.js"), "utf8"), readFileSync(join(repo, "lib/index.js"), "utf8"));
   assert(existsSync(join(stale, "lib/defaults.js")));
   assert(existsSync(join(stale, "vendor/yaml/LICENSE")));
+  assert(existsSync(join(stale, "vendor/zod/index.js")));
   assert.equal(JSON.parse(readFileSync(join(stale, "vendor/dsh-plugin-model-request-accelerator/package.json"))).version, "2.3.0");
   assert.equal(createRequire(join(root, "package.json")).resolve("bili-context-patch"), join(stale, "lib/index.js"));
   const bytes = readFileSync(join(root, "cordis.patch.yml"));
@@ -306,7 +311,7 @@ try {
   const built = JSON.parse(readFileSync(join(output, "package.json")));
   assert.equal(built.version, "0.6.5");
   assert.match(built.patchBuild.id, /^[a-f0-9]{64}$/);
-  for (const file of ["lib/index.js", "lib/upstream.js", "lib/defaults.js", "lib/client.js", "vendor/yaml/LICENSE", "dsh.bundle.patch.yml"]) assert(existsSync(join(output, file)));
+  for (const file of ["lib/index.js", "lib/upstream.js", "lib/defaults.js", "lib/client.js", "vendor/yaml/LICENSE", "vendor/zod/index.js", "dsh.bundle.patch.yml"]) assert(existsSync(join(output, file)));
   execFileSync(process.execPath, [join(repo, "scripts/install.mjs"), "--build", "--out", output],
     { timeout: 45000, stdio: "pipe" });
   assert.deepEqual(JSON.parse(readFileSync(join(output, "package.json"))).patchBuild, built.patchBuild);
@@ -330,5 +335,19 @@ try {
   assert.throws(() => install(root, ["--bili", broken]));
   assert(installed.equals(readFileSync(dist)));
   console.log("  OK incompatible candidate fails before replacing installed dist");
+
+  const badAccelerator = join(fixture, "bad-accelerator");
+  mkdirSync(join(badAccelerator, "lib"), { recursive: true });
+  writeFileSync(join(badAccelerator, "package.json"), '{"name":"dsh-plugin-model-request-accelerator","version":"2.3.0"}');
+  writeFileSync(join(badAccelerator, "lib/index.js"), readFileSync(join(repo, "vendor/dsh-plugin-model-request-accelerator/lib/index.js")));
+  writeFileSync(join(badAccelerator, "lib/ledger.js"), readFileSync(join(repo, "vendor/dsh-plugin-model-request-accelerator/lib/ledger.js"), "utf8").replace('"../../zod/index.js"', '"unexpected-ledger-schema"'));
+  const acceleratorDist = join(root, "plugins/bili-context-patch/vendor/dsh-plugin-model-request-accelerator/lib/index.js");
+  const acceleratorBefore = readFileSync(acceleratorDist);
+  const profileBefore = readFileSync(join(root, "package.json"));
+  assert.throws(() => install(root, ["--accelerator", badAccelerator]));
+  assert(acceleratorBefore.equals(readFileSync(acceleratorDist)));
+  assert(profileBefore.equals(readFileSync(join(root, "package.json"))));
+  assert(installed.equals(readFileSync(dist)));
+  console.log("  OK incompatible accelerator rejected before replacing the installed runtime or profile");
 } finally { clean(fixture); }
 console.log("wrapper checks passed");

@@ -50,12 +50,12 @@ dsh plugin --profile desktop remove bili-context-patch
 ## 目录
 
 - `lib/` —— 主机入口、启动与上游去重、profile 迁移、渠道默认值、fork 血缘、版本检查，以及生成的客户端与上游转发
-- `vendor/` —— 两个上游的运行文件副本及 YAML 解析器；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
+- `vendor/` —— 两个上游的运行文件副本及 YAML、Zod 解析器；打过补丁的 bili 构建只有一份，在 `vendor/billion-context/dist/index.js`
 - `dsh.bundle.patch.yml` —— 组合层
-- `patches/` —— 我们对 bili 构建做的改动：`outbound-encoding.block.js` 是请求体压缩那一整块代码，其余由脚本按锚点插入
+- `patches/` —— bili 构建补丁和加速器账本兼容补丁；`outbound-encoding.block.js` 是请求体压缩块，`accelerator-ledger.*.js` 保存新账本作用域和精确旧片段
 - `scripts/` —— `install.mjs`（装进本机 profile，`--build` 重建本仓库产物）、`patch-bili-build.mjs`（给 bili 构建按锚点应用补丁，逐项见 [PATCHES.md](PATCHES.md) 第 0.2 节）、`restart.mjs`、`smoke.mjs`
 
-`vendor/` 从选定来源复制，其中 bili 代理构建由补丁脚本修改；`lib/client.js`、`lib/upstream.js`、根 `dsh.bundle.patch.yml` 由 `node scripts/install.mjs --build` 生成。具体来源规则见 MAINTENANCE，不要只手改生成物。
+`vendor/` 从选定来源复制，其中 bili 代理构建和加速器账本兼容补丁分别由 `patch-bili-build.mjs`、`patch-accelerator.mjs` 重打；`lib/client.js`、`lib/upstream.js`、根 `dsh.bundle.patch.yml` 由 `node scripts/install.mjs --build` 生成。具体来源规则见 MAINTENANCE，不要只手改生成物。
 
 当前清单覆盖 18 组 bili 补丁、7 项包装能力、5 项安装与运维行为，并逐项列出检查方法和未覆盖部分。上游已吸收的能力与本包新增能力分开记录。
 
@@ -101,7 +101,7 @@ node scripts/check-restart.mjs
 node scripts/smoke.mjs
 ```
 
-宿主模块检查另用 `node scripts/check-runtime.mjs --host-modules <DSH 的 node_modules 目录>`；它使用实际 Loader、Cordis、SettingsForms 与原子写入模块，其余替身范围在脚本开头列明。检查结果不能代替真实模型与整机重启验证。细节见 [PATCHES.md](PATCHES.md) 第 18、24 节。
+宿主模块检查另用 `node scripts/check-runtime.mjs --host-modules <DSH 的 node_modules 目录>`；它使用实际 Loader、Cordis、SettingsForms 与原子写入模块。`node scripts/check-ledger-runtime.mjs --host-modules <同一目录>` 使用实际加速器、存储设施和自带 schema 依赖，检查异步打开与释放；替身范围分别在脚本开头列明。检查结果不能代替真实模型与整机重启验证。细节见 [PATCHES.md](PATCHES.md) 第 18、24 节。
 
 ## 0.5.0：跟上上游主线
 
@@ -126,7 +126,7 @@ node scripts/smoke.mjs
 
 ## 许可
 
-本仓库的补丁与包装层：MIT。`vendor/billion-context` 来自 [ranxianglei/billion-context](https://github.com/ranxianglei/billion-context)（MIT），`vendor/dsh-plugin-model-request-accelerator` 来自 [No-ni/dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator)，其中的压缩闸门 vendored 自 deshark42/dsh-compaction-basic-disable（MIT）。`vendor/yaml` 为 yaml 2.9.1（ISC），来源与分发范围见 [SOURCE.md](vendor/yaml/SOURCE.md)。
+本仓库的补丁与包装层：MIT。`vendor/billion-context` 来自 [ranxianglei/billion-context](https://github.com/ranxianglei/billion-context)（MIT），`vendor/dsh-plugin-model-request-accelerator` 来自 [No-ni/dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator)，其中的压缩闸门 vendored 自 deshark42/dsh-compaction-basic-disable（MIT）。`vendor/yaml` 为 yaml 2.9.1（ISC），`vendor/zod` 为 Zod 4.4.3（MIT），来源与分发范围见各目录的 SOURCE.md 与 LICENSE。
 
 ## 版本
 

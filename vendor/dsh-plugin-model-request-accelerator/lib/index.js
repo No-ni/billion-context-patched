@@ -359,33 +359,45 @@ export function apply(ctx, config) {
 		clearTimeout(pendingWrites.get(sessionId));
 		pendingWrites.set(sessionId, setTimeout(() => {
 			pendingWrites.delete(sessionId);
-			Promise.resolve(ledger.write(sessionId, timing.snapshot(sessionId))).catch((error) => {
+			const target = ledger;
+			if (target === undefined) return;
+			Promise.resolve().then(() => target.write(sessionId, timing.snapshot(sessionId))).catch((error) => {
 				ctx.logger?.warn?.("model-request-accelerator: could not persist the timing ledger");
 				ctx.logger?.warn?.(error);
 			});
 		}, SAVE_DEBOUNCE_MS));
 	};
 
-	ctx.inject(["storage"], (storageCtx) => {
-		openLedger(storageCtx.get("storage"), (message) => ctx.logger?.warn?.(message)).then((opened) => {
-			ledger = opened;
-		}, (error) => {
+	// bili-context-patch: scoped-ledger-start
+	// The optional scope owns BOTH the asynchronous open and its returned handle.
+	// Cordis awaits setup before disposal; storageDomain also orders teardown ahead
+	// of the domain facility, and lets a domain service arriving later activate it.
+	ctx.inject(["storage", "storageDomain"], async (storageCtx) => {
+		let opened;
+		try {
+			opened = await openLedger(storageCtx.get("storage"), (message) => ctx.logger?.warn?.(message));
+		} catch (error) {
 			ctx.logger?.warn?.("model-request-accelerator: could not open the durable timing store");
 			ctx.logger?.warn?.(error);
-		});
+		}
+		if (opened === undefined) return;
+		ledger = opened;
+		consulted.clear();
+		return async () => {
+			if (ledger === opened) ledger = undefined;
+			const queued = [...pendingWrites.entries()];
+			pendingWrites.clear();
+			const flushes = queued.map(([sessionId, timer]) => {
+				clearTimeout(timer);
+				return Promise.resolve().then(() => opened.write(sessionId, timing.snapshot(sessionId))).catch(() => {});
+			});
+			await Promise.all(flushes);
+			// Keep the owned handle even when a read error cleared the live ledger.
+			await opened.close().catch(() => {});
+		};
 	});
+	// bili-context-patch: scoped-ledger-end
 
-	// Writes still queued belong on disk before the domain closes under them.
-	ctx.effect(() => () => {
-		const queued = [...pendingWrites.entries()];
-		pendingWrites.clear();
-		const flushes = queued.map(([sessionId, timer]) => {
-			clearTimeout(timer);
-			if (ledger === undefined) return Promise.resolve();
-			return Promise.resolve(ledger.write(sessionId, timing.snapshot(sessionId))).catch(() => {});
-		});
-		return Promise.all(flushes).then(() => (ledger === undefined ? undefined : ledger.close().catch(() => {})));
-	});
 	ctx.on("llm/adapters-updated", () => {
 		refresh();
 	});

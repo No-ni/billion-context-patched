@@ -15,7 +15,7 @@
  */
 
 import { defineDomain, domainTable } from "@deepseek-ai/dsh-storage-domain";
-import { z } from "zod";
+import { z } from "../../zod/index.js";
 
 /** One timing row as the panel receives it. Fields this does not know are kept. */
 const rowSchema = z
@@ -69,6 +69,8 @@ export async function openLedger(storage, log) {
 		// leave the plugin in memory-only mode rather than rejecting into nowhere.
 		sessions = domain.table("sessions");
 	} catch (error) {
+		// A table-resolution failure still leaves an owned domain to release.
+		if (domain !== undefined) await domain.close().catch(() => {});
 		log?.("model-request-accelerator: no durable timing store; keeping the ledger in memory");
 		log?.(error);
 		return undefined;

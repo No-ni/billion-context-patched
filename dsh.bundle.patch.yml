@@ -8,17 +8,18 @@
       name: bili-context-patch
 # A package-manager install (Settings > Plugins) never runs this script, so
 # the standalone packages stay in dsh.profile.bundles until the first start
-# merges the profile. These rows switch their entries off while the layers
-# are composed, before any of them can mount a second copy beside the child
-# fibers. A row whose entry is absent is skipped with a warning; the host
-# half awaits already-starting originals in either bundle order. The gate row
+# merges the profile. Cold-start entries are disabled before they mount.
+# Already-running entries stay alive until the host half waits for their
+# pending ledger opens and then disposes them; disabling at composition
+# would bypass that wait during a hot install. Missing entries are skipped
+# with a warning. The host handles either bundle order. The gate row
 # only hits the standalone gate; the wrapper supplies the replacement service.
 - id: bili-native
-  disabled: true
+  disabled: !!js '!ctx[Symbol.for("cordis.entry")]?.fiber?.uid'
 - id: bili-compaction-gate
-  disabled: true
+  disabled: !!js '!ctx[Symbol.for("cordis.entry")]?.fiber?.uid'
 - id: model-request-accelerator
-  disabled: true
+  disabled: !!js '!ctx[Symbol.for("cordis.entry")]?.fiber?.uid'
 # billion-context dsh bundle layer (#949).
 # Mounted automatically when the profile's package.json lists billion-context
 # in dsh.profile.bundles (`dsh plugin --profile <name> add billion-context`);
