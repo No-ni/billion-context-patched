@@ -39,6 +39,8 @@ import { fileURLToPath } from "node:url";
 import { relayChannelsFromProfile, rewriteUpstreamPatch } from "../lib/profile.js";
 import { patchAcceleratorSources } from "./patch-accelerator.mjs";
 import { patchBiliClientBundle } from "./patch-bili-client.mjs";
+import { patchBiliAgentBundle } from "./patch-bili-agent.mjs";
+import { assertAgentUpstreamUx } from "./check-upstream-ux.mjs";
 
 const WRAPPER = "bili-context-patch";
 const UPSTREAM = "billion-context";
@@ -203,6 +205,7 @@ const pendingBuild = existsSync(repoBuild)
     : null;
 const candidateBuild = pendingBuild ?? (existsSync(installedBuild) ? installedBuild : null);
 let stagedBuild = null;
+let patchedBiliAgent;
 if (!dryRun && candidateBuild) {
   const stage = mkdtempSync(join(tmpdir(), "bili-install-"));
   process.on("exit", () => {
@@ -215,6 +218,11 @@ if (!dryRun && candidateBuild) {
     stdio: ["ignore", "ignore", "inherit"], timeout: 30000,
     env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
   });
+  patchedBiliAgent = patchBiliAgentBundle(readFileSync(join(target, "dist/agent/dsh-native.js"), "utf8"));
+  const stagedAgent = join(stage, "dsh-native.mjs");
+  writeFileSync(stagedAgent, patchedBiliAgent.text);
+  execFileSync(process.execPath, ["--check", stagedAgent], { stdio: ["ignore", "ignore", "inherit"], timeout: 10000 });
+  assertAgentUpstreamUx(stagedAgent);
 }
 const smokeTarget = stagedBuild;
 // A build that fails its own smoke test never replaces a working one. The call
@@ -247,6 +255,10 @@ if (!dryRun && !argv.includes("--skip-smoke") && smokeTarget) {
     execFileSync(process.execPath, [join(here, "smoke.mjs"), smokeTarget], {
       stdio: "inherit",
       timeout: 30000,
+      env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
+    });
+    execFileSync(process.execPath, [join(here, "check-outbound-encoding.mjs"), smokeTarget], {
+      stdio: "inherit", timeout: 30000,
       env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
     });
   } catch {
@@ -366,6 +378,7 @@ const BILI_FILES = [
 ];
 if (resolve(target) !== resolve(vendorBili)) copyInto(target, vendorBili, BILI_FILES);
 else say("billion-context: already vendored at " + vendorBili);
+if (!dryRun && patchedBiliAgent) writeFileSync(join(vendorBili, "dist/agent/dsh-native.js"), patchedBiliAgent.text);
 
 // The accelerator is a plain ES module package: its manifest plus lib/.
 const acceleratorFiles = (from) => [

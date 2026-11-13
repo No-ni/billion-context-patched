@@ -1,10 +1,41 @@
 // <bili-preflight begin>
+var __biliSnapshotAttempts = new WeakMap();
+function __biliBeginSnapshotTurn(session, clientMsgs, deps) {
+  // A degraded reason from an earlier request is not evidence about this one.
+  delete session.metadata.snapshotRenderDegradeReason;
+  __biliSnapshotAttempts.set(session, {
+    messages: clientMsgs,
+    allowed: featureEnabled("snapshotRender") &&
+      (!deps.pluginMode || __biliPluginLaneSnapshot()) &&
+      !(typeof resolveStorageModeSafe === "function" && resolveStorageModeSafe() === "legacy"),
+  });
+}
+
+function __biliSnapshotAwareTurn(session, core, input) {
+  const attempt = __biliSnapshotAttempts.get(session);
+  __biliSnapshotAttempts.delete(session);
+  const transient = ["block-unanchored", "store-unavailable", "transcript-empty",
+    "transcript-error", "view-pointer-missing-row"].includes(session.metadata.snapshotRenderDegradeReason);
+  if (attempt?.allowed && attempt.messages === input.messages && transient &&
+      typeof session.metadata.snapshotRenderTailStart !== "number" &&
+      session.state.blocks.some(block => block.active)) {
+    // Raw messages resurfacing after a read miss are not new identical message
+    // instances. Preserve refs, times and live blocks until the queued save and
+    // the bounded re-render have run. Normal edits/rebases already reconciled
+    // before this guard; valid rendered/pinned views still enter the kernel.
+    return { __biliSnapshotDeferred: true, messages: input.messages, state: input.state,
+      contentStore: input.contentStore, nudge: undefined, statusLine: undefined };
+  }
+  return core.processTurn(input);
+}
+
 function __biliSnapshotDegraded(prepared) {
   const session = prepared.session;
   if (prepared.sidePassthrough || !featureEnabled("snapshotRender") ||
       (prepared.pluginMode && !__biliPluginLaneSnapshot()) ||
       typeof session.metadata.snapshotRenderTailStart === "number" ||
-      !session.state.blocks.some(block => block.active)) return null;
+      !session.state.blocks.some(block => block.active) ||
+      (typeof resolveStorageModeSafe === "function" && resolveStorageModeSafe() === "legacy")) return null;
   const reason = session.metadata.snapshotRenderDegradeReason;
   return typeof reason === "string" && reason.length > 0 ? reason : null;
 }
@@ -38,10 +69,17 @@ async function __biliRecoverSnapshot(prepared, runPrepare, res, log2) {
   // retains the normal coverage checks and must not count a second request.
   try {
     const rebuilt = await runPrepare();
+    if (res.destroyed || res.writableEnded) return null;
     log2("info", `[${session.id}] [snapshot-recovery] re-prepared once after ${reason}; rendered=${typeof session.metadata.snapshotRenderTailStart === "number"}`);
     return rebuilt;
   } finally {
-    session.stats.requests = requests;
+    if (session.stats.requests !== requests) {
+      session.stats.requests = requests;
+      // The full/index-only writer can snapshot a replay in a microtask before
+      // this continuation runs. Persist the correction even on fail-fast or
+      // disconnect paths that will not have a later successful usage write.
+      markDirty(session);
+    }
   }
 }
 

@@ -314,7 +314,7 @@ try {
   assert.equal(built.version, JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).version);
   assert.match(built.patchBuild.id, /^[a-f0-9]{64}$/);
   for (const file of ["lib/index.js", "lib/upstream.js", "lib/defaults.js", "lib/client.js", "vendor/yaml/LICENSE", "vendor/zod/index.js", "dsh.bundle.patch.yml"]) assert(existsSync(join(output, file)));
-  assertUpstreamUx(join(output, "vendor/billion-context/dist/index.js"), join(output, "lib/client.js"));
+  assertUpstreamUx(join(output, "vendor/billion-context/dist/index.js"), join(output, "lib/client.js"), join(output, "vendor/billion-context/dist/agent/dsh-native.js"));
   execFileSync(process.execPath, [join(repo, "scripts/install.mjs"), "--build", "--out", output],
     { timeout: 45000, stdio: "pipe" });
   assert.deepEqual(JSON.parse(readFileSync(join(output, "package.json"))).patchBuild, built.patchBuild);

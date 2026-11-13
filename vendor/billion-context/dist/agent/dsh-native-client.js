@@ -754,7 +754,7 @@ function apply(ctx) {
       (0, import_react.createElement)("div", { style: { fontSize: 13, fontWeight: 600 } }, header),
       ...rows.map((r) => {
         const code = r.code !== void 0 ? ` ${r.code}` : "";
-        const s = r.nextProbeInMs !== void 0 ? Math.max(1, Math.ceil(r.nextProbeInMs / 1e3)) : void 0;
+        const s = r.nextProbeInMs !== void 0 && r.nextProbeInMs > 0 ? Math.ceil(r.nextProbeInMs / 1e3) : void 0;
         const eta = s !== void 0 ? ` \xB7 ${t("upstream_retry_hint").replace("{s}", String(s))}` : "";
         return (0, import_react.createElement)("div", { key: r.host, style: { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12, lineHeight: 1.5 } }, `${r.host} \xB7 ${r.kind}${code} \xD7${r.count}${eta}`);
       })

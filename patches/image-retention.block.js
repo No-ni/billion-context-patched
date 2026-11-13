@@ -8,21 +8,23 @@
 // The same pass shrinks what is still leaving, through whatever the host
 // already ships: /usr/bin/sips on macOS, Windows PowerShell's System.Drawing on
 // win32, ImageMagick on PATH anywhere else. Each backend is offered both a JPEG
-// and a PNG encoding and the smaller one is kept. Without any of them (or with
-// jimp installed, where upstream's own pass already ran) nothing changes here.
+// and a PNG encoding and the smaller one is kept. Without a usable encoder or
+// enough byte savings, the original pixels are kept.
 //
 // Off switch: imageRetention:false in the config file, or BILI_IMAGE_RETENTION=0.
 
 var BILI_RETENTION_SEEN_CAP = 400;
 var BILI_RETENTION_SHRINK_CACHE_CAP = 16;
+var BILI_RETENTION_VARIANT_CACHE_CAP = 16;
 var BILI_RETENTION_TRIGGER_BYTES = 100 * 1024;
 var BILI_RETENTION_KEEP_RATIO = 0.8;
 var BILI_RETENTION_DEFAULT_MAX_DIM = 1200;
 var BILI_RETENTION_SEEN_TEXT = "\u5df2\u770b\u8fc7\uFF0C\u540e\u7eed\u8bf7\u6c42\u4e0d\u518d\u91cd\u4f20";
 var BILI_RETENTION_RESTORE_TEXT = "\uFF1B\u9700\u8981\u539f\u56fe\u65f6\u8c03\u7528 {ref}";
 var biliRetentionShrinkCache = new Map;
-var biliRetentionPendingBySession = new Map;
-var biliRetentionSessions = new Map;
+var biliRetentionVariants = new Map;
+var biliRetentionPendingByAttempt = new WeakMap;
+var biliRetentionReceipts = new WeakMap;
 
 function biliRetentionConfig() {
   try {
@@ -90,32 +92,121 @@ function biliRetentionRemember(session, hashes) {
   } catch (err) {}
 }
 
-function biliRetentionTrack(session) {
-  if (!session || typeof session.id !== "string") return;
-  biliRetentionSessions.set(session.id, session);
-  while (biliRetentionSessions.size > 32) {
-    const oldest = biliRetentionSessions.keys().next().value;
-    if (oldest === void 0 || oldest === session.id) break;
-    biliRetentionSessions.delete(oldest);
+function biliRetentionAttempt(value) {
+  return value !== null && (typeof value === "object" || typeof value === "function") ? value : void 0;
+}
+
+function biliRetentionClearPending(attempt) {
+  if (biliRetentionAttempt(attempt) === void 0) return;
+  const previous = biliRetentionPendingByAttempt.get(attempt);
+  if (previous !== void 0 && previous.receipt !== void 0) biliRetentionReceipts.delete(previous.receipt);
+  biliRetentionPendingByAttempt.delete(attempt);
+}
+
+// A forward runs outside the session lock. Park its sightings on its own
+// opaque attempt object, never on a shared session-id slot. A new retry only
+// replaces this attempt's pending images and invalidates its old receipt.
+function biliRetentionMarkPending(session, images, attempt) {
+  if (!session || typeof session.id !== "string" || biliRetentionAttempt(attempt) === void 0) return;
+  if (!Array.isArray(images) || images.length === 0) return;
+  biliRetentionPendingByAttempt.set(attempt, { session: session, sessionId: session.id, images: images.slice() });
+}
+
+// Apply runs before the shedder. Only the pixels surviving the final plaintext
+// wire body can be promoted on success; discarded or unknown replacements do
+// not prove that their originals were seen. The opaque receipt snapshots this
+// send and must be passed explicitly to its own successful-forward hook.
+function biliRetentionFinalize(body, protocol, session, attempt) {
+  if (!session || typeof session.id !== "string" || biliRetentionAttempt(attempt) === void 0) return;
+  const pending = biliRetentionPendingByAttempt.get(attempt);
+  if (pending === void 0) return;
+  if (pending.receipt !== void 0) biliRetentionReceipts.delete(pending.receipt);
+  try {
+    if (pending.session !== session || pending.sessionId !== session.id) throw new Error("image finalization session does not match its attempt");
+    if (typeof body !== "string") throw new Error("image finalization needs a plaintext body");
+    const parsed = JSON.parse(body);
+    if (!isObj4(parsed)) throw new Error("image finalization needs an object body");
+    const wireCounts = new Map;
+    for (const image of biliRetentionCollect(protocol, biliRetentionRequestBody(protocol, parsed))) {
+      const hash = biliRetentionHash(image.b64);
+      wireCounts.set(hash, (wireCounts.get(hash) || 0) + 1);
+    }
+    const groups = new Map;
+    for (const image of pending.images) {
+      let group = groups.get(image.wireHash);
+      if (group === void 0) {
+        group = [];
+        groups.set(image.wireHash, group);
+      }
+      group.push(image);
+    }
+    const survivors = [];
+    for (const [hash, group] of groups) {
+      const remaining = wireCounts.get(hash) || 0;
+      if (remaining === 0) continue;
+      const originals = new Set(group.map(function (image) { return image.originalHash; }));
+      // Different originals can resize to identical pixels. If some copies
+      // were shed, the hash alone cannot identify the surviving original.
+      if (originals.size > 1 && remaining < group.length) {
+        survivors.push({ originalHash: hash, wireHash: hash });
+      } else {
+        for (const image of group) survivors.push(image);
+      }
+    }
+    if (survivors.length === 0) {
+      biliRetentionClearPending(attempt);
+      return;
+    }
+    const receipt = {};
+    pending.receipt = receipt;
+    biliRetentionReceipts.set(receipt, { session: session, sessionId: session.id, images: survivors });
+    return receipt;
+  } catch (err) {
+    biliRetentionClearPending(attempt);
   }
 }
 
-// A sighting only counts once the request actually made it upstream: the
-// pre-send pass parks the hashes here and the forward hook promotes them.
-function biliRetentionMarkPending(session, hashes) {
-  if (!session || typeof session.id !== "string" || !Array.isArray(hashes) || hashes.length === 0) return;
-  biliRetentionTrack(session);
-  biliRetentionPendingBySession.set(session.id, hashes.slice());
+function biliRetentionCommit(sessionId, receipt) {
+  if (typeof sessionId !== "string" || biliRetentionAttempt(receipt) === void 0) return;
+  const accepted = biliRetentionReceipts.get(receipt);
+  if (accepted === void 0 || accepted.sessionId !== sessionId || accepted.session.id !== sessionId) return;
+  biliRetentionReceipts.delete(receipt);
+  const hashes = [];
+  for (const image of accepted.images) hashes.push(image.originalHash, image.wireHash);
+  biliRetentionRemember(accepted.session, hashes);
 }
 
-function biliRetentionCommit(sessionId) {
-  if (typeof sessionId !== "string") return;
-  const hashes = biliRetentionPendingBySession.get(sessionId);
-  if (hashes === void 0) return;
-  biliRetentionPendingBySession.delete(sessionId);
-  const session = biliRetentionSessions.get(sessionId);
-  if (!session) return;
-  biliRetentionRemember(session, hashes);
+// A retry may start from the already resized outbound copy. Remember its
+// original identity without treating it as seen, and avoid resizing that copy
+// twice under the same settings. Colliding aliases never guess an original.
+function biliRetentionVariantKey(session, hash) {
+  return session && typeof session.id === "string" ? JSON.stringify([session.id, hash]) : void 0;
+}
+
+function biliRetentionVariant(session, hash) {
+  const key = biliRetentionVariantKey(session, hash);
+  return key === void 0 ? void 0 : biliRetentionVariants.get(key);
+}
+
+function biliRetentionRememberVariant(session, wireHash, mediaType, maxDim, originalHash, originalMediaType, originalB64) {
+  const key = biliRetentionVariantKey(session, wireHash);
+  if (key === void 0) return;
+  const previous = biliRetentionVariants.get(key);
+  const ambiguous = previous !== void 0 && (previous.ambiguous || previous.originalHash !== originalHash);
+  biliRetentionVariants.delete(key);
+  biliRetentionVariants.set(key, {
+    mediaType: mediaType,
+    maxDim: maxDim,
+    ambiguous: ambiguous,
+    originalHash: ambiguous ? void 0 : originalHash,
+    originalMediaType: ambiguous ? void 0 : originalMediaType,
+    originalB64: ambiguous ? void 0 : originalB64
+  });
+  while (biliRetentionVariants.size > BILI_RETENTION_VARIANT_CACHE_CAP) {
+    const oldest = biliRetentionVariants.keys().next().value;
+    if (oldest === void 0 || oldest === key) break;
+    biliRetentionVariants.delete(oldest);
+  }
 }
 
 // --- shrinking what still goes out -----------------------------------------
@@ -343,9 +434,9 @@ async function biliRetentionShrinkOne(mediaType, b64, maxDim) {
   }
 }
 
-function biliRetentionShrink(mediaType, b64) {
+function biliRetentionShrink(mediaType, b64, maxDim) {
   if (biliRetentionBackends().length === 0) return Promise.resolve(null);
-  const maxDim = biliRetentionMaxDim();
+  if (maxDim === void 0) maxDim = biliRetentionMaxDim();
   const key = biliRetentionHash(b64) + ":" + mediaType + ":" + maxDim;
   let pending = biliRetentionShrinkCache.get(key);
   if (pending === void 0) {
@@ -387,17 +478,44 @@ function biliRetentionPushAnthropic(occ, parts, entryIndex) {
   });
 }
 
-function biliRetentionCollect(protocol, body) {
-  const occ = [];
-  if (protocol === "google") {
-    const contents = Array.isArray(body.contents) ? body.contents : [];
-    contents.forEach(function (content, entryIndex) {
-      if (!isObj4(content) || !Array.isArray(content.parts)) return;
-      content.parts.forEach(function (part, pos) {
-        if (!isObj4(part)) return;
-        const inline = part.inlineData;
-        if (!isObj4(inline) || typeof inline.data !== "string" || inline.data.length === 0) return;
-        const mediaType = typeof inline.mimeType === "string" ? inline.mimeType : "image/png";
+function biliRetentionGoogleNoteWriter(toolResponse) {
+  const previous = toolResponse.response;
+  const response = isObj4(previous) ? { ...previous } : previous === void 0 ? {} : { output: previous };
+  toolResponse.response = response;
+  // Google can select output/error as the effective function result. Keep
+  // the notes inside that value, rather than in an ignored sibling field.
+  const field = Object.prototype.hasOwnProperty.call(response, "output") ? "output" : Object.prototype.hasOwnProperty.call(response, "error") ? "error" : void 0;
+  if (field !== void 0 && typeof response[field] === "string") {
+    return function (note) { response[field] += "\n" + note; };
+  }
+  let target = response;
+  if (field !== void 0) {
+    const value = response[field];
+    if (Array.isArray(value)) {
+      const output = value.slice();
+      response[field] = output;
+      return function (note) { output.push(note); };
+    }
+    target = isObj4(value) ? { ...value } : { biliOriginalValue: value };
+    response[field] = target;
+  }
+  let notesKey = "biliImageNotes";
+  while (Object.prototype.hasOwnProperty.call(target, notesKey)) notesKey = "_" + notesKey;
+  target[notesKey] = [];
+  return function (note) { target[notesKey].push(note); };
+}
+
+function biliRetentionPushGoogle(occ, parts, entryIndex, toolResponse) {
+  if (!Array.isArray(parts)) return;
+  let writeNote;
+  parts.forEach(function (part) {
+    if (!isObj4(part)) return;
+    const inline = part.inlineData;
+    if (isObj4(inline) && typeof inline.data === "string" && inline.data.length > 0) {
+      const mediaType = typeof inline.mimeType === "string" ? inline.mimeType : "image/png";
+      // inlineData is also Google's carrier for audio, video and documents.
+      // Missing MIME keeps the historical image/png fallback.
+      if (/^image\//i.test(mediaType)) {
         occ.push({
           entryIndex: entryIndex,
           b64: inline.data,
@@ -407,10 +525,44 @@ function biliRetentionCollect(protocol, body) {
             inline.mimeType = mime;
           },
           applyArchive: function (note) {
-            content.parts[pos] = { text: note };
+            const pos = parts.indexOf(part);
+            if (pos === -1) return;
+            if (!toolResponse) {
+              parts[pos] = { text: note };
+              return;
+            }
+            // FunctionResponse.parts only accepts media parts. Put the text
+            // in its JSON response and leave every unrelated result intact.
+            parts.splice(pos, 1);
+            if (parts.length === 0) delete toolResponse.parts;
+            if (writeNote === void 0) writeNote = biliRetentionGoogleNoteWriter(toolResponse);
+            writeNote(note);
           }
         });
-      });
+      }
+    }
+    const response = part.functionResponse;
+    if (!toolResponse && isObj4(response) && Array.isArray(response.parts)) {
+      biliRetentionPushGoogle(occ, response.parts, entryIndex, response);
+    }
+  });
+}
+
+// v1internal wraps the native Google request before loop serialization. Work
+// on the inner request while serializing the original outer graph, preserving
+// project/model/request-id metadata and all other envelope fields.
+function biliRetentionRequestBody(protocol, body) {
+  if (protocol === "google" && !Array.isArray(body.contents) && isObj4(body.request) && Array.isArray(body.request.contents)) return body.request;
+  return body;
+}
+
+function biliRetentionCollect(protocol, body) {
+  const occ = [];
+  if (protocol === "google") {
+    const contents = Array.isArray(body.contents) ? body.contents : [];
+    contents.forEach(function (content, entryIndex) {
+      if (!isObj4(content) || !Array.isArray(content.parts)) return;
+      biliRetentionPushGoogle(occ, content.parts, entryIndex);
     });
     return occ;
   }
@@ -418,7 +570,7 @@ function biliRetentionCollect(protocol, body) {
     const input = Array.isArray(body.input) ? body.input : [];
     input.forEach(function (item, entryIndex) {
       if (!isObj4(item)) return;
-      const key = item.type === "message" ? "content" : item.type === "function_call_output" || item.type === "custom_tool_call_output" ? "output" : void 0;
+      const key = item.type === "message" || item.type === void 0 && typeof item.role === "string" ? "content" : item.type === "function_call_output" || item.type === "custom_tool_call_output" ? "output" : void 0;
       if (key === void 0 || !Array.isArray(item[key])) return;
       const parts = item[key];
       parts.forEach(function (part, pos) {
@@ -480,12 +632,16 @@ function biliRetentionFreshUpload(protocol, body) {
   if (protocol === "google") {
     const contents = Array.isArray(body.contents) ? body.contents : [];
     const last = contents[contents.length - 1];
-    return isObj4(last) && last.role === "user" ? contents.length - 1 : -1;
+    if (!isObj4(last) || last.role !== "user") return -1;
+    if (Array.isArray(last.parts) && last.parts.some(function (part) {
+      return isObj4(part) && isObj4(part.functionResponse);
+    })) return -1;
+    return contents.length - 1;
   }
   if (protocol === "responses") {
     const input = Array.isArray(body.input) ? body.input : [];
     const last = input[input.length - 1];
-    return isObj4(last) && last.type === "message" && last.role === "user" ? input.length - 1 : -1;
+    return isObj4(last) && (last.type === "message" || last.type === void 0) && last.role === "user" ? input.length - 1 : -1;
   }
   const messages = Array.isArray(body.messages) ? body.messages : [];
   const last = messages[messages.length - 1];
@@ -502,6 +658,9 @@ function biliRetentionToolsArmed(body) {
     if (!isObj4(tool)) continue;
     const name = typeof tool.name === "string" ? tool.name : isObj4(tool.function) && typeof tool.function.name === "string" ? tool.function.name : void 0;
     if (name === READ_ORIGINAL_IMAGE_TOOL_NAME) return true;
+    if (Array.isArray(tool.functionDeclarations) && tool.functionDeclarations.some(function (declaration) {
+      return isObj4(declaration) && declaration.name === READ_ORIGINAL_IMAGE_TOOL_NAME;
+    })) return true;
   }
   return false;
 }
@@ -522,7 +681,14 @@ function biliRetentionNote(origMediaType, b64, ref, armed) {
 
 async function biliRetentionApply(body, protocol, session, ctx) {
   const noop = { body: body, changed: false, folded: 0, shrunk: 0 };
+  const attempt = biliRetentionAttempt(ctx && ctx.attempt);
   try {
+    // A failed attempt's pixels cannot be credited to a later text-only or
+    // disabled retry that happens to succeed for the same forward.
+    biliRetentionClearPending(attempt);
+    // An uninstrumented send has no receipt owner: preserve its pixels and
+    // make no session-id guess about which request might later succeed.
+    if (attempt === void 0) return noop;
     if (!biliRetentionEnabled()) return noop;
     if (typeof body !== "string" || body.length < 256) return noop;
     if (body.indexOf("base64") === -1 && body.indexOf("inlineData") === -1) return noop;
@@ -533,40 +699,49 @@ async function biliRetentionApply(body, protocol, session, ctx) {
       return noop;
     }
     if (!isObj4(parsed)) return noop;
-    const occurrences = biliRetentionCollect(protocol, parsed);
+    const requestBody = biliRetentionRequestBody(protocol, parsed);
+    const occurrences = biliRetentionCollect(protocol, requestBody);
     if (occurrences.length === 0) return noop;
     const seen = biliRetentionSeen(session);
-    const armed = biliRetentionToolsArmed(parsed);
-    const fresh = biliRetentionKeepLastUser() ? biliRetentionFreshUpload(protocol, parsed) : -1;
-    const hashes = [];
+    const armed = biliRetentionToolsArmed(requestBody);
+    const fresh = biliRetentionKeepLastUser() ? biliRetentionFreshUpload(protocol, requestBody) : -1;
+    const maxDim = biliRetentionMaxDim();
+    const images = [];
     let changed = false;
     let folded = 0;
     let shrunk = 0;
     for (const occurrence of occurrences) {
-      const origB64 = occurrence.b64;
-      const origMediaType = occurrence.mediaType;
-      const hashOrig = biliRetentionHash(origB64);
+      const hashInput = biliRetentionHash(occurrence.b64);
+      const variant = biliRetentionVariant(session, hashInput);
+      const knownOrigin = variant !== void 0 && !variant.ambiguous;
+      const origB64 = knownOrigin ? variant.originalB64 : occurrence.b64;
+      const origMediaType = knownOrigin ? variant.originalMediaType : occurrence.mediaType;
+      const hashOrig = knownOrigin ? variant.originalHash : hashInput;
+      const alreadyResized = variant !== void 0 && variant.mediaType === occurrence.mediaType && variant.maxDim === maxDim;
       const isFresh = occurrence.entryIndex === fresh;
       let ref;
       try {
-        ref = session === void 0 ? void 0 : refForItemBytes(session, origMediaType, origB64);
+        ref = session === void 0 ? void 0 : await refForItemBytes(session, origMediaType, origB64);
+        if (typeof ref !== "string" || !/^m\d{5,}$/.test(ref)) ref = void 0;
       } catch (err) {
         ref = void 0;
       }
-      hashes.push(hashOrig);
       // Already looked at: fold first, so a doomed picture never pays for a
-      // resize that would be thrown away in the same pass.
-      if (!isFresh && seen.has(hashOrig)) {
+      // resize that would be thrown away in the same pass. No recoverable ref
+      // means keeping the pixels, rather than replacing them with a dead end.
+      if (ref && !isFresh && (seen.has(hashOrig) || seen.has(hashInput))) {
         occurrence.applyArchive(biliRetentionNote(origMediaType, origB64, ref, armed));
         folded++;
         changed = true;
         continue;
       }
-      const smaller = await biliRetentionShrink(origMediaType, origB64);
+      const smaller = alreadyResized ? null : await biliRetentionShrink(occurrence.mediaType, occurrence.b64, maxDim);
+      let hashWire = hashInput;
       if (smaller !== null) {
-        const hashWire = biliRetentionHash(smaller.base64);
-        hashes.push(hashWire);
-        if (!isFresh && seen.has(hashWire)) {
+        hashWire = biliRetentionHash(smaller.base64);
+        biliRetentionRememberVariant(session, hashWire, smaller.mime, maxDim, hashOrig, origMediaType, origB64);
+        const wireVariant = biliRetentionVariant(session, hashWire);
+        if (ref && !isFresh && seen.has(hashWire) && wireVariant !== void 0 && !wireVariant.ambiguous && wireVariant.originalHash === hashOrig) {
           occurrence.applyArchive(biliRetentionNote(origMediaType, origB64, ref, armed));
           folded++;
           changed = true;
@@ -576,8 +751,9 @@ async function biliRetentionApply(body, protocol, session, ctx) {
         shrunk++;
         changed = true;
       }
+      images.push({ originalHash: hashOrig, wireHash: hashWire });
     }
-    biliRetentionMarkPending(session, hashes);
+    biliRetentionMarkPending(session, images, attempt);
     if (!changed) return noop;
     const next = JSON.stringify(parsed);
     return { body: next, changed: true, folded: folded, shrunk: shrunk };

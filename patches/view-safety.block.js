@@ -5,9 +5,39 @@ function __biliPrefixDigest(messages, count) {
   return hash.digest("hex");
 }
 
+// Compare only compression state that can change this prefix's coverage or
+// anchor layout. Stats and blocks confined to a newly appended tail are inert.
+function __biliPrefixBlockDigest(session, messages, count, view) {
+  const blocks = session.state.blocks;
+  const ids = new Set(messages.slice(0, count).map(m => m.id));
+  const relevant = new Set(view.filter(m => m.id?.startsWith("acp_summary_"))
+    .map(m => m.id.slice(12)));
+  for (const b of blocks) {
+    if (b.effectiveMessageIds.some(id => ids.has(id))) relevant.add(b.blockId);
+  }
+  const byId = new Map(blocks.map(b => [b.blockId, b]));
+  const pending = [...relevant];
+  for (let i = 0; i < pending.length; i++) {
+    for (const id of byId.get(pending[i])?.directBlockIds ?? []) {
+      if (!relevant.has(id)) { relevant.add(id); pending.push(id); }
+    }
+  }
+  const layout = blocks.filter(b => relevant.has(b.blockId)).map(b => ({
+    id: b.blockId, active: b.active === true, retired: b.retired === true,
+    expanded: b.expanded === true, restoredInline: b.restoredInline === true,
+    tier: b.tier, summary: b.summary, rewrittenAt: b.rewrittenAt,
+    directMessageIds: b.directMessageIds, effectiveMessageIds: b.effectiveMessageIds,
+    directBlockIds: b.directBlockIds, startRef: b.startRef, endRef: b.endRef,
+    startSeq: b.startSeq, endSeq: b.endSeq,
+  }));
+  return require("node:crypto").createHash("sha256")
+    .update(JSON.stringify(layout)).digest("hex");
+}
+
 function __biliPinMatches(session, messages, pin) {
   if (!pin || !Array.isArray(messages) || messages.length < pin.count) return false;
   if (__biliPrefixDigest(messages, pin.count) !== pin.digest) return false;
+  if (__biliPrefixBlockDigest(session, messages, pin.count, pin.view) !== pin.blocksDigest) return false;
   // A pin holds summary placeholders. An inactive/removed block can no longer
   // fill its placeholder after a re-compression, even if the raw prefix matches.
   const active = new Set(session.state.blocks.filter(b => b.active).map(b => b.blockId));
@@ -18,7 +48,8 @@ function __biliPinViewRecord(session, clientMsgs, view) {
   try {
     if (!session || typeof session.id !== "string" || !Array.isArray(clientMsgs) || !Array.isArray(view) || !view.length) return;
     const pin = {view: JSON.parse(JSON.stringify(view)), count: clientMsgs.length,
-      digest: __biliPrefixDigest(clientMsgs, clientMsgs.length)};
+      digest: __biliPrefixDigest(clientMsgs, clientMsgs.length),
+      blocksDigest: __biliPrefixBlockDigest(session, clientMsgs, clientMsgs.length, view)};
     __biliPinnedViews.delete(session.id);
     __biliPinnedViews.set(session.id, pin);
     while (__biliPinnedViews.size > 8) __biliPinnedViews.delete(__biliPinnedViews.keys().next().value);

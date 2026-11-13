@@ -5,7 +5,7 @@
 文中的代码路径与命令均相对于仓库根目录。用户说明见 [USAGE.md](USAGE.md)，版本摘要见 [CHANGELOG.md](../CHANGELOG.md)。
 
 - 上游：<https://github.com/ranxianglei/billion-context>（MIT，Copyright (c) 2026 ranxianglei）
-- 本分支基线：上游 `master` 的 `406193b2`（上游版本号仍是 0.1.213，比那次发版多 155 个提交，见第 15 节）
+- 当前固定基线：上游 `0d94a8a2`（上游版本号仍是 0.1.213，kernel 0.0.196）；从旧 `406193b2` 的迁移见第 28 节，第 15 节保存当时的来源历史。
 - 我们的改动不是一份 diff：bili 构建上的二十二组补丁由 `scripts/patch-bili-build.mjs`（B20 在 `scripts/patch-bili-client.mjs`）按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
 
 项目需求及验收以 [SPEC.md](SPEC.md) 为准。当前维护分为 bili 构建 B1–B22、包装包 W1–W7、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
@@ -25,9 +25,9 @@
 
 当前仍保留指定中转主机渠道的压缩缺省值规则（仅补缺失键）。`promptCache.routing=enabled` 默认值已在 0.5.4 恢复并纳入第 11 组补丁，见第 7、19 节；显式配置优先。
 
-### 0.2 我们对 bili 构建的二十一组补丁
+### 0.2 我们对 bili 构建的二十二组补丁
 
-改的都是 `vendor/billion-context/dist/index.js`，由 `scripts/patch-bili-build.mjs` 按顺序重打。多数新插入位置要求唯一命中；步骤 6/7 在缺少锚点时仍可能打印 skipped。必须逐项检查输出并验证最终构建，不能把退出码当成十一项全齐的证明。
+代理补丁由 `scripts/patch-bili-build.mjs` 按顺序重打；B20 在 client 补丁器，native 的 WS 头在 agent 补丁器。新插入位置要求唯一命中，步骤 6/7 缺锚点已改为失败；helper 标记不能代替源一致性和最终行为检查。下表的旧锚点是历史定位，0.6.8 对新上游的实际锚点及相邻发送路径以脚本和第 28 节为准。
 
 | # | 做什么 | 锚点（上游原文） | 开关 / 落点 | 细节 |
 | --- | --- | --- | --- | --- |
@@ -52,6 +52,7 @@
 | 19 | 删掉上游熔断：不再按主机累计失败、不提前失败、不发 503 与 retry-after，连接类失败按普通失败交给 DSH 重试 | `var CIRCUIT_OPEN_AFTER=3;`、`function recordUpstreamCircuitFailure(url,error,viaProxy,detail){`、`function getOpenUpstreamCircuits(){`、`const circuitBlock=upstreamCircuitBlockReason(upstreamUrl);`、`const openCircuits=getOpenUpstreamCircuits();`、`/__bili/upstreams` 路由、`clearUpstreamAlertsForHost(...);recordUpstreamCircuitSuccess(upstreamUrl)`、`recordUpstreamCircuitFailure(...)` 整句 | 第 19 节；幂等判据是没有 `CIRCUIT_OPEN_AFTER` 与 `/__bili/upstreams`。保留 `classifyUpstreamFailure`、`describeUpstreamFailure`、`isFailFastUpstreamKind` 与 alerts | 第 25 节 |
 | 20 | 删掉客户端 shell 上的上游红框横幅、10 秒轮询与四个词条；页面里的连接失败提示改成读者能看懂的说法 | 客户端 bundle `dist/agent/dsh-native-client.js`：`var UPSTREAM_POLL_MS = 1e4;`、`function parseUpstreamHealth(raw)`、`const upstreamBanner = ...`、`ctx.slots.inject("shell.overlay", ...)` 那四行、`upstreams_label`/`upstreams_down_one`/`upstreams_down_many`/`upstream_retry_hint`（中英各一份） | `scripts/patch-bili-client.mjs`，由 `install.mjs` 合并客户端 bundle 前施加；幂等，二次运行打印 already removed | 第 25 节 |
 | 21 | 代理失败与流内联错误改成中文短句，英文诊断只进 detail 与日志；413 保留、其余 502，不再发 retry-after | `function buildProxyFailureResponse(msg,err2){`、`var TRANSPORT_FAILURE_LABELS={`、两处 `adapter.emitError(`、`upstream stream truncated (`、`ended before a completion event`、`[ACP] stream error:`、note 三元与“the follow-up request to the model failed”句 | 第 21 节，新增 `__biliFailureTextZh(msg,uf)`；<b>不能改</b> `[ACP] ... FAILED:` 里的 `FAILED`（吸收判定依赖它） | 第 25 节 |
+| 22 | 快照暂时缺行的有界等待/重渲染及预检错误口径；当前 request 的 kernel/post-processing guard 和重做计数落盘纠正 | `preflightCompressIfNeeded`、四协议 prepare、`maybeSnapshotView`、`recordNudgeObservation` | `patches/preflight.block.js` 可替换哨兵；live/插件标记/storage 模式与覆盖条件保留 | 第 26、28 节 |
 
 第 4 组依赖第 2、3 组，第 8 组依赖 pin，第 10 组升级第 4、8、9 组并同时检查普通与增量拼接点；按脚本顺序执行，所有步骤支持重复运行。
 
@@ -765,3 +766,39 @@ README 去掉版本号和逐版摘要，CHANGELOG 只保留用户可见变化并
 统一检查复用既有脚本：offline 不访问用户 profile/真实模型，但允许本机模拟端口与系统编码器；host 显式指定实际模块，缺依赖不能记为通过。维护检查核对全部稳定 ID 与文档链接，版本检查共用 CHANGELOG 提取器。CI 检查先构建最终产物，再要求生成物无差异并运行完整 offline 链。
 
 本地 `release.mjs` 只准备版本文件、构建和验证，不自动提交、推送或发布。CI 是新版本的唯一发布者：从干净 tag 用 `git archive` 打包，建立草稿，上传并下载核对 ZIP/SHA256SUMS 后公开；已公开版本重跑只校验，不覆盖附件。0.6.6 旧标签没有这些脚本，本轮从旧标签内容一次性补录 Release，保持标签不变；后续版本只走新流程。具体步骤见 [RELEASING.md](RELEASING.md)，验证及交付结果见[本轮审计](audits/2026-11-12-maintenance-release.md)。
+
+## 28. 2026-11-13：固定上游整体吸收（0.6.8）
+
+用户批准整体推荐组合，固定 `0d94a8a240fa0f7648f84032b03150f6b1891167` 源码重新构建，kernel 升至 0.0.196。统一 KV、同步消息索引、异步 flush、预检重建收敛、日志多代归档、Web 面板、端点和 Codex Responses WS 随固定源码吸收。批量摘要使用整批最小长度；compressAtFoldPoint 移除；blockOps 默认关闭，rewrite 不限于变短、restore 不撤销 rewrite；egressTransforms 默认无规则。既定 B/W/I/PCK 默认与拒绝条件保留，详见 [SPEC 决策](SPEC.md#9-决策记录) 和 [本轮审计](audits/2026-11-13-upstream-0.6.8.md)。
+
+### 28.1 时间、旧画面与 native 身份
+
+上游 fork 的完整父时间表和首轮 suppressMintingOnce 会覆盖 B7。显式 fork 改为只复制 proven prefix，并登记父引用空间中尚未继承的 raw id；首次出现用子时钟。新 stamped branch 对父 HWM 以下的 raw id 又会隐藏已经显示的子时间，因此额外保留有界 `__biliForkTsVisible`，只允许真实首次盖戳并显示的 child stamp 豁免；disabled 首见与模糊历史仍诚实留空。sync/fold clone、mergeState 与机械派生的存储字段白名单同时接入，父子数组和表互不别名。
+
+pin 额外记录影响该前缀的摘要状态指纹，包括 retire/restore、rewrite、tier、展开、覆盖与相关块关系。摘要 id 相同或 active 不变也可能改变布局；无关 tail 块/计数变化保持有效前缀。完整 native factory 的 WS merge 原来会通过 object spread 或 tuple append 混合旧宿主标记，补丁改用 Headers.set 权威覆盖，同时保持 init、protocol 和 container 形状。
+
+### 28.2 最终发送对象与图片回执
+
+图片使用请求独立 attempt 和 opaque receipt。先 apply 再 shed，经过 egress transform 后核对最终明文图片，随后重签、协议封套和传输编码；只有该请求实际成功才能 commit。initial、recovery retry、stream loop 和 Anthropic/Responses JSON loop、fakeCompletion、empty-turn、reasoning continuation 逐入口接入；并发同会话请求不能覆盖回执。
+
+每一轮新明文独立复制 headers，继承私有压缩策略与 rid，只清理本补丁为旧 buffer 加的 encoding/length；同 buffer 重放保留编码，用户自带的预编码不被重新压缩。签名/变换使用实际新头，重建 body 后再捕获 headers。B1 对源 helper 逐函数一致性检查，保留 B5 dump 调用和 B6 夹在该区域的 key helper，拒绝只见旧标记就假装同步新 helper。
+
+Google 图片收集以 MIME 区分图片与音频/视频/PDF，兼容 request.contents、工具回图和原图异步取回；缩图映射与缓存有界、隔离、不猜歧义原图。四协议及系统编码器能力继续由图片专项与实际 localhost 测试验证。
+
+### 28.3 快照保护、计数与错误出口
+
+实际一次 SQLite transcript read miss 在 raw fallback 进入 kernel 后，会先触发重复实例编号和 sync-blocks，使最后 active 块消失，随后 B22 无从恢复。新 WeakMap 只记本次 maybeSnapshotView 的原始数组和允许条件；正常 compaction/reconcile 后，对已识别暂时 miss 暂缓该次 kernel，并用私有 turn marker 跳过后置 history rewrite/archive/orphan 和诊断重复计数。快照、同步索引、保存排队保持，原有一秒保存 barrier 和一次 runPrepare 重做保留；开关、显式 legacy、真实编辑/rebase 和 B9/B10 拒绝条件继续生效。
+
+独立只读扫描进一步发现 full/jsonWriter=off 的 scheduleSave 微任务先持久化了重做 requests=2，finally 只复位内存为1。复位后重新 markDirty，保证失败/断开等没有后续 usage save 的路径也排队纠正；重做期间断开会返回取消结果。预检回归直接抽取完整实际 scheduleSave writerOff 方法验证四种结果，不用只检查内存的替身代替持久化时序。
+
+B19 删除新熔断时保留 alerts 和真实 429 governor；B20 解析完整新 client factory 去横幅。B21 重写真实 HTTP、四协议 native/loop/completion 和 SSE-to-WS 错误出口，中文短句与 detail 分离，合法终止事件保留，FAILED 判定标记保持；本地 413/502 和请求体保护不变。
+
+最终扫描发现入口 read/decode/ingest 及辅助请求 side window guard 仍把英文诊断放在 message。所有这些 413 出口复用中文短句，原文移入 detail；原类型、阶段、code、guard 和 retryable 保留。回归直接执行最终编译的 reader、gzip codec、ingest gate、side 分类/分词/窗口判断与响应分支，小限制足以触发真实错误。receive 超限时原 reader 会 destroy 请求，真实 socket 可能先重置，因此分支载荷验证不承诺其 413 JSON 必定送达；decode/ingest 在完整读取后拒绝，可用 localhost HTTP 验证。
+
+同轮补齐 Responses WS 的本地 errorFrame：只对 413/5xx 使用中文及独立 detail，协议/身份/冲突的 400/403/409 保持原契约。完整 session/history 回归证明小于 receive cap 的增量帧在重建历史后仍可被正确拒绝，拒绝不污染 checkpoint，健康续接正常；完整 upstream 回归还覆盖握手拒绝后 HTTP prewarm 结束不完整及 fetch 失败。prewarm 是 generate=false 连接预热，不计作真实模型轮。
+
+模型隧道在 DNS admission 阶段的 unresolvable 原本直接返回英文长诊断。该分支保留 502、tunnel_destination_denied 和 detail=unresolvable，模型可见错误改为中文 DNS 失败，完整原文放入 upstreamFailure.hint，并保留 kind=dns 和 host；策略/格式拒绝的 400/403 不改。独立扫描用真实主线程三次 DNS 和新 worker 复现 ENOTFOUND 后复验，worker 正常退出。增量存储不可用 503 的 ack/探测契约、管理接口及原始 CONNECT/upgrade 状态行不属于这次模型 JSON/流错误修复。
+
+### 28.4 验证与维护
+
+三个补丁器从 clean 应用并二次字节幂等；installer 在正式替换前检查 service/native 和必要 helper，offline 增加 outbound-encoding 与完整 mock E2E 两入口。E2E 使用临时配置/SQLite、真实候选进程、localhost HTTP/SSE/WS 网关、工具调用、读故障、图片竞态、存储模式及在线备份，不访问真实模型或用户数据。全条款、源码定向测试、实际宿主模块、独立扫描与构建哈希见本轮审计；真实 UI、装机和网关仍明确未覆盖。

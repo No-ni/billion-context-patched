@@ -43,6 +43,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { uniqueBlockSpan } from "./patch-bili-client.mjs";
 
 const here = dirname(dirname(fileURLToPath(import.meta.url)));
 const target = process.argv[2] ?? join(here, "vendor", "billion-context", "dist", "index.js");
@@ -59,6 +60,23 @@ const replaceOnce = (label, find, replacement) => {
   changed = true;
 };
 
+// Parse the complete shipped function/factory before editing its internals.
+// A changed or partially patched block must fail at its own seam.
+const editFunction = (label, name, transform) => {
+  let opener = "function " + name + "(";
+  if (text.split(opener).length - 1 !== 1) throw new Error(label + ": function is not unique");
+  const at = text.indexOf(opener);
+  if (text.slice(Math.max(0, at - 6), at) === "async ") opener = "async " + opener;
+  const { block } = uniqueBlockSpan(text, label, opener, { expression: true });
+  const next = transform(block);
+  if (next !== block) replaceOnce(label, block, next);
+};
+const editInside = (label, body, find, replacement) => {
+  if (body.includes(replacement)) return body;
+  if (body.split(find).length - 1 !== 1) throw new Error(label + ": internal anchor moved");
+  return body.replace(find, replacement);
+};
+
 // ── 1. outbound request-body compression ────────────────────────────────────
 const BLOCK = readFileSync(join(here, "patches", "outbound-encoding.block.js"), "latin1").replace(/\s+$/, "");
 const FETCH_ANCHOR = "async function fetchWithTimeout(";
@@ -66,6 +84,14 @@ const ENTER = "checkOutboundBody(opts.body);";
 const LOGS_ROUTE = "return sendWebLogs(res,req);";
 
 if (text.includes("var __biliEncZlib=")) {
+  for (const match of BLOCK.matchAll(/function (__bili\w+)\(/g)) {
+    const name = match[1], opener = "function " + name + "(";
+    const expected = uniqueBlockSpan(BLOCK, "encoding source " + name, opener, { expression: true }).block;
+    const actual = uniqueBlockSpan(text, "encoding artifact " + name, opener, { expression: true }).block;
+    // B5's diagnostic call is the only later edit inside an encoder function.
+    const normalized = name === "__biliEncodeOutbound" ? actual.replace("__biliDumpBody(opts,url);", "") : actual;
+    if (normalized !== expected) throw new Error("outbound encoding: helper body differs; rebuild from the selected clean upstream (" + name + ")");
+  }
   console.log("outbound encoding: already patched");
 } else {
   if (!text.includes("const require = __biliCreateRequire(import.meta.url);")) {
@@ -201,7 +227,7 @@ if (text.includes(PKC_MARK)) {
   changed = true;
   console.log("fork-pck: helper upgraded to key chain");
 } else if (!text.includes(PKC_ANCHOR)) {
-  console.log("fork-pck: anchor not found, skipped");
+  throw new Error("fork-pck: stamp anchor not found; re-derive the patch");
 } else {
   replaceOnce("fork-pck", "function __biliEncodeOutbound(opts,url){", PKC_HELPER + "function __biliEncodeOutbound(opts,url){");
   text = text.split(PKC_ANCHOR).join(PKC_REPL);
@@ -209,22 +235,53 @@ if (text.includes(PKC_MARK)) {
   console.log("fork-pck: patched");
 }
 
-// 7. forked sessions keep the parent's message timestamps — the child's stamp
-//    table starts empty, so every inherited message is re-stamped with the
-//    fork's clock (a couple of seconds off) and the tag bytes drift.
-const TS_MARK = "const __biliCopyTsStamps={}";
+// 7. Explicit forks inherit only proven prefix times. Reserved parent refs
+// outside that prefix remain available without suppressing a child's own clock.
+const TS_HELPERS = readFileSync(join(here, "patches", "fork-timestamps.block.js"), "utf8").trimEnd();
 const TS_ANCHOR = "child.state.nextRunId=parent.state.nextRunId;";
-const TS_REPL = TS_ANCHOR + 'if(parent.state.tsStamps){const __biliCopyTsStamps={};for(const __tsm of prefix){const __tss=parent.state.tsStamps[__tsm.rawId];if(typeof __tss==="number")__biliCopyTsStamps[__tsm.rawId]=__tss}child.state.tsStamps=__biliCopyTsStamps}';
-
-if (text.includes(TS_MARK)) {
-  console.log("fork-ts: already patched");
-} else if (!text.includes(TS_ANCHOR)) {
-  console.log("fork-ts: anchor not found, skipped");
-} else {
-  text = text.split(TS_ANCHOR).join(TS_REPL);
-  changed = true;
-  console.log("fork-ts: patched");
+const TS_OLD_REPL = TS_ANCHOR + 'if(parent.state.tsStamps){const __biliCopyTsStamps={};for(const __tsm of prefix){const __tss=parent.state.tsStamps[__tsm.rawId];if(typeof __tss==="number")__biliCopyTsStamps[__tsm.rawId]=__tss}child.state.tsStamps=__biliCopyTsStamps}';
+const TS_REPL = TS_ANCHOR + "__biliCopyForkTimestamps(child,parent,prefix);";
+if (!text.includes("function __biliCopyForkTimestamps(")) {
+  replaceOnce("fork-ts helpers", CHILD_ANCHOR, TS_HELPERS + "\n" + CHILD_ANCHOR);
+} else if (!text.includes(TS_HELPERS)) {
+  throw new Error("fork-ts: helper body differs; rebuild from the selected clean upstream");
 }
+if (text.includes(TS_REPL)) {
+  console.log("fork-ts: prefix copy already patched");
+} else if (text.includes(TS_OLD_REPL)) {
+  replaceOnce("fork-ts prefix migration", TS_OLD_REPL, TS_REPL);
+} else {
+  replaceOnce("fork-ts prefix", TS_ANCHOR, TS_REPL);
+}
+const TS_FORK_ARM = "seedTimestampsFromParent(child,parent);child.state.suppressMintingOnce=true;";
+if (text.includes(TS_FORK_ARM)) {
+  replaceOnce("fork-ts whole-parent suppression", TS_FORK_ARM, "");
+} else if (text.includes("seedTimestampsFromParent(child,parent)") || text.includes("child.state.suppressMintingOnce=true")) {
+  throw new Error("fork-ts: upstream fork timestamp arm changed; re-derive the patch");
+}
+const TS_PIPELINE_EDITS = [
+  ["fork-ts disabled observation", 'if(!enabled)return{name:"stamp-timestamps",run(io2){return io2}};', 'if(!enabled)return{name:"stamp-timestamps",run(io2){return __biliObserveForkTimestampIds(io2)}};'],
+  ["fork-ts pending sightings", 'const suppressed=io2.state.suppressMintingOnce===true;const messages=', 'const suppressed=io2.state.suppressMintingOnce===true;const __biliPendingTs=new Set(io2.state.__biliForkTsPending??[]);const __biliVisibleTs=__biliForkTimestampVisibility(io2.state);const messages='],
+  ["fork-ts proven child visibility", 'if(seq===null||seq<=hwm)return m2;', 'if(!__biliVisibleTs.has(m2.id)&&(seq===null||seq<=hwm))return m2;'],
+  ["fork-ts child clock", '!suppressed&&knownIds[m2.id]===void 0?Date.now():void 0', '!suppressed&&(knownIds[m2.id]===void 0||__biliPendingTs.has(m2.id))?Date.now():void 0'],
+  ["fork-ts unchanged observation", 'if(!changed&&!hwmFresh&&!suppressed)return io2;', 'if(!changed&&!hwmFresh&&!suppressed)return __biliObserveForkTimestampIds(io2,true);'],
+  ["fork-ts enabled observation", 'if(suppressed)delete nextState.suppressMintingOnce;return{...io2,messages,state:nextState}', 'if(suppressed)delete nextState.suppressMintingOnce;return __biliObserveForkTimestampIds({...io2,messages,state:nextState},true)'],
+  ["fork-ts hydration", 'tsStamps:parsed.tsStamps??fresh.tsStamps,viewLatchConfigDigest:', 'tsStamps:parsed.tsStamps??fresh.tsStamps,...Array.isArray(parsed.__biliForkTsPending)?{__biliForkTsPending:[...parsed.__biliForkTsPending]}:{},...Array.isArray(parsed.__biliForkTsVisible)?{__biliForkTsVisible:[...parsed.__biliForkTsVisible]}:{},viewLatchConfigDigest:'],
+  ["fork-ts persistence whitelist", 'probe.timestampsHighWaterRefSeq=0;return Object.keys(mergeState(probe))', 'probe.timestampsHighWaterRefSeq=0;probe.__biliForkTsPending=[];probe.__biliForkTsVisible=[];return Object.keys(mergeState(probe))'],
+];
+for (const [label, old, next] of TS_PIPELINE_EDITS) {
+  if (!text.includes(next)) replaceOnce(label, old, next);
+}
+const TS_CLONE_OLD = 'tsStamps:state7.tsStamps?{...state7.tsStamps}:void 0';
+const TS_CLONE_NEW = TS_CLONE_OLD + ',...Array.isArray(state7.__biliForkTsPending)?{__biliForkTsPending:[...state7.__biliForkTsPending]}:{},...Array.isArray(state7.__biliForkTsVisible)?{__biliForkTsVisible:[...state7.__biliForkTsVisible]}:{}';
+if (text.split(TS_CLONE_NEW).length - 1 !== 2) {
+  if (text.includes(TS_CLONE_NEW) || text.split(TS_CLONE_OLD).length - 1 !== 2) {
+    throw new Error("fork-ts: expected exactly the sync and fold clone anchors");
+  }
+  text = text.split(TS_CLONE_OLD).join(TS_CLONE_NEW);
+  changed = true;
+}
+console.log("fork-ts: clock, observation, clones and persistence patched");
 // 8. keep the last good view when the unified transcript cannot be anchored ---------
 // maybeSnapshotView hands the client's messages back whenever the store cannot line a
 // block up with its rows. That is transient — a commit lands, the ingest that writes its
@@ -270,7 +327,7 @@ if (text.includes(UNANCHORED_MARK)) {
 }
 // 10. Verify complete prefixes and prove skipped-block raw coverage.
 // Upgrade existing patched builds as well as fresh upstream builds.
-const safety = readFileSync(join(here, "patches", "view-safety.block.js"), "utf8");
+const safety = readFileSync(join(here, "patches", "view-safety.block.js"), "utf8").trimEnd() + "\n";
 const SAFETY_MARK = "function __biliPrefixDigest(";
 if (!text.includes(SAFETY_MARK)) {
   const removeSpan = (start, end) => {
@@ -292,7 +349,19 @@ if (!text.includes(SAFETY_MARK)) {
     'if(!__biliSkippedCoverage(session,blockSeeds,tailMsgs))return{ok:false,reason:"skipped-block-not-in-tail"};const d=rows.length;const merged=assembleView(');
   console.log("view-safety: patched");
 } else {
-  console.log("view-safety: already patched");
+  const from = text.indexOf(SAFETY_MARK), to = text.indexOf(PIN_MARK, from);
+  if (from < 0 || to <= from || text.indexOf(SAFETY_MARK, from + SAFETY_MARK.length) !== -1) {
+    throw new Error("view-safety: ambiguous helper span; re-derive the patch");
+  }
+  // Include the leading digest comment when migrating the pre-0.6.8 block.
+  const comment = "// The digest covers every field, including edits beyond the old 200-char probe.\n";
+  const start = text.slice(0, from).endsWith(comment) ? from - comment.length : from;
+  const next = safety + "\n";
+  if (text.slice(start, to) !== next) {
+    text = text.slice(0, start) + next + text.slice(to);
+    changed = true;
+    console.log("view-safety: helpers updated");
+  } else console.log("view-safety: already patched");
 }
 // 11. Required fork default: stamp cache keys unless the user chose a routing mode.
 const CACHE_DEFAULT_OLD = 'function parsePromptCacheRouting(value){return value==="auto"||value==="enabled"||value==="disabled"?value:"disabled"}';
@@ -416,7 +485,7 @@ for (const seam of PROMPT_SEAMS) {
 // Folding first is what makes the budget shedder see the real payload; it stays
 // in place for the images that are still leaving.
 const SHED_CALL = 'const shed=await shedEgressIfOverBudget(wireBody,prepared.protocol,{sessionId:prepared.session.id,session:prepared.session,log:log2,phase:"pre-send"});';
-const RETENTION_CALL = 'const biliImages=await biliRetentionApply(wireBody,prepared.protocol,prepared.session,{phase:"pre-send",log:log2});if(biliImages.changed){wireBody=biliImages.body;outboundCopyRewritten=true;try{log2("info","[image-retention] folded "+biliImages.folded+" shrunk "+biliImages.shrunk)}catch(err4){}}';
+const RETENTION_CALL = 'const biliImages=await biliRetentionApply(wireBody,prepared.protocol,prepared.session,{phase:"pre-send",log:log2,attempt:biliImageAttempt});if(biliImages.changed){wireBody=biliImages.body;outboundCopyRewritten=true;invalidateSeparatorOwnership();try{log2("info","[image-retention] folded "+biliImages.folded+" shrunk "+biliImages.shrunk)}catch(err4){}}';
 if (text.includes(RETENTION_CALL)) {
   console.log("image retention call: already patched");
 } else {
@@ -425,7 +494,7 @@ if (text.includes(RETENTION_CALL)) {
 }
 // ── 15. a look only counts once the request made it upstream ────────────────
 const FORWARD_ANCHOR = "function noteSuccessfulForward(inp){try{armInternal(inp)}";
-const FORWARD_PATCHED = "function noteSuccessfulForward(inp){try{biliRetentionCommit(inp&&inp.sessionId)}catch(err3){}try{armInternal(inp)}";
+const FORWARD_PATCHED = "function noteSuccessfulForward(inp){try{biliRetentionCommit(inp&&inp.sessionId,inp&&inp.biliImageReceipt)}catch(err3){}try{armInternal(inp)}";
 if (text.includes(FORWARD_PATCHED)) {
   console.log("image retention commit: already patched");
 } else {
@@ -433,8 +502,8 @@ if (text.includes(FORWARD_PATCHED)) {
   console.log("image retention commit: patched");
 }
 // ── 16. the new knobs are top-level config keys ─────────────────────────────
-const CONFIG_KEYS_ANCHOR = ',"autoModeForge","imageRescale","guardrails","cacheKeepalive"]);';
-const CONFIG_KEYS_PATCHED = ',"autoModeForge","imageRescale","imageRescaleMaxDim","imageRetention","imageRetentionKeepLastUser","imageRetentionMaxDim","imagePrompt","guardrails","cacheKeepalive"]);';
+const CONFIG_KEYS_ANCHOR = ',"autoModeForge","imageRescale","guardrails","cacheKeepalive","egressTransforms"]);';
+const CONFIG_KEYS_PATCHED = ',"autoModeForge","imageRescale","imageRescaleMaxDim","imageRetention","imageRetentionKeepLastUser","imageRetentionMaxDim","imagePrompt","guardrails","cacheKeepalive","egressTransforms"]);';
 if (text.includes(CONFIG_KEYS_PATCHED)) {
   console.log("image config keys: already patched");
 } else {
@@ -600,8 +669,7 @@ if (circuitGone) {
   console.log("upstream circuit: already removed");
 } else {
   cutSpan("upstream circuit", "var CIRCUIT_OPEN_AFTER=3;", "function truncateAtBoundary(s3,max){");
-  cutSpan("upstream circuit", "function recordUpstreamCircuitFailure(url,error,viaProxy,detail){", "function getOpenUpstreamCircuits(){");
-  cutSpan("upstream circuit", "function getOpenUpstreamCircuits(){", "init_logger();init_knobs();");
+  cutSpan("upstream circuit", "function recordUpstreamCircuitFailure(url,error,viaProxy,detail){", "init_logger();init_knobs();");
   cutSpan("upstream circuit", "const circuitBlock=upstreamCircuitBlockReason(upstreamUrl);", "const throttleModel=throttleModelHint??");
   cutSpan("upstream circuit", "const openCircuits=getOpenUpstreamCircuits();", "const throttleHolds=activeThrottleHolds();");
   cutSpan("upstream circuit", 'if(req.method==="GET"&&req.url==="/__bili/upstreams"){', 'if(req.method==="GET"&&(req.url==="/__bili/sessions"||');
@@ -673,8 +741,8 @@ cardUpsert("preflight helpers", "// <bili-preflight begin>", "// <bili-preflight
   escapedCopy(PREFLIGHT_BLOCK).replace(/\\u000A/g, "\n"), "function emitPreflightError(", false);
 const PREFLIGHT_ENTRY = "async function preflightCompressIfNeeded(prepared,runPrepare,req,inboundBody,res,opts,core,config,configuredWindow,model,resolvedNativeWindow,windowShrinkReason,route,affinity,anonymous,log2,instanceId){";
 const PREFLIGHT_RECOVERED = PREFLIGHT_ENTRY + 'prepared=await __biliRecoverSnapshot(prepared,runPrepare,res,log2);if(prepared===null)return{failFast:true,status:0,message:"snapshot recovery aborted",retryable:false,respond:false};';
-const PREFLIGHT_HTTP_OLD = 'if(res.headersSent){if(prepared.stream){emitPreflightError(res,prepared.protocol,{message:outcome.message,retryable:outcome.retryable},m2=>log2("warn",m2))}else{try{res.end(JSON.stringify({error:{type:"server_error",code:"preflight_compress_failed",message:outcome.message,retryable:outcome.retryable}}))}catch{}}}else{res.writeHead(outcome.status,{"content-type":"application/json",...outcome.status===503?{"retry-after":"30"}:{}});res.end(JSON.stringify({error:{type:"server_error",code:"preflight_compress_failed",message:outcome.message,retryable:outcome.retryable}}))}';
-const PREFLIGHT_HTTP_NEW = 'if(res.headersSent&&prepared.stream){emitPreflightError(res,prepared.protocol,outcome,m2=>log2("warn",m2))}else{__biliReplyPreflight(res,outcome)}';
+const PREFLIGHT_HTTP_OLD = 'if(res.headersSent){if(prepared.stream){emitPreflightError(res,prepared.commandcode?"commandcode":prepared.protocol,{message:outcome.message,retryable:outcome.retryable},m2=>log2("warn",m2))}else{try{res.end(JSON.stringify({error:{type:"server_error",code:"preflight_compress_failed",message:outcome.message,retryable:outcome.retryable}}))}catch{}}}else{res.writeHead(outcome.status,{"content-type":"application/json",...outcome.status===503?{"retry-after":"30"}:{}});res.end(JSON.stringify({error:{type:"server_error",code:"preflight_compress_failed",message:outcome.message,retryable:outcome.retryable}}))}';
+const PREFLIGHT_HTTP_NEW = 'if(res.headersSent&&prepared.stream){emitPreflightError(res,prepared.commandcode?"commandcode":prepared.protocol,outcome,m2=>log2("warn",m2))}else{__biliReplyPreflight(res,outcome)}';
 const PREFLIGHT_EDITS = [
   ["snapshot recovery entry", PREFLIGHT_ENTRY, PREFLIGHT_RECOVERED],
   ["snapshot retry classification",
@@ -705,6 +773,271 @@ for (const [label, old, next] of PREFLIGHT_EDITS) {
   replaceOnce(label, old, next);
 }
 console.log("preflight recovery and errors: patched");
+
+const SNAPSHOT_BEGIN_OLD = 'function maybeSnapshotView(session,clientMsgs,deps){';
+const SNAPSHOT_BEGIN_NEW = SNAPSHOT_BEGIN_OLD + '__biliBeginSnapshotTurn(session,clientMsgs,deps);';
+if (!text.includes(SNAPSHOT_BEGIN_NEW)) replaceOnce("fresh snapshot attempt", SNAPSHOT_BEGIN_OLD, SNAPSHOT_BEGIN_NEW);
+const SNAPSHOT_CORE_OLD = 'const turn=core.processTurn({messages:renderMsgs';
+const SNAPSHOT_CORE_NEW = 'const turn=__biliSnapshotAwareTurn(session,core,{messages:renderMsgs';
+if (!text.includes(SNAPSHOT_CORE_NEW)) {
+  if (text.split(SNAPSHOT_CORE_OLD).length - 1 !== 4) throw new Error("snapshot turn guard: expected four protocol prepares");
+  text = text.split(SNAPSHOT_CORE_OLD).join(SNAPSHOT_CORE_NEW);
+  changed = true;
+}
+console.log("snapshot transient miss preserves refs, timestamps and blocks: patched");
+for (const name of ["prepareOpenai", "prepareAnthropic", "prepareGoogle", "prepareResponses"]) {
+  editFunction("deferred snapshot post-processing " + name, name, body => {
+    let next = body;
+    if (name !== "prepareResponses") {
+      next = editInside(name + " rewrite gate", next, 'const rewrite=detectUnannouncedHistoryRewrite(',
+        'const rewrite=turn.__biliSnapshotDeferred?{churnExplained:false,detected:false}:detectUnannouncedHistoryRewrite(');
+    }
+    next = editInside(name + " archive gate", next,
+      'applyCompactionArchive(session,activeBefore,new Set(msgs.map(m2=>m2.id)),log2)',
+      'if(!turn.__biliSnapshotDeferred)applyCompactionArchive(session,activeBefore,new Set(msgs.map(m2=>m2.id)),log2)');
+    return editInside(name + " orphan gate", next, 'reapOrphansLogged(session,msgs,log2,sessionId)',
+      'if(!turn.__biliSnapshotDeferred)reapOrphansLogged(session,msgs,log2,sessionId)');
+  });
+}
+editFunction("deferred snapshot diagnostic count", "recordNudgeObservation", body => editInside("deferred observation", body,
+  'surfaceOff){const now=Date.now();', 'surfaceOff){if(turn.__biliSnapshotDeferred)return null;const now=Date.now();'));
+
+// B21 applies at every error sink, including loop-originated failures and the
+// HTTP-to-WebSocket conversion. Original diagnostics ride a separate field.
+const STREAM_BLOCK = readFileSync(join(here, "patches", "stream-errors.block.js"), "utf8").trimEnd();
+if (/[^\x00-\x7e]/.test(STREAM_BLOCK)) throw new Error("stream errors must use ASCII escapes");
+const shippedStreamFunction = name => uniqueBlockSpan(STREAM_BLOCK, name, "function " + name + "(", { expression:true }).block;
+if (!text.includes("function __biliStreamErrorInfo(")) {
+  replaceOnce("stream error information", "function nativeErrorChunk(", shippedStreamFunction("__biliStreamErrorInfo") + "\nfunction nativeErrorChunk(");
+}
+for (const name of ["nativeErrorChunk", "emitStreamError"]) {
+  editFunction("Chinese " + name, name, () => shippedStreamFunction(name));
+}
+editFunction("completion diagnostic metadata", "legacyCompletionChunk", body => {
+  body = editInside("completion detail parameter", body,
+    "function legacyCompletionChunk(protocol,visible,state7){", "function legacyCompletionChunk(protocol,visible,state7,detail){");
+  body = editInside("completion openai detail", body, '{choices:[{index:0,delta:{content:visible},finish_reason:null}]}', '{detail,choices:[{index:0,delta:{content:visible},finish_reason:null}]}');
+  body = editInside("completion responses detail", body, '{type:"response.output_text.delta",item_id:itemId,output_index:oi2,delta:visible}', '{type:"response.output_text.delta",item_id:itemId,output_index:oi2,delta:visible,detail}');
+  body = editInside("completion google detail", body, '{error:{code:500,message:visible,status:"INTERNAL"}}', '{error:{code:502,message:visible,status:"INTERNAL",detail}}');
+  body = editInside("completion commandcode detail", body, '{type:"error",error:"acp_proxy_error",message:visible}', '{type:"error",error:"acp_proxy_error",message:visible,detail}');
+  return editInside("completion anthropic detail", body, '{type:"content_block_delta",index:blockIndex,delta:{type:"text_delta",text:visible}}', '{type:"content_block_delta",index:blockIndex,delta:{type:"text_delta",text:visible},detail}');
+});
+editFunction("truncation google status", "emitUpstreamTruncation", body => editInside("truncation status", body,
+  'code:503,message,status:"UNAVAILABLE"', 'code:502,message,status:"INTERNAL"'));
+
+for (const name of ["createOpenaiAdapter", "createAnthropicAdapter", "createResponsesAdapter", "createGoogleAdapter", "createCommandcodeAdapter"]) {
+  editFunction("loop error information " + name, name, body => {
+    body = editInside(name + " error entry", body, 'emitError(message){', 'emitError(message){const __biliError=__biliStreamErrorInfo(message);');
+    if (name === "createOpenaiAdapter" || name === "createAnthropicAdapter") {
+      body = editInside(name + " native error", body, 'message:`[acp-proxy: ${message}]`', 'message:__biliError.message,detail:__biliError.detail');
+      const old = name === "createOpenaiAdapter" ? 'buildContent(`\n[acp-proxy: ${message}]\n`)' : 'buildTextBlock(clientIndex++,`\n[acp-proxy: ${message}]\n`)';
+      const next = name === "createOpenaiAdapter" ? 'buildContent(`\n${__biliError.message}\n`)' : 'buildTextBlock(clientIndex++,`\n${__biliError.message}\n`)';
+      body = editInside(name + " completion text", body, old, next);
+      // Completion compatibility retains its established lifecycle, with the
+      // detail on its content frame. It must never spill into the text itself.
+      const completionFrame = name === "createOpenaiAdapter"
+        ? 'return Buffer.concat([buildContent(`\n${__biliError.message}\n`),buildFinish("stop",null),Buffer.from("data: [DONE]\\n\\n","utf8")])'
+        : 'parts.push(buildTextBlock(clientIndex++,`\n${__biliError.message}\n`));parts.push(buildTerminal("end_turn",0,0,0))';
+      const tagged = name === "createOpenaiAdapter"
+        ? 'const __biliContent=buildContent(`\n${__biliError.message}\n`);return Buffer.concat([Buffer.from(__biliContent.toString("utf8").replace(/data: (\\{[^\\n]+\\})/g,(_,j)=>"data: "+JSON.stringify({...JSON.parse(j),detail:__biliError.detail})),"utf8"),buildFinish("stop",null),Buffer.from("data: [DONE]\\n\\n","utf8")])'
+        : 'const __biliContent=buildTextBlock(clientIndex++,`\n${__biliError.message}\n`);parts.push(Buffer.from(__biliContent.toString("utf8").replace(/data: (\\{[^\\n]+\\})/g,(_,j)=>"data: "+JSON.stringify({...JSON.parse(j),detail:__biliError.detail})),"utf8"));parts.push(buildTerminal("end_turn",0,0,0))';
+      body = editInside(name + " completion metadata", body, completionFrame, tagged);
+    } else if (name === "createResponsesAdapter") {
+      body = editInside(name + " native error", body, 'error:{code:"server_error",message}', 'error:{code:"server_error",...__biliError}');
+      body = editInside(name + " missing response", body, 'error:{code:"server_error",message:"upstream returned no response"}', 'error:{code:"server_error",...__biliStreamErrorInfo("upstream returned no response")}');
+    } else if (name === "createGoogleAdapter") {
+      body = editInside(name + " native error", body, '{error:{code:500,message,status:"INTERNAL"}}', '{error:{code:500,...__biliError,status:"INTERNAL"}}');
+    } else {
+      body = editInside(name + " native error", body, '{type:"error",error:"acp_proxy_error",message}', '{type:"error",error:"acp_proxy_error",...__biliError}');
+    }
+    return body;
+  });
+}
+const WS_NO_TERMINAL = 'errorFrame("incomplete_response","Responses exchange ended without a terminal event",status)';
+const WS_NO_TERMINAL_NEW = 'JSON.stringify({type:"error",status,error:{code:"incomplete_response",...__biliStreamErrorInfo("Responses exchange ended without a terminal event")}})';
+if (!text.includes(WS_NO_TERMINAL_NEW)) replaceOnce("WS incomplete response", WS_NO_TERMINAL, WS_NO_TERMINAL_NEW);
+const WS_DETAIL_OLD = 'message:detailText!==""&&detailText!==rawError?`${rawError}: ${detailText}`:rawError';
+const WS_DETAIL_NEW = 'message:rawError,...detailText!==""?{detail:detailText}:{}';
+if (!text.includes(WS_DETAIL_NEW)) replaceOnce("WS separate diagnostic", WS_DETAIL_OLD, WS_DETAIL_NEW);
+const WS_EMPTY_OLD = '{code:"incomplete_response",message:"Responses exchange ended without a terminal event"}';
+const WS_EMPTY_NEW = '{code:"incomplete_response",...__biliStreamErrorInfo("Responses exchange ended without a terminal event")}';
+if (!text.includes(WS_EMPTY_NEW)) replaceOnce("WS empty response", WS_EMPTY_OLD, WS_EMPTY_NEW);
+editFunction("WS local admission and transport errors", "errorFrame", body => editInside("WS local error information", body,
+  'function errorFrame(code,message,status=400){return JSON.stringify({type:"error",status,error:{type:"invalid_request_error",code,message}})}',
+  'function errorFrame(code,message,status=400){const info=status===413||status>=500?__biliStreamErrorInfo(message):{message};return JSON.stringify({type:"error",status,error:{type:"invalid_request_error",code,...info}})}'));
+console.log("Chinese stream, loop and WS error sinks: patched");
+
+// An opaque attempt belongs to this forward only. Apply before upstream shed;
+// Finalize against the final plaintext after every transform; commit the same
+// receipt only after an OK upstream response. Retries cannot borrow one another.
+const IMAGE_EGRESS_EDITS = [
+  ["image request ownership", "let wireBody=body;let compatRoles=", "let wireBody=body;const biliImageAttempt={};let biliImageReceipt;let compatRoles="],
+  ["image initial finalization", "applyResign(headers,wireBody)", "biliImageReceipt=prepared&&!prepared.sidePassthrough?biliRetentionFinalize(wireBody,prepared.protocol,prepared.session,biliImageAttempt):void 0;applyResign(headers,wireBody)"],
+  ["image successful initial forward", "noteSuccessfulForward({sessionId:prepared.session.id,protocol:", "noteSuccessfulForward({sessionId:prepared.session.id,biliImageReceipt,protocol:"],
+  ["loop image attempt", "let wireBodyStr=scrubLoneSurrogateEscapesOnJson(JSON.stringify(wireObj));let wireShedRewrote=false;", "let wireBodyStr=scrubLoneSurrogateEscapesOnJson(JSON.stringify(wireObj));let wireShedRewrote=false;const biliLoopImageAttempt={};if(ctx.protocol){const images=await biliRetentionApply(wireBodyStr,ctx.protocol,ctx.session,{phase:\"loop\",log:(level,msg)=>log(level,`[acp-loop] ${msg}`),attempt:biliLoopImageAttempt});if(images.changed){wireBodyStr=images.body;wireShedRewrote=true}}"],
+  ["loop image finalization", "requestOptions.resign?.(requestOptions.headers,wireBodyStr);const wireArr=", "const biliLoopImageReceipt=ctx.protocol?biliRetentionFinalize(wireBodyStr,ctx.protocol,ctx.session,biliLoopImageAttempt):void 0;requestOptions.resign?.(requestOptions.headers,wireBodyStr);const wireArr="],
+  ["loop image successful forward", "const upstreamSend=await throttledSend;noteUpstreamThrottleResolved(", "const upstreamSend=await throttledSend;biliRetentionCommit(ctx.session.id,biliLoopImageReceipt);noteUpstreamThrottleResolved("],
+];
+for (const [label, old, next] of IMAGE_EGRESS_EDITS) {
+  if (!text.includes(next)) replaceOnce(label, old, next);
+}
+const RETRY_OLD = 'const finalizeEgress=async variant=>{const transformed=await runEgress(variant,"retry",headers);applyResign(headers,transformed);return v1Wrap(transformed)};';
+const RETRY_NEW = 'const finalizeEgress=async variant=>{biliImageReceipt=void 0;headers=__biliPlaintextHeaders(headers);let finalBody=variant;if(prepared&&!prepared.sidePassthrough&&prepared.protocol&&typeof finalBody==="string"){const images=await biliRetentionApply(finalBody,prepared.protocol,prepared.session,{phase:"retry",log:log2,attempt:biliImageAttempt});finalBody=images.body;const shed=await shedEgressIfOverBudget(finalBody,prepared.protocol,{sessionId:prepared.session.id,session:prepared.session,log:log2,phase:"retry"});finalBody=shed.body;const cap=prepared.session.stats.imageCountCaps?.[normalizeUpstreamOrigin(upstreamUrl)];if(typeof cap==="number"&&cap>0)finalBody=(await shedWireImagesToCount(finalBody,prepared.protocol,cap-1,{resolveRef:(mt,b64)=>refForItemBytes(prepared.session,mt,b64)})).body;if(finalBody!==variant){outboundCopyRewritten=true;invalidateSeparatorOwnership()}}const transformed=await runEgress(finalBody,"retry",headers);if(transformed!==finalBody){outboundCopyRewritten=true;invalidateSeparatorOwnership()}if(prepared&&!prepared.sidePassthrough)biliImageReceipt=biliRetentionFinalize(transformed,prepared.protocol,prepared.session,biliImageAttempt);applyResign(headers,transformed);return v1Wrap(transformed)};';
+if (!text.includes(RETRY_NEW)) replaceOnce("retry image finalization", RETRY_OLD, RETRY_NEW);
+// #5998 drops unsigned thinking after the original sign site. Move that step
+// ahead of shed/transforms/finalization so the signature covers actual bytes.
+const THINKING_START = 'if(prepared&&!prepared.sidePassthrough&&prepared.protocol==="anthropic"&&req.method!=="GET"&&req.method!=="HEAD"&&typeof wireBody==="string"&&thinkingPostureIsStrict(prepared.session)){';
+const THINKING_DEST = 'if(prepared&&!prepared.sidePassthrough&&prepared.protocol&&req.method!=="GET"&&req.method!=="HEAD"&&typeof wireBody==="string"){';
+const THINKING_MARK = '// <bili-thinking-before-egress>\n';
+if (!text.includes(THINKING_MARK)) {
+  const moving = uniqueBlockSpan(text, "strict thinking placement", THINKING_START).block;
+  replaceOnce("strict thinking remove late scrub", moving, "");
+  const guarded = editInside("strict thinking provenance", moving, 'wireBody=dropped.body;log2(', 'wireBody=dropped.body;outboundCopyRewritten=true;invalidateSeparatorOwnership();log2(');
+  replaceOnce("strict thinking before egress", THINKING_DEST, THINKING_MARK + guarded + THINKING_DEST);
+}
+console.log("image initial, retries and loop receipt seams: patched");
+
+// JSON loops, fake-completion hints, empty-turn continuations and the reasoning
+// guard are additional model sends. They share the same final-body accounting
+// without sharing pending receipts with the main forward or other requests.
+const AUX_IMAGE_BLOCK = readFileSync(join(here, "patches", "image-egress.block.js"), "utf8").trimEnd();
+if (/[^\x00-\x7e]/.test(AUX_IMAGE_BLOCK)) throw new Error("aux image egress must be ASCII escaped");
+cardUpsert("aux image egress", "// <bili-aux-image-egress begin>", "// <bili-aux-image-egress end>",
+  AUX_IMAGE_BLOCK, "async function compressLoopAnthropicJson(", false);
+
+for (const name of ["compressLoopAnthropicJson", "compressLoopResponsesJson"]) {
+  editFunction("JSON loop image accounting " + name, name, body => {
+    let next = editInside(name + " final body", body,
+      'if(requestOptions.egress)roundBody=await requestOptions.egress(roundBody);',
+      'requestOptions.headers=__biliPlaintextHeaders(requestOptions.headers);const biliJsonImages=await __biliPrepareAuxImageEgress(roundBody,ctx.protocol??(requestBody.messages?"anthropic":"responses"),ctx.session,{phase:"json-loop",log:(level,msg)=>ctx.log(`[${level}] ${msg}`),upstreamUrl:requestOptions.url,headers:requestOptions.headers,egress:requestOptions.egress});roundBody=biliJsonImages.body;');
+    next = editInside(name + " accepted body", next,
+      'try{current=await result.response.json()}',
+      'biliRetentionCommit(ctx.session.id,biliJsonImages.receipt);try{current=await result.response.json()}');
+    return next;
+  });
+}
+
+editFunction("fake completion image accounting", "resolveFakeCompletion", body => {
+  let next = editInside("fake image ownership", body,
+    'const wireHinted=opts.wrapBody?opts.wrapBody(hinted):hinted;',
+    'let wireHinted;let biliFakeImageReceipt;');
+  next = editInside("fake image final body", next,
+    'try{opts.resign?.(opts.reqHeaders,wireHinted);',
+    'try{opts.reqHeaders=__biliPlaintextHeaders(opts.reqHeaders);const biliFakeImages=await __biliPrepareAuxImageEgress(hinted,opts.protocol,opts.session,{phase:"fake-completion",log:opts.log,upstreamUrl:opts.upstreamUrl,headers:opts.reqHeaders,egress:opts.egress});biliFakeImageReceipt=biliFakeImages.receipt;wireHinted=opts.wrapBody?opts.wrapBody(biliFakeImages.body):biliFakeImages.body;opts.resign?.(opts.reqHeaders,wireHinted);');
+  next = editInside("fake accepted images", next,
+    'buffer=await readStreamToBuffer(r.response.body,fakeBufCap())',
+    'biliRetentionCommit(opts.session.id,biliFakeImageReceipt);buffer=await readStreamToBuffer(r.response.body,fakeBufCap())');
+  return next;
+});
+
+editFunction("continuation image accounting", "makeContinuationRefetch", body => {
+  let next = editInside("continuation image ownership", body,
+    'const wireRetryBody=opts.wrapBody?opts.wrapBody(retryBody):retryBody;',
+    'let wireRetryBody;let biliContinuationImageReceipt;');
+  next = editInside("continuation image final body", next,
+    'opts.resign?.(opts.reqHeaders,wireRetryBody);',
+    'opts.reqHeaders=__biliPlaintextHeaders(opts.reqHeaders);const biliContinuationImages=await __biliPrepareAuxImageEgress(retryBody,opts.protocol,opts.session,{phase:"continuation",log:opts.log,upstreamUrl:opts.upstreamUrl,headers:opts.reqHeaders,egress:opts.egress});biliContinuationImageReceipt=biliContinuationImages.receipt;wireRetryBody=opts.wrapBody?opts.wrapBody(biliContinuationImages.body):biliContinuationImages.body;opts.resign?.(opts.reqHeaders,wireRetryBody);');
+  next = editInside("continuation accepted images", next,
+    'const body=r.response.body;',
+    'biliRetentionCommit(opts.session?.id,biliContinuationImageReceipt);const body=r.response.body;');
+  return next;
+});
+
+editFunction("reasoning continuation image accounting", "runReasoningGuard", body => {
+  let next = editInside("reasoning image final body", body,
+    'const roundBodyStr=scrubLoneSurrogatesOnWire(JSON.stringify(nextBody));let roundRes;p2.resign?.(p2.reqHeaders,roundBodyStr);try{',
+    'let roundBodyStr=scrubLoneSurrogatesOnWire(JSON.stringify(nextBody));let roundRes;let biliReasoningImageReceipt;try{p2.reqHeaders=__biliPlaintextHeaders(p2.reqHeaders);const biliReasoningImages=await __biliPrepareAuxImageEgress(roundBodyStr,"responses",p2.session,{phase:"reasoning-continuation",log:(level,msg)=>p2.log(`[${level}] ${msg}`),upstreamUrl:p2.upstreamUrl,headers:p2.reqHeaders,egress:p2.egress});roundBodyStr=biliReasoningImages.body;biliReasoningImageReceipt=biliReasoningImages.receipt;p2.resign?.(p2.reqHeaders,roundBodyStr);');
+  next = editInside("reasoning accepted images", next,
+    'const contBody=roundRes.response.body;',
+    'if(roundRes.response.ok)biliRetentionCommit(p2.session?.id,biliReasoningImageReceipt);const contBody=roundRes.response.body;');
+  return next;
+});
+
+editFunction("additional forward send context", "forwardCaptured", body => {
+  let next = body;
+  next = editInside("mutable forward header ownership", next,
+    'const{upstreamUrl,headers,proxyUrl,skippedProxy}=buildForwardTarget(req,opts,route,affinity,prepared!==null?instanceId:void 0);',
+    'const{upstreamUrl,headers:initialForwardHeaders,proxyUrl,skippedProxy}=buildForwardTarget(req,opts,route,affinity,prepared!==null?instanceId:void 0);let headers=initialForwardHeaders;');
+  if (!next.includes('body:await finalizeEgress(shrunkWire),headers')) {
+    let count = 0;
+    next = next.replace(/\{\.\.\.init,body:await finalizeEgress\(([^()]*)\)\}/g, (_, variant) => {
+      count++;
+      return '{...init,body:await finalizeEgress(' + variant + '),headers}';
+    });
+    if (count !== 6) throw new Error("recovery headers: expected six sends, found " + count);
+  }
+  const oldHeaders = 'reqHeaders:buildForwardHeaders(headers),resign:applyResign';
+  const newHeaders = 'reqHeaders:__biliPlaintextHeaders(headers,buildForwardHeaders(headers)),resign:applyResign';
+  if (!next.includes(newHeaders)) {
+    if (next.split(oldHeaders).length - 1 !== 8) throw new Error("aux forward headers: expected eight sends");
+    next = next.split(oldHeaders).join(newHeaders);
+  }
+  if (!next.includes('makeContinuationRefetch({session:')) {
+    let count = 0;
+    next = next.replace(/makeContinuationRefetch\(\{protocol:([^,]+),body,model:/g, (_, protocol) => {
+      count++;
+      return 'makeContinuationRefetch({session:prepared&&!prepared.sidePassthrough?prepared.session:void 0,egress:(b,h)=>runEgress(b,"retry",h),protocol:' + protocol + ',body:wireBody,model:';
+    });
+    if (count !== 5) throw new Error("continuation context: expected five sends, found " + count);
+  }
+  if (!next.includes('resolveFakeCompletion(pluginBody,{egress:')) {
+    next = editInside("plugin fake egress", next, 'resolveFakeCompletion(pluginBody,{protocol:',
+      'resolveFakeCompletion(pluginBody,{egress:(b,h)=>runEgress(b,"retry",h),protocol:');
+    next = editInside("proxy fake egress", next, 'resolveFakeCompletion(upstream.body,{protocol:',
+      'resolveFakeCompletion(upstream.body,{egress:(b,h)=>runEgress(b,"retry",h),protocol:');
+  }
+  next = editInside("reasoning egress context", next, 'runReasoningGuard({firstResponse:',
+    'runReasoningGuard({session:prepared.session,egress:(b,h)=>runEgress(b,"loop",h),firstResponse:');
+  for (const name of ["reqHeaders", "requestHeaders", "anthropicReqHeaders"]) {
+    next = editInside("loop header projection " + name, next, 'const ' + name + '=buildForwardHeaders(headers);',
+      'const ' + name + '=__biliPlaintextHeaders(headers,buildForwardHeaders(headers));');
+    next = editInside("loop egress actual headers " + name, next, 'egress:b2=>runEgress(b2,"loop",' + name + ')',
+      'egress:(b2,h)=>runEgress(b2,"loop",h??' + name + ')');
+  }
+  return next;
+});
+
+// Every loop round is new plaintext. A prior round's compressed header belongs
+// to its buffer only; transform and signature hooks use this round's copy.
+const LOOP_HEADERS_OLD = 'let wireBodyStr=scrubLoneSurrogateEscapesOnJson(JSON.stringify(wireObj));let wireShedRewrote=false;';
+const LOOP_HEADERS_NEW = 'requestOptions.headers=__biliPlaintextHeaders(requestOptions.headers);let wireBodyStr=scrubLoneSurrogateEscapesOnJson(JSON.stringify(wireObj));let wireShedRewrote=false;';
+if (!text.includes(LOOP_HEADERS_NEW)) replaceOnce("loop plaintext headers", LOOP_HEADERS_OLD, LOOP_HEADERS_NEW);
+const LOOP_TRANSFORM_OLD = 'requestOptions.egress(wireBodyStr)';
+const LOOP_TRANSFORM_NEW = 'requestOptions.egress(wireBodyStr,requestOptions.headers)';
+if (!text.includes(LOOP_TRANSFORM_NEW)) replaceOnce("loop transform header copy", LOOP_TRANSFORM_OLD, LOOP_TRANSFORM_NEW);
+console.log("all auxiliary image send and header seams: patched");
+
+// Preserve the 413/code/stage contract while keeping English fuse diagnostics
+// separate from the model-visible Chinese message.
+editFunction("forward local errors", "forwardCaptured", body => {
+  let next = body;
+  for (const [value, count] of [["err2.message", 1], ["countMessage", 1], ["fuseMessage", 2]]) {
+    const old = 'stage:"forward",message:' + value;
+    const replacement = 'stage:"forward",message:__biliPreflightError({status:413}).message,detail:' + value;
+    if (next.includes(replacement)) continue;
+    if (next.split(old).length - 1 !== count) throw new Error("forward 413 " + value + ": anchor moved");
+    next = next.split(old).join(replacement);
+  }
+  return next;
+});
+
+// The receive and decode catches also terminate model requests before forward.
+// Keep their guard, status and stage; expose the original limit in detail only.
+for (const [label, stage] of [
+  ["incremental receive 413", '"receive"'],
+  ["ingress receive/decode/ingest 413", 'err2 instanceof IngestBodyTooLargeError?"ingest":err2 instanceof BodyTooLargeError?"receive":"decode"'],
+]) {
+  const prefix = '{error:{type:"request_too_large",stage:' + stage;
+  const old = prefix + ',message:err2.message}}';
+  const next = prefix + ',message:__biliPreflightError({status:413}).message,detail:err2.message}}';
+  if (!text.includes(next)) replaceOnce(label, old, next);
+}
+const SIDE_TOO_LARGE_OLD = 'code:"side_request_payload_too_large",message:';
+const SIDE_TOO_LARGE_NEW = 'code:"side_request_payload_too_large",message:__biliPreflightError({status:413}).message,detail:';
+if (!text.includes(SIDE_TOO_LARGE_NEW)) replaceOnce("side request 413", SIDE_TOO_LARGE_OLD, SIDE_TOO_LARGE_NEW);
+const TUNNEL_DENIAL_OLD = 'JSON.stringify({error:verdict.message,code:"tunnel_destination_denied",detail:verdict.code})';
+const TUNNEL_DENIAL_NEW = 'JSON.stringify(verdict.code==="unresolvable"?{error:__biliFailureTextZh(verdict.message,{kind:"dns",host:new URL(route.upstream).hostname}),code:"tunnel_destination_denied",detail:verdict.code,upstreamFailure:{kind:"dns",host:new URL(route.upstream).hostname,hint:verdict.message}}:{error:verdict.message,code:"tunnel_destination_denied",detail:verdict.code})';
+if (!text.includes(TUNNEL_DENIAL_NEW)) replaceOnce("model tunnel DNS failure", TUNNEL_DENIAL_OLD, TUNNEL_DENIAL_NEW);
 
 if (changed) {
   // The harness loads this build as a module, and a script-mode check is not the
