@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { runInNewContext, Script } from "node:vm";
 import { createGunzip, gzipSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import { uniqueBlockSpan } from "./patch-bili-client.mjs";
 import { assertResponsesWsLocalErrors } from "./fixtures/ux-ws-local-errors.mjs";
 
@@ -20,13 +21,15 @@ const helpers = span("// <bili-preflight begin>", "// <bili-preflight end>") + "
 const block = readFileSync(new URL("../patches/preflight.block.js", import.meta.url), "utf8").trimEnd();
 const escaped = block.replace(/[^ -~\n]/g, ch => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase());
 assert.equal(helpers, escaped, "shipped helpers must match the replaceable block");
-const rendering = span("function __biliPrefixDigest(", "const __biliPinnedViews=") +
+const rendering = uniqueBlockSpan(source, "message identity", "function identitySig(", { expression: true }).block +
+  span("function __biliPrefixDigest(", "const __biliPinnedViews=") +
   "const __biliPinnedViews=new Map();" +
   span("function legacyFor(", "function parseRow(") +
   span("function parseRow(", "var SnapshotAnchorFallbackError=") +
   span("function buildAnchoredView(", "function __biliPluginLaneSnapshot(") +
   span("function maybeSnapshotView(", "function shadowLaneEnabled(");
 const preflight = span("async function preflightCompressIfNeeded(", "var CONTEXTUAL_USER_FRAGMENT_MARKERS=");
+const compression = uniqueBlockSpan(source, "preflight compressor", "async function preflightCompress(", { expression: true }).block;
 const responses = span("function emitPreflightError(", "var reports=");
 class Response extends EventEmitter {
   headersSent = false; writableEnded = false; destroyed = false;
@@ -42,7 +45,7 @@ const old = { blockId: "old", effectiveMessageIds: ["a", "b"], active: true };
 function fixture(options = {}) {
   let db = options.db ?? all.slice(2), waits = 0, prepares = 0, compressions = 0;
   const rows = () => db.map((m, seq) => ({ seq, msgId: m.id, content: JSON.stringify(m) }));
-  const session = { id: "test", metadata: {}, stats: { requests: 0, lastInputTokens: 80, lastInputTokensSource: "usage" },
+  const session = { id: "test", metadata: {}, stats: { requests: 0, lastInputTokens: options.anonymous ? 0 : 80, lastInputTokensSource: "usage" },
     state: { blocks: [{ ...old }] } };
   const store = {
     unifiedMessageIdRows: rows, unifiedMessageRows: rows,
@@ -58,9 +61,9 @@ function fixture(options = {}) {
   const estimate = messages => messages.some(m => m.id === "acp_summary_old") ? 30 : 300;
   const api = runInNewContext(rendering + "\n" + helpers + "\n" + preflight + "\n" + responses +
     "\n({maybeSnapshotView,__biliRecoverSnapshot,__biliReplyPreflight,emitPreflightError,preflightCompressIfNeeded,__biliSnapshotAwareTurn});", {
-    require: createRequire(import.meta.url), getStore: () => store, markDirty() {},
+    require: createRequire(import.meta.url), getStore: () => store, markDirty: current => options.onDirty?.(current),
     MAX_CHAIN_WALK: 8192, MIN_SEAM_RUN: 2, __biliPinLog() {}, console: { warn() {} },
-    identitySig: m => `${m.role}|${m.contentType}|${m.text}`,
+    sha256Hex2: value => createHash("sha256").update(value).digest("hex"),
     featureEnabled: () => options.live !== false, shadowLaneEnabled: () => false,
     resolveStorageModeSafe: () => options.mode ?? "full",
     __biliPluginLaneSnapshot: () => options.lane !== false, noteRender() {}, noteShadow() {},
@@ -69,35 +72,62 @@ function fixture(options = {}) {
     normalizeUpstreamOrigin: value => value, currentCalibrationFactor: () => 1,
     applyEstimateCalibration: value => value,
     outboundPayloadBreakdown: p => ({ textEstimate: estimate(p.processedMessages), overheadEstimate: options.overhead ?? 0, imageTokens: options.images ?? 0 }),
-    estimateCoreMessages: estimate, localRefusalCovers: () => false,
+    imageReserveFor: () => options.rebuiltImages ?? options.images ?? 0,
+    estimateCoreMessages: estimate, estimateCoreMessagesUpper: estimate, localRefusalCovers: () => false,
     buildForwardTarget: () => ({ upstreamUrl: "https://example.invalid", headers: {} }),
-    registerRequestAbort() {}, preflightHoldGraceMs2: () => 10000,
+    registerRequestAbort() {}, noteClientAbort() {}, preflightHoldGraceMs2: () => 10000,
     resolveCompress: () => ({}), inboundResignCredential: () => undefined,
     defaultPrompts: {}, externalQueueDroppedAll: () => false,
-    preflightCompress: async () => {
+    preflightCompress: async (deps, messages) => {
       compressions++;
+      if (options.realCompression) {
+        // Run the shipped compressor's existing-block fit exit. It must not call
+        // a summary service; only the kernel and storage timing are simulated.
+        return runInNewContext(compression + "\npreflightCompress(deps,messages)", {
+          deps, messages, epochConfirmPending: () => false,
+          currentCalibrationFactor: () => 1, applyEstimateCalibration: value => value,
+          estimateCoreMessages: estimate, estimateCoreMessagesUpper: estimate,
+          configuredSummaryPlan: () => undefined, defaultCountTokens: text => Math.ceil(text.length / 4),
+          deadSkipKeys: () => [], safeHost: () => "example.invalid", readDeterministicProbeState: () => undefined,
+          MIN_CHUNK_TOKENS: 1, CHUNK_FRACTION: 0.5, TRANSIENT_EMPTY_RETRY_BUDGET: 1,
+          MAX_SUMMARY_CALLS_PER_PREFLIGHT: 1, MAX_PREFLIGHT_ROUNDS: 1,
+          EMERGENCY_FOLD_COVERAGE: 10, DETERMINISTIC_EMPTY_STICKY_LIMIT: 3,
+          FIT_FORWARD_ESTIMATE_ONLY_MARGIN: 0.9, yieldToEventLoop: async () => {},
+          noEmergencyTruncate: value => value, ccrLoopConfig: (_, config) => config,
+          contentStoreOf: () => ({}), adoptContentStore() {}, applyAbsorbView: value => value,
+        });
+      }
+      if (options.recoverInPreflight) db = all;
+      if (options.compressionResult) return options.compressionResult;
       return { compressedRanges: 0, savedTokens: 0, payloadEstimate: 300, fitsWindow: false,
         rangesRemaining: 0, failure: options.failure };
     },
-    estimateRawBodyBreakdown: () => ({ total: 300 }), outputBudgetField: () => null,
+    setPostRebuildAnchor() {},
+    estimateRawBodyBreakdown: () => { options.onRawEstimate?.(); return { total: 300 }; },
+    describeCoreTextDuplication: () => "mock text", measuredBreakdownClause: () => "mock text", outputBudgetField: () => null,
     buildWindowShrinkNote: () => "", noteLocalRefusal: () => { session.refused = true; },
   });
   const prepare = async () => {
     prepares++; session.stats.requests++;
+    options.onPrepare?.(session, prepares);
+    if (prepares === options.throwOnPrepare) throw new Error("rebuild failed");
+    if (prepares === options.failOnPrepare) return { failFast: true, status: 413, message: "rebuild refused", retryable: false };
     const originalMessages = options.messages ?? all;
     const processedMessages = api.maybeSnapshotView(session, originalMessages, { pluginMode: true });
     return { session, processedMessages, originalMessages, body: "{}", pluginMode: true,
       protocol: options.protocol ?? "openai", stream: true };
   };
+  const core = { processTurn(input) {
+    if (options.recoverInPreflight) db = all;
+    return { ...input, messages: [msg("acp_summary_old"), ...all.slice(2)] };
+  } };
   const res = new Response();
   const run = prepared => api.preflightCompressIfNeeded(prepared, prepare, { headers: {}, url: "/chat/completions" },
-    Buffer.from("{}"), res, { routes: {} }, {}, { modelContextLimit: 100 }, 100,
-    "test-model", 100, undefined, undefined, undefined, false, () => {}, "test-instance");
+    Buffer.from("{}"), res, { routes: {} }, core, { modelContextLimit: 100, compress: { minCompressRange: 0 } }, 100,
+    "test-model", 100, undefined, undefined, undefined, options.anonymous === true, () => {}, "test-instance");
   return { api, session, prepare, res, run, counts: () => ({ waits, prepares, compressions }) };
 }
-let checks = 0;
-const check = async (name, fn) => { await fn(); checks++; console.log("  OK " + name); };
-await check("index-only persistence receives the corrected replay count on success, fail-fast, throw and disconnect", async () => {
+function actualWriterOffSave() {
   const signature = "scheduleSave(session){", at = source.indexOf(signature);
   assert(at >= 0 && source.indexOf(signature, at + 1) < 0, "actual SessionStore.scheduleSave must be unique");
   let method;
@@ -107,7 +137,12 @@ await check("index-only persistence receives the corrected replay count on succe
     catch (error) { if (!(error instanceof SyntaxError)) throw error; }
   }
   assert(method, "complete actual writerOff scheduleSave method missing");
-  const writer = runInNewContext("({" + method + "})", { queueMicrotask });
+  return runInNewContext("({" + method + "})", { queueMicrotask });
+}
+let checks = 0;
+const check = async (name, fn) => { await fn(); checks++; console.log("  OK " + name); };
+await check("index-only persistence receives the corrected replay count on success, fail-fast, throw and disconnect", async () => {
+  const writer = actualWriterOffSave();
   const dirty = uniqueBlockSpan(source, "actual markDirty", "function markDirty(session){", { expression: true }).block;
   for (const outcome of ["success", "fail-fast", "throw", "disconnect"]) {
     const session = { id: "writer-off-" + outcome, metadata: { snapshotRenderDegradeReason: "block-unanchored" },
@@ -116,7 +151,7 @@ await check("index-only persistence receives the corrected replay count on succe
     const store = {
       afterNextFlush: () => true, consumePendingLedgerAlign() {}, saveContentStore: () => true,
       writerOffActive: () => true, envelopeFrozen: () => false,
-      writerOffPending: new Map(), lastSaveLanded: new Map(),
+      writerOffPending: new Map(), lastSaveLanded: new Map(), durabilityArms: new Map(),
       guardedBuild: current => () => { saved.push(JSON.parse(JSON.stringify(current.stats))); return { metadata: {} }; },
       maybeCutForkBase() {}, noteMetaFp() {}, noteDurable() {}, runIdleSpillIfIdle() {}, drainFlushWaiters() {}, log() {},
       scheduleSave: writer.scheduleSave,
@@ -206,6 +241,83 @@ await check("persistent missing rows fail after one replay and remain retryable"
   assert.equal(out.rangesRemaining, undefined);
   assert.match(out.message, /0 compressible range/);
   assert.deepEqual(f.counts(), { waits: 1, prepares: 2, compressions: 1 });
+  assert.equal(f.session.stats.requests, 1);
+});
+await check("an existing-block fit with zero new folds rebuilds the actual outbound for all four protocols", async () => {
+  for (const protocol of ["openai", "responses", "anthropic", "google"]) {
+    const f = fixture({ protocol, flush: () => false, realCompression: true, recoverInPreflight: true });
+    const out = await f.run(await f.prepare());
+    assert.equal(out.failFast, undefined);
+    assert.deepEqual(Array.from(out.processedMessages, m => m.id), ["acp_summary_old", "c", "d"]);
+    assert.deepEqual(f.counts(), { waits: 1, prepares: 2, compressions: 1 });
+    assert.equal(f.session.stats.requests, 1);
+  }
+});
+await check("an internal fit cannot forward a still-degraded rebuilt payload", async () => {
+  const f = fixture({ flush: () => false, realCompression: true });
+  const out = await f.run(await f.prepare());
+  assert.equal(out.status, 502);
+  assert.equal(out.retryable, true);
+  assert.deepEqual(f.counts(), { waits: 1, prepares: 2, compressions: 1 });
+  assert.equal(f.session.stats.requests, 1);
+});
+await check("a failed zero-fold rebuild restores the request count", async () => {
+  const f = fixture({ flush: () => false, realCompression: true, throwOnPrepare: 2 });
+  await assert.rejects(f.run(await f.prepare()), /rebuild failed/);
+  assert.equal(f.session.stats.requests, 1);
+});
+await check("corrective probes persist one request on success, fail-fast, throw and disconnect", async () => {
+  const writer = actualWriterOffSave();
+  for (const outcome of ["success", "fail-fast", "throw", "disconnect"]) {
+    const saved = [];
+    const store = {
+      consumePendingLedgerAlign() {}, saveContentStore: () => true,
+      writerOffActive: () => true, envelopeFrozen: () => false,
+      writerOffPending: new Map(), lastSaveLanded: new Map(), durabilityArms: new Map(),
+      guardedBuild: current => () => { saved.push(JSON.parse(JSON.stringify(current.stats))); return { metadata: {} }; },
+      maybeCutForkBase() {}, noteMetaFp() {}, noteDurable() {}, runIdleSpillIfIdle() {}, drainFlushWaiters() {}, log() {},
+      scheduleSave: writer.scheduleSave,
+    };
+    const dirty = uniqueBlockSpan(source, "actual corrective markDirty", "function markDirty(session){", { expression: true }).block;
+    const mark = runInNewContext(dirty + "\nmarkDirty", { getStore: () => store });
+    const f = fixture({ flush: () => false, recoverInPreflight: true,
+      compressionResult: { compressedRanges: 1, savedTokens: 270, payloadEstimate: 30, fitsWindow: true, rangesRemaining: 1 },
+      throwOnPrepare: outcome === "throw" ? 2 : undefined,
+      failOnPrepare: outcome === "fail-fast" ? 2 : undefined,
+      onDirty: mark,
+      onPrepare(session, round) {
+        session.revisionEpoch = (session.revisionEpoch ?? 0) + 1;
+        store.scheduleSave(session);
+        if (round === 2 && outcome === "disconnect") f.res.close();
+      },
+    });
+    const run = f.run(await f.prepare());
+    if (outcome === "throw") await assert.rejects(run, /rebuild failed/);
+    else {
+      const result = await run;
+      if (outcome === "success") assert.equal(result.failFast, undefined);
+      if (outcome === "fail-fast") { assert.equal(result.status, 413); assert.equal(result.message, "rebuild refused"); }
+      if (outcome === "disconnect") { assert.equal(result.failFast, true); assert.equal(result.respond, false); }
+    }
+    await new Promise(resolve => queueMicrotask(resolve));
+    assert.equal(f.session.stats.requests, 1, outcome + " in-memory count");
+    assert(saved.some(stats => stats.requests === 2), "actual writer must exercise the replay microtask race");
+    assert.equal(saved.at(-1).requests, 1, outcome + " cold-load count");
+    assert.equal(f.counts().prepares, 2);
+  }
+});
+await check("anonymous zero-fold rebuild uses the rebuilt image reserve", async () => {
+  let measured = 0;
+  const f = fixture({ anonymous: true, images: 80, rebuiltImages: 0, onRawEstimate: () => measured++, flush: () => false,
+    compressionResult: { compressedRanges: 0, savedTokens: 0, payloadEstimate: 30, fitsWindow: true, rangesRemaining: 0 },
+    recoverInPreflight: true });
+  const result = await f.run(await f.prepare());
+  assert.equal(result.failFast, undefined);
+  // A proven fit returns before the speculative measured-body/doom path.
+  // Removing the old image reserve is what makes 30 text tokens fit in 100.
+  assert.deepEqual(Array.from(result.processedMessages, m => m.id), ["acp_summary_old", "c", "d"]);
+  assert.equal(measured, 0, "proven rebuilt fit must not enter size arbitration");
+  assert.equal(f.session.stats.lastInputTokens, 30);
   assert.equal(f.session.stats.requests, 1);
 });
 await check("unsafe seams and skipped-block coverage still reject the view", async () => {
@@ -347,7 +459,9 @@ await check("actual receive, gzip decode and ingest limits keep 413/stage with C
   const statement = /const ingestCap=protocol==="responses"\?0:([A-Za-z_$][\w$]*)\(\);/.exec(source);
   assert(statement, "actual text-only ingest gate");
   const ingest = extract(statement[0], wrap);
-  const context = { Buffer, createGunzip, limitsReceiveBytes: () => 64, log2() {} };
+  const decoderZlib = /streamDecode\((\w+)\.createGunzip,/.exec(functions);
+  const context = { Buffer, createGunzip, limitsReceiveBytes: () => 64, log2() {},
+    ...(decoderZlib ? { [decoderZlib[1]]: createRequire(import.meta.url)("node:zlib") } : {}) };
   const api = runInNewContext(classes + "\n" + functions +
     "\n({readBody,decodeRequestBody,BodyTooLargeError,DecompressedTooLargeError,IngestBodyTooLargeError});", context);
   const emit = (err2, stage, branch = main) => {
@@ -396,14 +510,20 @@ await check("actual receive, gzip decode and ingest limits keep 413/stage with C
 });
 await check("actual side-request classification and window guard preserve short Chinese 413 with diagnostic detail", () => {
   const names = ["defaultCountTokens", "estimateRawBodyTokens", "outputBudgetField", "readOutputBudget",
-    "isServerToolUtilityCall", "isSideRequest", "resolveSideLane", "sideRequestGuard"];
-  const functions = names.map(name => uniqueBlockSpan(source, name, "function " + name + "(", { expression: true }).block).join("\n");
+    "isServerToolUtilityCall", "isStructuredOutputCall", "isSideRequest", "resolveSideLane", "sideRequestGuard"];
+  const formats = source.match(/var STRUCTURED_FORMAT_TYPES=new Set\(\[[^\]]+\]\);/g);
+  assert.equal(formats?.length, 1, "actual structured-output formats must be unique");
+  const functions = formats[0] + names.map(name => uniqueBlockSpan(source, name, "function " + name + "(", { expression: true }).block).join("\n");
   const context = { NON_TEXT_BODY_KEYS: new Set(["data", "url", "b64_json", "file_data", "image_url"]),
     SIDE_REQUEST_AGENTS: new Set(["title"]), SIDE_REQUEST_MAX_TOKENS: 200, SIDE_REQUEST_GUARD_TOLERANCE: 1.15 };
   const api = runInNewContext(functions + "\n({isSideRequest,resolveSideLane,sideRequestGuard});", context);
   const parsed = { model: "mock-32k", max_tokens: 128, messages: [{ role: "user", content: "A".repeat(160000) }] };
   const sideIntent = api.isSideRequest(parsed);
   assert.equal(sideIntent, true);
+  const structured = { response_format: { type: "json_schema" }, messages: [] };
+  assert(api.isSideRequest(structured));
+  assert(!api.isSideRequest({ ...structured, tools: [{ type: "function" }] }));
+  assert(!api.isSideRequest(structured, "main"));
   assert.equal(api.resolveSideLane({ protocol: "openai", countTokens: false, responsesCompact: false, stripApplied: false, sideIntent }).lane, "side");
   const guard = api.sideRequestGuard(parsed, "openai", 32768, "bytes", undefined, 1, 0, 0, false);
   assert.equal(guard.blocked, true); assert(guard.estimate > guard.limit);

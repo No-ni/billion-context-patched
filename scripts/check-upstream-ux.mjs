@@ -213,12 +213,13 @@ const assertStreamResponses = (text) => {
     assert.equal(closed.endCalls, 1, "write failure must still end the response");
 
     const diag = { classification: "transport", cause: "remote-close", code: "ECONNRESET" };
-    const res = new CaptureResponse();
-    api.emitUpstreamTruncation(res, protocol, false, undefined, diag);
+    const res = new CaptureResponse(), truncationLogs = [];
+    api.emitUpstreamTruncation(res, protocol, false, line => truncationLogs.push(line), diag);
     const error = sseFrames(res.chunks.join(""))[0];
     const payload = error.error ?? error;
     assert.match(payload.message, /[\u4e00-\u9fff]/);
-    assert.deepEqual(payload.meta, diag);
+    assert.equal(payload.meta, undefined, "upstream transport diagnostics stay in local logs");
+    assert(truncationLogs.some(line => line.includes(JSON.stringify(diag))), "truncation diagnostics must remain inspectable in the log");
     assert.equal(payload.code, protocol === "google" ? 502 : "upstream_stream_truncated");
     assert.equal(res.endCalls, 1);
     const transparent = new CaptureResponse();
@@ -472,8 +473,11 @@ export const assertDistUpstreamUx = (distPath) => {
   expectPresent(text, [
     "__biliFailureTextZh", "__biliStreamErrorInfo", "classifyUpstreamFailure",
     "describeUpstreamFailure", "recordUpstreamAlert", "clearUpstreamAlertsForHost",
-    "getUpstreamAlerts", 'result.includes("FAILED")',
+    "getUpstreamAlerts",
   ], "proxy build");
+  const failed = runInNewContext(uniqueBlockSpan(text, "proxy tool failure", "function proxyToolResultFailed(", { expression: true }).block + ";proxyToolResultFailed");
+  assert(failed("[ACP compress FAILED: invalid range]\nretry later"));
+  assert(!failed("[ACP compress OK]\nSummary mentions FAILED in quoted output"));
   assertExtractor();
   assertFailureResponses(text);
   assertStreamResponses(text);

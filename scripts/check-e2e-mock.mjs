@@ -143,7 +143,7 @@ async function applyConfiguration(configuration, context = active.context) {
   finally { rmSync(pending, { force: true }); }
   const reloaded = await json(active.port, "/__bili/config/reload", {}); assert.equal(reloaded.status, 200, reloaded.text); assert.equal(reloaded.body.ok, true);
 }
-function isolatedContext(name, mode, jsonWriter = "on") {
+function isolatedContext(name, mode, jsonWriter) {
   const nested = join(root, name), nestedHome = join(nested, "home"), nestedState = join(nested, "state"), nestedCache = join(nested, "cache"), nestedConfig = join(nested, "config"), nestedData = join(nested, "data"), nestedTemporary = join(nested, "tmp"), nestedSessions = join(nestedData, "billion-context/sessions");
   for (const path of [nestedHome, nestedState, nestedCache, nestedConfig, nestedData, nestedTemporary, nestedSessions, join(nestedState, "billion-context"), join(nestedCache, "billion-context")]) mkdirSync(path, { recursive: true });
   const nestedEnv = { ...env, HOME: nestedHome, USERPROFILE: nestedHome, APPDATA: join(nestedHome, "AppData/Roaming"), LOCALAPPDATA: join(nestedHome, "AppData/Local"), XDG_CONFIG_HOME: nestedConfig, XDG_STATE_HOME: nestedState, XDG_CACHE_HOME: nestedCache, XDG_DATA_HOME: nestedData,
@@ -283,6 +283,22 @@ async function wsIngressChecks() {
 }
 async function storageChecks() {
   await stopProxy(active, true);
+  await check("default SQLite-only storage survives cold restart without JSON envelopes", async () => {
+    const context = isolatedContext("storage-default"), cid = "e2e-storage-default";
+    const history = [{ role: "user", content: "DEFAULT_SQLITE_MARKER: preserve this history through a cold restart with no storage mode or writer preference." }];
+    await startProxy(context); await assertStorageMode("full");
+    const turn = await chat(cid, history); assert.equal(turn.status, 200, turn.text);
+    const before = await snapshot(cid); await stopProxy(active, true);
+    assert(existsSync(join(context.sessions, "index.db")));
+    assert.equal(sessionJsonFiles(context.sessions).length, 0, "the default must not write session envelopes");
+    await startProxy(context); const cold = await snapshot(cid);
+    assert.deepEqual(cold.orderedMessages, before.orderedMessages);
+    assert(cold.messages.some(message => message.text?.includes("DEFAULT_SQLITE_MARKER")));
+    const continued = await chat(cid, [...history, { role: "assistant", content: "DEFAULT_SQLITE_ACK" }, { role: "user", content: "DEFAULT_SQLITE_CONTINUE" }]);
+    assert.equal(continued.status, 200, continued.text); await stopProxy(active, true);
+    assert.equal(sessionJsonFiles(context.sessions).length, 0);
+    assertLegacyUnchanged(assert, context.legacy);
+  });
   const legacyContext = isolatedContext("storage-legacy", "legacy"), shadowContext = isolatedContext("storage-shadow", "shadow"), fullContext = isolatedContext("storage-full-fallback", "full");
   await check("explicit legacy file mode keeps JSON routing and never opens a unified database", async () => {
     await startProxy(legacyContext); await assertStorageMode("legacy");

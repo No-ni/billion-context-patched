@@ -8,12 +8,12 @@
 
 | 来源 | 当前版本 / 提交 | 本仓库的关系 |
 | --- | --- | --- |
-| [billion-context](https://github.com/ranxianglei/billion-context) | 0.1.213，固定提交 `0d94a8a240fa0f7648f84032b03150f6b1891167`，kernel 0.0.196 | 从固定源码重新构建，对代理 `dist/index.js` 重打 B1–B22；native agent 修正 WS 权威请求头，client 在合并前移除横幅；层和清单也随该基线复制 |
+| [billion-context](https://github.com/ranxianglei/billion-context) | manifest 0.1.214，固定主线提交 `e7a42babec704a80678ca84eb4b4110273d3b993`，kernel 0.0.198 | 从固定源码重新构建，对代理 `dist/index.js` 重打 B1–B22 及 WAL 头修复；native agent 修正 WS 权威请求头，client 在合并前移除横幅；层和清单随同一基线复制。不是仅采用 v0.1.214 标签 |
 | [dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator) | 2.3.0，`e8c30af1f2b5cffa6749d032f0f296e17d4e26d0` | 来源未升级；2026-11-12 在 lib/index.js、lib/ledger.js 加本地账本生命周期与依赖寻址补丁，其余文件保留基线。补丁由 scripts/patch-accelerator.mjs 重打，客户端仍只改三个字面量 |
 | [yaml](https://github.com/eemeli/yaml) | 2.9.1，ISC | 从 2026-11-11 审计的 DSH settings 随附版本复制 Node runtime，仅清除 Document.js 一处行末空格；CLI 与运行期共用解析器，来源范围见 `vendor/yaml/SOURCE.md` |
 | [zod](https://github.com/colinhacks/zod) | 4.4.3，MIT | 原加速器清单里的嵌套依赖不会由根包装包自动安装。自带 Node ESM runtime，账本显式用相对路径导入，管理器与 CLI 均不依赖原版或 profile 残留；范围见 vendor/zod/SOURCE.md |
 
-bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮从干净固定源码执行 `npm ci` 和 `npm run build`，保留七个选定文件的构建哈希；service/native/client 的差异均通过对应补丁器产生，外部输入不被 installer 改写。完整来源、实际工具版本、检查和哈希证据见 [0.6.8 上游吸收审计](audits/2026-11-13-upstream-0.6.8.md)。这是本次构建链的核对，未宣称跨机器二进制完全可复现。版本号相同不代表提交相同，不能只按 0.1.213 判断是否需要升级。
+bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮从干净固定源码执行 `npm ci` 和 `npm run build`，保留七个选定文件的构建哈希；service/native/client 的差异均通过对应补丁器产生，外部输入不被 installer 改写。当前来源、适配、检查与边界见 [0.6.9 主线整合审计](audits/2026-11-15-upstream-integration.md)；上一来源证据保留在 [0.6.8 审计](audits/2026-11-13-upstream-0.6.8.md)。不宣称跨机器二进制完全可复现；相同 manifest 版本可能对应不同主线提交，必须核对完整来源。
 
 ## 2. 实现与检查映射
 
@@ -30,9 +30,9 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮�
 | B5 | 步骤 5；`__biliDumpBody` | 标记控制的实际写盘需人工验证 |
 | B6 | 步骤 6；`__biliForkPck` | `check-views.mjs`；实际盖钥匙与缓存命中需真实网关 |
 | B7 | 步骤 7；`patches/fork-timestamps.block.js`、真实 stamping node、sync/fold clone 与存储字段白名单 | `check-views.mjs` 的多轮裸输入、父高水位、首见、开关、孙 fork、克隆与 JSON/KV 持久化；native 身份用 mock E2E，DSH 页面标签需人工 |
-| B8 | 步骤 8，最终函数体由步骤 10 提供 | `check-views.mjs`；真实存储降级需集成验证 |
+| B8 | 步骤 8，最终函数体由步骤 10 提供；sticky 成功后重新登记 pin | `check-views.mjs` 连续多轮推进、单轮上限及推进后编辑/摘要变化拒绝；真实存储降级需集成验证 |
 | B9 | 步骤 9；`loadTranscriptBase` | `check-views.mjs` 最新/老块/单块与缺行拒绝 |
-| B10 | 步骤 10；`patches/view-safety.block.js` 与两种拼接点 | `check-views.mjs` 的完整前缀、摘要生命周期状态指纹、尾部覆盖及 WS/增量路径；mock E2E 执行 retire/restore/rewrite 后实际发送校验 |
+| B10 | 步骤 10；`patches/view-safety.block.js`、两种拼接点与共享 identitySig 的 toolCallId | `check-views.mjs` 的实际签名、连续相同工具结果、完整前缀、摘要生命周期状态指纹、尾部覆盖及 WS/增量路径；mock E2E 执行 retire/restore/rewrite 后实际发送校验 |
 | B11 | 步骤 11；`parsePromptCacheRouting` 与设置页 | `check-views.mjs`、`check-wrapper.mjs`；另按 SPEC 的 PCK-01–PCK-05 核对优先级与重打幂等 |
 | B12 | 步骤 12、14；`patches/image-retention.block.js` 与 `image-egress.block.js` | `check-image-retention.mjs` 的四协议、Google 封套/非图片媒体、异步原图取回和关闭路径；mock E2E 检查实际发送 |
 | B13 | 步骤 12 的可替换哨兵块 | `check-image-retention.mjs` 块一致性、三平台命令与本机编码器；不可用后端明确 skip |
@@ -44,7 +44,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮�
 | B19 | 步骤 19 删除本地熔断；步骤 22 补预检分支 | `check-upstream-ux.mjs`、`check-preflight.mjs`、mock E2E 的反复连接失败与健康重试；真实 DSH 退避与上限需集成验证 |
 | B20 | `scripts/patch-bili-client.mjs`；installer 合并客户端 | `check-upstream-ux.mjs`；实际 shell 无横幅需人工 |
 | B21 | 步骤 21 的中文构造器、`stream-errors.block.js`；步骤 22 的预检、入口/出站大小限制、辅助请求超窗、WS 本地错误与模型隧道 DNS 拒绝 | `check-upstream-ux.mjs`、`check-preflight.mjs` 执行真实编译 HTTP/四协议/loop/completion/WS sink、reader/decoder/ingest/side guard、完整 WS session/history/upstream 和隧道响应；mock E2E 检查实际 HTTP/WS 拒绝及健康续接；receive socket reset 与 WS prewarm 边界见审计 |
-| B22 | 步骤 22；`patches/preflight.block.js`；当前渲染 attempt、四协议 kernel/post-processing guard 与共用预检入口 | `check-preflight.mjs` 的 fresh miss、持续降级、完整性、超时/取消与计数；mock E2E 一次真实 SQLite 读失败后保存/重渲染、块/原文/ref 保留及 gateway 只发送一次；DSH 冷加载/切模型未由自动检查证明 |
+| B22 | 步骤 22；`patches/preflight.block.js`；当前渲染 attempt、四协议 kernel/post-processing guard、共用预检入口及零新增范围的已有块 fit 重建 | `check-preflight.mjs` 的 fresh miss、持续降级、完整性、超时/取消、实际内层 fit、二次校正 probe 的四种结束状态与持久化计数、重建图片预算；mock E2E 一次真实 SQLite 读失败后保存/重渲染、块/原文/ref 保留及 gateway 只发送一次；DSH 冷加载/切模型未由自动检查证明 |
 
 ### 包装包：W1–W7
 
@@ -62,7 +62,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮�
 
 | ID | 实现位置 | 检查与覆盖边界 |
 | --- | --- | --- |
-| I1 | installer 的来源选择、自带 vendor/解析器与 build/out/profile | `check-wrapper.mjs`；升级人工核对 manifest/build-info/agent/client/层/dist 同基线 |
+| I1 | installer 的来源选择、自带 vendor/解析器与 build/out/profile；补丁器末尾的 SQLite WAL 头修复 | `check-wrapper.mjs`；`check-storage.mjs` 的真实 WAL/rollback、100 字节有限读取、异常关闭与配置优先级；mock E2E 的默认 SQLite 冷恢复；升级核对七文件同基线 |
 | I2 | installer 的临时候选、检查后替换和清理 | `check-wrapper.mjs` 坏候选不覆盖；不宣称整个多文件安装有事务原子性 |
 | I3 | `lib/profile.js`、`lib/merge.js` 与 installer | wrapper 检查 CLI 迁移，runtime 检查锁/并发/回滚/重载失败；完整管理器安装需真机 |
 | I4 | `lib/defaults.js`、`lib/profile.js` 与 installer | wrapper 检查纯规则/CLI，runtime 检查实际 SettingsForms；真实 br 回执需网关 |
@@ -87,6 +87,10 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮�
    ```
 
    显式 bili 输入须满足 installer 的兼容补丁/文件检查；不改输入目录。核对清单、build-info、agent、client、层和 dist 属于同一基线。重打后比较最终字节并再次应用验证幂等，检查独立 `--out` 结果与根产物一致。修改模板/组合层规则也须重建。
+
+   历史故障回归按 SPEC 第 7 节保留。[连续空工具结果故障](audits/2026-11-15-snapshot-tool-seam.md) 对应 B8/B10/B22，检查入口为 `scripts/check-views.mjs` 和 `scripts/check-preflight.mjs`，均已纳入 `check-all.mjs --offline`。[PR 检查](../.github/workflows/check.yml) 和 [发布工作流](../.github/workflows/release.yml) 在构建后运行同一入口；后续合并须核对这些用例仍覆盖最终产物。
+
+   I1 的 WAL 头修复也须保留实际产物回归：`check-storage.mjs` 在有写事务的真实 WAL 数据库、rollback 数据库、大文件、短文件、读失败和不存在文件上执行最终 helper，限制每次只读 100 字节并核对句柄关闭；配置表及 mock E2E 分别验证默认、显式选择与冷恢复。该检查同时接入 installer 的替换前检查。
 6. 按全部 B/W/I/PCK 条款记录保留、等价替代、需求变更或偏差。先修复已知偏差，再提交；同步本文来源、实现历史、用户更新记录及审计。发布执行 [RELEASING.md](RELEASING.md)。
 7. 安装与真机验证须在任务授权范围内，见 [USAGE.md](USAGE.md)。普通续聊、fork 首轮/后续轮、重启首轮、历史编辑、开关、禁用/重启、重复上游条目、压缩回执和缓存命中不能用自动检查冒充。清理本轮临时资源。
 
@@ -130,7 +134,7 @@ node scripts/check-all.mjs --offline
 
 | 入口 | 范围 | 环境要求 |
 | --- | --- | --- |
-| `node scripts/check-all.mjs --offline` / `npm run check` | 12 个入口：文档/条款、版本、views、图片、图像卡、UX、preflight、smoke、outbound-encoding、restart、wrapper、完整 mock E2E | 无用户 profile/真实模型/外网访问；会开本机端口、临时 SQLite/配置和模拟 HTTP/SSE/WS 网关，并使用系统编码器 |
+| `node scripts/check-all.mjs --offline` / `npm run check` | 13 个入口：文档/条款、版本、views、图片、图像卡、UX、preflight、storage、smoke、outbound-encoding、restart、wrapper、完整 mock E2E | 无用户 profile/真实模型/外网访问；会开本机端口、临时 SQLite/配置和模拟 HTTP/SSE/WS 网关，并使用系统编码器 |
 | `node scripts/check-all.mjs --host --host-modules /path/to/dsh/node_modules` | runtime、ledger-runtime | 真实 DSH 的 Cordis/Loader/Settings/Storage/atomic-write 等模块；Node `registerHooks` 所需版本见 engines；缺模块是未运行或失败，不是通过 |
 | 真实 DSH | UI、整机重载、冷加载/切模型、模型/网关与缓存 | 单独授权和记录；不作为离线自动检查的隐含结论 |
 
@@ -156,4 +160,7 @@ node scripts/install.mjs --profile /path/to/dsh/profile
 - [预检修复核对](audits/2026-11-12-preflight-fix.md)：B22 与 B19/B21 的修复和此前本地验证。
 - [维护与发布核对](audits/2026-11-12-maintenance-release.md)：文档分工、统一检查、CI 和本轮交付记录。
 - [0.6.8 上游吸收审计](audits/2026-11-13-upstream-0.6.8.md)：固定来源、批准取舍、全部稳定条款、模拟 E2E、独立扫描与交付核验。
+- [连续空工具结果修复核对](audits/2026-11-15-snapshot-tool-seam.md)：签名误配、sticky 连续推进、零新增范围的预检重建与本地验证边界。
+- [0.6.9 主线整合审计](audits/2026-11-15-upstream-integration.md)：固定主线、等价采用与本地保留、存储默认与 WAL 修复、全条款和验证边界。
+- [0.6.9 发布复核](audits/2026-11-15-release-0.6.9.md)：独立扫描、二次校正修复、最终产物、本地模拟端到端与发布验收。
 - 所有历史审计从 [文档目录](README.md) 进入；当前分支、标签和 Release 状态以实时查询为准。

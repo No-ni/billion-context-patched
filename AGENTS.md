@@ -28,6 +28,9 @@
 - `vendor/billion-context/dist/index.js` 只由 `scripts/patch-bili-build.mjs` 修改。`lib/client.js`、`lib/upstream.js` 和根 `dsh.bundle.patch.yml` 由 `node scripts/install.mjs --build` 生成。
 - 修改补丁块后，`already patched` 不证明函数体已更新。须从选定干净上游重打或提供旧版迁移，再验证最终产物、字节一致与幂等；锚点命中不等于行为兼容。
 - 先构建候选，再检查最终生成物；统一入口为 `node scripts/check-all.mjs --offline`。host 检查显式提供 `--host-modules`，缺依赖必须报告未运行，不能算通过。禁止使用 `--skip-smoke` 绕过发布检查。
+- 历史故障回归也是合并验收对象，按 SPEC 第 7 节保留并验证；上游重构或等价替代后仍须有等价检查。B8/B10/B22 的故障证据与回归入口见 [连续空工具结果修复审计](docs/audits/2026-11-15-snapshot-tool-seam.md)。
+- B22 的二次校正也须验证成功、提前拒绝、异常和断开后的持久化请求计数，以及重建后的图片预算；见 [0.6.9 发布复核](docs/audits/2026-11-15-release-0.6.9.md)。
+- I1 的 WAL 文件头识别、有限读取和句柄关闭也须保留回归；存储默认与显式选择、冷恢复的验收见 [主线整合审计](docs/audits/2026-11-15-upstream-integration.md)，入口为 `check-storage.mjs` 和 mock E2E。
 - 不要把机器上的配置写成插件默认值；用户明确要求的默认变更须先在 SPEC 决策记录登记。
 - `prompt_cache_key` 默认开启是明确需求（B11），不得恢复上游默认关闭，仍须尊重显式 disabled/auto/enabled。
 - 生成物随仓库交付，`main` 必须可安装；同版 `patchBuild` 也会触发更新，未准备交付的工作放功能分支。普通拉取用 `git pull --ff-only`，上游合并保留来源历史，不 force push 或改写旧标签。

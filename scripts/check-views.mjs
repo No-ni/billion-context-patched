@@ -3,7 +3,9 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
+import { uniqueBlockSpan } from "./patch-bili-client.mjs";
 
 const dist = process.argv[2] ?? new URL("../vendor/billion-context/dist/index.js", import.meta.url);
 const source = readFileSync(dist, "latin1");
@@ -24,14 +26,15 @@ const store = {
   unifiedUncoveredRows: (_, intervals) => rows().filter(r => !intervals.some(([a,b]) => r.seq >= a && r.seq <= b)),
 };
 const api = runInNewContext(
+  uniqueBlockSpan(source, "message identity", "function identitySig(", {expression:true}).block +
   span("function __biliPrefixDigest(", "const __biliPinnedViews=") +
   "\nconst __biliPinnedViews=new Map();\n" +
   span("function parseRow(", "var SnapshotAnchorFallbackError=") +
   span("function buildAnchoredView(", "function __biliPluginLaneSnapshot(") +
-  "\n({buildView,buildAnchoredView,__biliPinViewRecord,__biliStickyView,__biliForkPinView,__biliPinnedViews});",
+  "\n({identitySig,buildView,buildAnchoredView,__biliPinViewRecord,__biliStickyView,__biliForkPinView,__biliPinnedViews});",
   {require:createRequire(import.meta.url), getStore:()=>store,
    MAX_CHAIN_WALK:8192, MIN_SEAM_RUN:2, __biliPinLog:()=>{},
-   identitySig:m=>`${m.role}|${m.contentType}|${m.text}`, console:{warn:()=>{}}}
+   sha256Hex2:value=>createHash("sha256").update(value).digest("hex"), console:{warn:()=>{}}}
 );
 const session = {id:"test", metadata:{}, state:{blocks:[block("old",["a","b"]),block("new",["x"])]}};
 let checks = 0;
@@ -61,19 +64,50 @@ check("a partially supplied missing block is rejected", () => {
   session.state.blocks[1].effectiveMessageIds.pop();
 });
 check("delta/WS seam requires the same coverage proof", () => {
-  assert.equal(api.buildAnchoredView(session,[],"user|text|c").reason,"skipped-block-not-in-tail");
-  assert(api.buildAnchoredView(session,[x],"user|text|c").ok);
+  assert.equal(api.buildAnchoredView(session,[],api.identitySig(c)).reason,"skipped-block-not-in-tail");
+  assert(api.buildAnchoredView(session,[x],api.identitySig(c)).ok);
+});
+const toolRound = i => [
+  {id:`r${i}`,role:"assistant",contentType:"reasoning",text:`thinking ${i}`},
+  {id:`c${i}`,role:"assistant",contentType:"tool-call",toolName:"run_code",toolCallId:`call${i}`,text:`code ${i}`},
+  {id:`t${i}`,role:"tool",contentType:"tool-result",toolName:"run_code",toolCallId:`call${i}`,text:"(run_code completed with no output)"},
+];
+check("identical tool output from different calls cannot anchor a WS seam", () => {
+  const s={id:"tools",state:{blocks:[block("old",["a","b"])]}};
+  db=[a,b,...toolRound(0)];
+  assert.equal(api.buildAnchoredView(s,[],api.identitySig(toolRound(1)[2])).reason,"anchor-mismatch");
+  assert(api.buildAnchoredView(s,[],api.identitySig(toolRound(0)[2])).ok);
+});
+check("repeated empty tool results preserve every tail message while the index lags", () => {
+  const s={id:"tools",state:{blocks:[block("old",["a","b"])]}};
+  db=[a,b,...toolRound(0)];
+  const messages=[...db];
+  for(let i=1;i<=4;i++) {
+    messages.push(...toolRound(i));
+    const r=api.buildView(s,messages);
+    assert(r.ok, `round ${i}: ${r.reason}`);
+    assert.deepEqual(Array.from(r.view,m=>m.id),["acp_summary_old",...messages.slice(2).map(m=>m.id)]);
+    assert.equal(r.tailStart,4);
+  }
+  // Content fallback still works when only the protocol-generated raw id changes.
+  const r=api.buildView(s,messages.map(m=>({...m,id:"new-"+m.id})));
+  assert(r.ok);
+  assert.deepEqual(Array.from(r.view.slice(4),m=>m.toolCallId??m.text),messages.slice(5).map(m=>m.toolCallId??m.text));
+  db=[a,b,c];
 });
 const deps = {pluginMode:true};
 const pinned = [msg("acp_summary_old"),c];
 const pin = (messages=[a,b,c]) => api.__biliPinViewRecord(session,messages,pinned);
 const sticky = messages => api.__biliStickyView(session,messages,deps,"test");
-pin();
 check("unchanged prefix appends new messages", () => {
+  pin();
   assert.equal(sticky([a,b,c,x]).at(-1).id,"x");
   assert.equal(session.metadata.snapshotRenderTailStart,pinned.length);
 });
-check("earlier prefix edits reject the pin", () => assert.equal(sticky([msg("a","edited"),b,c]),null));
+check("earlier prefix edits reject the pin", () => {
+  pin();
+  assert.equal(sticky([msg("a","edited"),b,c]),null);
+});
 check("edits beyond character 200 reject the pin", () => {
   const long = msg("c","z".repeat(400));
   pin([a,b,long]);
@@ -81,11 +115,13 @@ check("edits beyond character 200 reject the pin", () => {
   pin();
 });
 check("removed summary placeholders reject the pin", () => {
+  pin();
   session.state.blocks[0].active=false;
   assert.equal(sticky([a,b,c]),null);
   session.state.blocks[0].active=true;
 });
 check("retirement, rewrite and changed coverage reject old layouts", () => {
+  pin();
   const old = session.state.blocks[0];
   old.retired = true;
   assert.equal(sticky([a,b,c]), null);
@@ -107,6 +143,7 @@ check("restoring a retired block invalidates a pin without its summary", () => {
   pin();
 });
 check("unrelated tail blocks and counters do not invalidate the prefix", () => {
+  pin();
   const tail = session.state.blocks[1];
   tail.summary = "tail changed";
   tail.retired = true;
@@ -116,11 +153,32 @@ check("unrelated tail blocks and counters do not invalidate the prefix", () => {
   delete tail.retired;
 });
 check("shorter history, excessive tail and tool-first tail reject", () => {
+  pin();
   assert.equal(sticky([a,b]),null);
   assert.equal(sticky([a,b,c,...Array.from({length:9},(_,i)=>msg("n"+i))]),null);
   assert.equal(sticky([a,b,c,{...x,role:"tool"}]),null);
 });
+check("successful sticky rounds advance the verified pin without relaxing the per-round limit", () => {
+  pin();
+  const messages=[a,b,c];
+  for(let i=0;i<4;i++) {
+    messages.push(...toolRound(i));
+    const view=sticky(messages);
+    assert(view,`sticky round ${i} must not accumulate against the original pin`);
+    assert.deepEqual(Array.from(view,m=>m.id),[...pinned,...messages.slice(3)].map(m=>m.id));
+    assert.equal(session.metadata.snapshotRenderTailStart,view.length-3);
+    assert.equal(api.__biliPinnedViews.get(session.id).count,messages.length);
+  }
+  assert.equal(sticky([...messages,...Array.from({length:9},(_,i)=>msg("too-many-"+i))]),null);
+  assert.equal(sticky([...messages,{...x,role:"tool"}]),null);
+  const edited=structuredClone(messages); edited[4].text="edited appended call";
+  assert.equal(sticky(edited),null,"the newly pinned prefix must also be checked in full");
+  session.state.blocks[0].summary="rewritten";
+  assert.equal(sticky(messages),null);
+  delete session.state.blocks[0].summary;
+});
 check("fork checks the whole prefix and records a child pin", () => {
+  pin();
   const child={id:"child",metadata:{parentConversationId:"test"},state:session.state};
   assert.equal(api.__biliForkPinView(child,[msg("a","edited"),b,c,x],deps),null);
   assert.equal(api.__biliForkPinView(child,[a,b,c,x],deps).at(-1).id,"x");
@@ -144,8 +202,14 @@ check("fork timestamps copy only the inherited prefix", () => {
   const helpers=span("function __biliCopyForkTimestamps(", "function loadTranscriptBase(");
   const parent={state:{nextRunId:7,tsStamps:{a:10,b:20,c:30,bad:NaN},messageRefs:{byRaw:{a:"m00001",b:"m00002",c:"m00003",future:"m00004","bili:ref-floor":"m00005"}}}};
   const child={state:{}};
-  runInNewContext(helpers + span("child.state.nextRunId=parent.state.nextRunId;", "child.state.lastPassIds="),
-    {parent,child,prefix:[{rawId:"a"},{rawId:"b"}]});
+  const fork=uniqueBlockSpan(source,"fork timestamp owner","async function handlePluginFork(",{expression:true}).block;
+  const assignments=[...fork.matchAll(/(\w+)\.state\.nextRunId=(\w+)\.state\.nextRunId;/g)];
+  assert.equal(assignments.length,1);
+  const [assignment,childName,parentName]=assignments[0];
+  const start=fork.indexOf(assignment),end=fork.indexOf(childName+".state.lastPassIds=",start);
+  assert(end>start,"fork timestamp copy must precede lastPassIds");
+  runInNewContext(helpers + fork.slice(start,end),
+    {[parentName]:parent,[childName]:child,prefix:[{rawId:"a"},{rawId:"b"}]});
   assert.equal(child.state.nextRunId,7);
   assert.equal(child.state.tsStamps.a,10);
   assert.equal(child.state.tsStamps.c,undefined);

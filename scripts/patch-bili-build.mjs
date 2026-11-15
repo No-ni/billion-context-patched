@@ -238,9 +238,13 @@ if (text.includes(PKC_MARK)) {
 // 7. Explicit forks inherit only proven prefix times. Reserved parent refs
 // outside that prefix remain available without suppressing a child's own clock.
 const TS_HELPERS = readFileSync(join(here, "patches", "fork-timestamps.block.js"), "utf8").trimEnd();
-const TS_ANCHOR = "child.state.nextRunId=parent.state.nextRunId;";
-const TS_OLD_REPL = TS_ANCHOR + 'if(parent.state.tsStamps){const __biliCopyTsStamps={};for(const __tsm of prefix){const __tss=parent.state.tsStamps[__tsm.rawId];if(typeof __tss==="number")__biliCopyTsStamps[__tsm.rawId]=__tss}child.state.tsStamps=__biliCopyTsStamps}';
-const TS_REPL = TS_ANCHOR + "__biliCopyForkTimestamps(child,parent,prefix);";
+const forkBody = uniqueBlockSpan(text, "fork timestamp owner", "async function handlePluginFork(", { expression: true }).block;
+const forkClock = [...forkBody.matchAll(/(\w+)\.state\.nextRunId=(\w+)\.state\.nextRunId;/g)];
+if (forkClock.length !== 1) throw new Error("fork-ts: expected one child/parent clock assignment");
+const [, forkChild, forkParent] = forkClock[0];
+const TS_ANCHOR = forkClock[0][0];
+const TS_OLD_REPL = TS_ANCHOR + `if(${forkParent}.state.tsStamps){const __biliCopyTsStamps={};for(const __tsm of prefix){const __tss=${forkParent}.state.tsStamps[__tsm.rawId];if(typeof __tss==="number")__biliCopyTsStamps[__tsm.rawId]=__tss}${forkChild}.state.tsStamps=__biliCopyTsStamps}`;
+const TS_REPL = TS_ANCHOR + `__biliCopyForkTimestamps(${forkChild},${forkParent},prefix);`;
 if (!text.includes("function __biliCopyForkTimestamps(")) {
   replaceOnce("fork-ts helpers", CHILD_ANCHOR, TS_HELPERS + "\n" + CHILD_ANCHOR);
 } else if (!text.includes(TS_HELPERS)) {
@@ -253,10 +257,10 @@ if (text.includes(TS_REPL)) {
 } else {
   replaceOnce("fork-ts prefix", TS_ANCHOR, TS_REPL);
 }
-const TS_FORK_ARM = "seedTimestampsFromParent(child,parent);child.state.suppressMintingOnce=true;";
+const TS_FORK_ARM = `seedTimestampsFromParent(${forkChild},${forkParent});${forkChild}.state.suppressMintingOnce=true;`;
 if (text.includes(TS_FORK_ARM)) {
   replaceOnce("fork-ts whole-parent suppression", TS_FORK_ARM, "");
-} else if (text.includes("seedTimestampsFromParent(child,parent)") || text.includes("child.state.suppressMintingOnce=true")) {
+} else if (forkBody.includes(`seedTimestampsFromParent(${forkChild},${forkParent})`) || forkBody.includes(`${forkChild}.state.suppressMintingOnce=true`)) {
   throw new Error("fork-ts: upstream fork timestamp arm changed; re-derive the patch");
 }
 const TS_PIPELINE_EDITS = [
@@ -363,6 +367,12 @@ if (!text.includes(SAFETY_MARK)) {
     console.log("view-safety: helpers updated");
   } else console.log("view-safety: already patched");
 }
+// Equal tool output is not the same message when it belongs to another call.
+// The shared signature also backs WS probes and shadow comparisons, whose
+// producers and consumers must agree on the complete call identity.
+editFunction("snapshot tool-call identity", "identitySig", body => editInside("tool-call identity", body,
+  '${m2.toolName??""}|${text2}${img}',
+  '${m2.toolName??""}|${JSON.stringify(m2.toolCallId??null)}|${text2}${img}'));
 // 11. Required fork default: stamp cache keys unless the user chose a routing mode.
 const CACHE_DEFAULT_OLD = 'function parsePromptCacheRouting(value){return value==="auto"||value==="enabled"||value==="disabled"?value:"disabled"}';
 const CACHE_DEFAULT_NEW = CACHE_DEFAULT_OLD.replace('?value:"disabled"}', '?value:"enabled"}');
@@ -773,6 +783,26 @@ for (const [label, old, next] of PREFLIGHT_EDITS) {
   replaceOnce(label, old, next);
 }
 console.log("preflight recovery and errors: patched");
+// Applying existing blocks can make the kernel view fit without creating a new
+// summary. Rebuild the wire payload in that case too, and judge the rebuilt
+// messages rather than trusting the inner fit or the stale raw preparation.
+editFunction("preflight existing-block rebuild", "preflightCompressIfNeeded", body => {
+  let next = editInside("zero-fold rebuild", body,
+    'if(result.compressedRanges>0){const rebuilt=pendingRebuild??await runPrepare();if(pendingRebuild===void 0){session.stats.requests-=1}pendingRebuild=void 0;outbound=rebuilt;',
+    'if(result.compressedRanges>0||result.fitsWindow&&!payloadFitsWindow){let rebuilt=pendingRebuild;if(rebuilt===void 0){const requests=session.stats.requests;try{rebuilt=await runPrepare()}finally{if(session.stats.requests!==requests){session.stats.requests=requests;markDirty(session)}}}pendingRebuild=void 0;if(rebuilt.failFast)return rebuilt;outbound=rebuilt;');
+  // The corrective probe is another prepare replay, including its queued save.
+  next = editInside("corrective probe replay", next,
+    'const probe=await runPrepare();session.stats.requests-=1;pendingRebuild=probe;',
+    'let probe;const requests=session.stats.requests;try{probe=await runPrepare()}finally{if(session.stats.requests!==requests){session.stats.requests=requests;markDirty(session)}}if(probe.failFast)return probe;pendingRebuild=probe;');
+  const oldFit = 'fits=unknownBaseline&&result.compressedRanges>0?result.fitsWindow:(unknownBaseline?estimateCoreMessagesUpper(rebuiltMsgs)+overheadEstimate+imageTokens:rebuiltCalibrated)<limit;';
+  const newFit = oldFit.replace('+imageTokens:', '+rebuiltImageTokens:');
+  if (next.includes(oldFit)) next = editInside("zero-fold rebuilt image reserve migration", next, oldFit, newFit);
+  next = editInside("zero-fold fit proof", next,
+    'fits=unknownBaseline?result.fitsWindow:rebuiltCalibrated<limit;', newFit);
+  return editInside("zero-fold rebuild log", next,
+    'log2("info",`[${session.id}] preflight compressed ${result.compressedRanges} range(s),',
+    'if(result.compressedRanges===0)log2("info",`[${session.id}] preflight refreshed existing snapshot (~${foldedCalibratedSize}/${limit}) without new folds`);else log2("info",`[${session.id}] preflight compressed ${result.compressedRanges} range(s),');
+});
 
 const SNAPSHOT_BEGIN_OLD = 'function maybeSnapshotView(session,clientMsgs,deps){';
 const SNAPSHOT_BEGIN_NEW = SNAPSHOT_BEGIN_OLD + '__biliBeginSnapshotTurn(session,clientMsgs,deps);';
@@ -1038,6 +1068,12 @@ if (!text.includes(SIDE_TOO_LARGE_NEW)) replaceOnce("side request 413", SIDE_TOO
 const TUNNEL_DENIAL_OLD = 'JSON.stringify({error:verdict.message,code:"tunnel_destination_denied",detail:verdict.code})';
 const TUNNEL_DENIAL_NEW = 'JSON.stringify(verdict.code==="unresolvable"?{error:__biliFailureTextZh(verdict.message,{kind:"dns",host:new URL(route.upstream).hostname}),code:"tunnel_destination_denied",detail:verdict.code,upstreamFailure:{kind:"dns",host:new URL(route.upstream).hostname,hint:verdict.message}}:{error:verdict.message,code:"tunnel_destination_denied",detail:verdict.code})';
 if (!text.includes(TUNNEL_DENIAL_NEW)) replaceOnce("model tunnel DNS failure", TUNNEL_DENIAL_OLD, TUNNEL_DENIAL_NEW);
+
+// I1: inspect only the SQLite header, without opening a database lock or
+// synchronously materializing the entire database. WAL uses 2 in both bytes.
+editFunction("SQLite WAL header", "dbFileIsAlreadyWal", body => editInside("SQLite WAL header", body,
+  'function dbFileIsAlreadyWal(dbPath){try{const head=readFileSync7(dbPath);return head.length>=100&&head[18]===0&&head[19]===2}catch{return false}}',
+  'function dbFileIsAlreadyWal(dbPath){const fs=require("node:fs");let fd;try{fd=fs.openSync(dbPath,"r");const head=Buffer.alloc(100);return fs.readSync(fd,head,0,100,0)===100&&head[18]===2&&head[19]===2}catch{return false}finally{if(fd!==void 0)try{fs.closeSync(fd)}catch{}}}'));
 
 if (changed) {
   // The harness loads this build as a module, and a script-mode check is not the

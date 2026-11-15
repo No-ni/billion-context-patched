@@ -80,9 +80,13 @@ function __biliStickyView(session, clientMsgs, deps, reason) {
     if (!__biliPinMatches(session, clientMsgs, pin)) return null;
     const extra = clientMsgs.slice(pin.count);
     if (extra.length > 8 || extra[0]?.role === "tool") return null;
+    const msgs = pin.view.concat(extra);
     session.metadata.snapshotRenderTailStart = pin.view.length;
+    // This prefix has passed the same proof as a normal render. Advance the
+    // pin so the next small tail is measured from this verified request.
+    __biliPinViewRecord(session, clientMsgs, msgs);
     __biliPinLog(deps, "[snapshot-render] sticky view (" + reason + "): pinned=" + pin.view.length + " appended=" + extra.length);
-    return pin.view.concat(extra);
+    return msgs;
   } catch { return null; }
 }
 
