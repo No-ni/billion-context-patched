@@ -558,7 +558,9 @@ function __biliForkTranscriptSource(session,store){
 | `imagePrompt` / `BILI_IMAGE_PROMPT` | 开 | 系统提示尾部的图像约定 |
 | `imageRescaleMaxDim` | 未设 | 上游 jimp 那条链的键，当前无效果，登记它是为了让配置不报未知键 |
 
-环境变量里 `0`/`false`/`off` 视为关闭，优先级高于配置文件。五个键都已登记进 `KNOWN_TOP_LEVEL_KEYS`。
+环境变量里 `0`/`false`/`off` 视为关闭，优先级高于配置文件。五个键须同时登记进代理和 native 宿主构建的 `KNOWN_TOP_LEVEL_KEYS`。代理由步骤 16 重打；宿主由 `scripts/patch-bili-agent.mjs` 在 installer 的候选阶段补齐，兼容已打 WS 补丁但漏登记配置键的旧构建，重复应用不变，缺失或重复锚点拒绝写入。2026-11-15 发现此前仅代理登记、宿主仍误报警，已按 B16/IMG-08 补齐。
+
+`check-upstream-ux.mjs` 从两个实际构建提取白名单和 `warnUnknownTopLevelKeys` 执行：五个合法键不告警，拼错的键仍告警且相同告警只记录一次；另验证宿主迁移只增加这五键、其余字节保持，以及重复应用和坏锚点拒绝。宿主检查由 installer 替换前和 wrapper 的完整产物检查执行，后续构建与合并不能只核对代理端。
 
 `node scripts/check-image-retention.mjs [dist]` 是离线检查：结构上核对块已插入、折叠在体积削减之前、记账挂在 `noteSuccessfulForward`、两处 prompt seam、配置键登记；行为上把两个块注入 shim 后跑 11 组用例——首见不折叠 / 记账后再见折叠、上传豁免、关掉豁免则折、tool_result 里的图折叠、google 的裸 `inlineData`（夹具里不含 "base64" 字样）、openai 的 image_url、responses 的 function_call_output、总开关、三平台后端顺序与命令行（sips、PowerShell、ImageMagick 各自的参数、只缩不放、引号转义）、本机后端的真实压缩（自造 1500×1000 PNG）、约定文本的开头/关键词/稳定性/关闭。Windows 的端到端压缩需要 Windows 主机，其它平台跳过；不联网、不调模型。
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Execute B19–B21 on the candidate that ships: HTTP errors, both stream error
+// Execute B16/B19–B21 on the candidate that ships: config warnings, HTTP errors, both stream error
 // shapes, the real loop adapters, legal terminal handling, the SSE-to-WS sink
 // and the merged client.
 // No user database, browser, gateway or model is contacted.
@@ -49,6 +49,30 @@ const classSource = (text, name) => {
   const matches = [...text.matchAll(pattern)];
   assert.equal(matches.length, 1, "expected one shipped class " + name + ", found " + matches.length);
   return uniqueBlockSpan(text, name, matches[0][0]).block;
+};
+
+const IMAGE_CONFIG_KEYS = ["imageRescaleMaxDim", "imageRetention", "imageRetentionKeepLastUser", "imageRetentionMaxDim", "imagePrompt"];
+
+const assertImageConfigKeys = (text, what) => {
+  const matches = [...text.matchAll(/\bKNOWN_TOP_LEVEL_KEYS=new Set\((\[[^\]]*\])\)/g)];
+  assert.equal(matches.length, 1, what + " must have one config key registry");
+  const keys = JSON.parse(matches[0][1]), warnings = [];
+  const warn = runInNewContext("(" + functionSource(text, "warnUnknownTopLevelKeys") + ")", {
+    KNOWN_TOP_LEVEL_KEYS: new Set(keys), seenUnknownTopLevelKeySignatures: new Set(),
+    COMPRESS_SETTING_FIELDS: new Set(), INERT_REMOVED_COMPRESS_KEYS: [],
+    log: (level, message) => warnings.push({ level, message }),
+  });
+  warn(Object.freeze({ imageRescaleMaxDim: 1200, imageRetention: false,
+    imageRetentionKeepLastUser: false, imageRetentionMaxDim: 900, imagePrompt: false }));
+  assert.equal(warnings.length, 0, what + " must accept all five image config keys without warnings");
+  warn({ imageRetentoin: false });
+  assert.equal(warnings.length, 1, what + " must still warn about unknown config keys");
+  assert.equal(warnings[0].level, "warn");
+  assert.match(warnings[0].message, /unknown top-level config key\(s\): imageRetentoin/);
+  warn({ imageRetentoin: false });
+  assert.equal(warnings.length, 1, what + " must retain warning deduplication");
+  console.log("  OK " + what + " accepts image config keys and still warns once for a typo");
+  return { initializer: matches[0][0], keys };
 };
 
 const assertExtractor = () => {
@@ -462,6 +486,7 @@ const assertResponsesWsSink = (text) => {
 
 export const assertDistUpstreamUx = (distPath) => {
   const text = readFileSync(distPath, "latin1");
+  assertImageConfigKeys(text, "proxy");
   expectAbsent(text, [
     "CIRCUIT_OPEN_AFTER", "circuitProbeCooldownMs", "MAX_CIRCUITS",
     "upstreamCircuitBlockReason", "upstreamCircuitLastFailureKind",
@@ -529,6 +554,13 @@ export const assertClientUpstreamUx = (clientPath) => {
 
 export const assertAgentUpstreamUx = (agentPath) => {
   const text = readFileSync(agentPath, "utf8");
+  const config = assertImageConfigKeys(text, "native agent");
+  const previous = text.replace(config.initializer,
+    "KNOWN_TOP_LEVEL_KEYS=new Set(" + JSON.stringify(config.keys.filter(key => !IMAGE_CONFIG_KEYS.includes(key))) + ")");
+  assert.equal(patchBiliAgentBundle(previous).text, text, "native config migration must preserve every other byte");
+  assert.throws(() => patchBiliAgentBundle(text + "\n" + config.initializer + ";"), /native image config keys/);
+  assert.throws(() => patchBiliAgentBundle(text.replace(config.initializer,
+    config.initializer.replace('"cacheKeepalive"', '"futureCacheKeepalive"'))), /native image config keys/);
   expectPresent(text, NATIVE_WS_HEADERS_MARKERS, "native agent bundle");
   assert.equal(patchBiliAgentBundle(text).text, text, "published native agent is not the idempotent patched result");
   const source = functionSource(text, "mergeWsInitHeaders");

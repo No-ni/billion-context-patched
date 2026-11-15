@@ -8,7 +8,7 @@
 
 | 来源 | 当前版本 / 提交 | 本仓库的关系 |
 | --- | --- | --- |
-| [billion-context](https://github.com/ranxianglei/billion-context) | manifest 0.1.214，固定主线提交 `e7a42babec704a80678ca84eb4b4110273d3b993`，kernel 0.0.198 | 从固定源码重新构建，对代理 `dist/index.js` 重打 B1–B22 及 WAL 头修复；native agent 修正 WS 权威请求头，client 在合并前移除横幅；层和清单随同一基线复制。不是仅采用 v0.1.214 标签 |
+| [billion-context](https://github.com/ranxianglei/billion-context) | manifest 0.1.214，固定主线提交 `e7a42babec704a80678ca84eb4b4110273d3b993`，kernel 0.0.198 | 从固定源码重新构建，对代理 `dist/index.js` 重打 B1–B22 及 WAL 头修复；native agent 修正 WS 权威请求头并同步图片配置键，client 在合并前移除横幅；层和清单随同一基线复制。不是仅采用 v0.1.214 标签 |
 | [dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator) | 2.3.0，`e8c30af1f2b5cffa6749d032f0f296e17d4e26d0` | 来源未升级；2026-11-12 在 lib/index.js、lib/ledger.js 加本地账本生命周期与依赖寻址补丁，其余文件保留基线。补丁由 scripts/patch-accelerator.mjs 重打，客户端仍只改三个字面量 |
 | [yaml](https://github.com/eemeli/yaml) | 2.9.1，ISC | 从 2026-11-11 审计的 DSH settings 随附版本复制 Node runtime，仅清除 Document.js 一处行末空格；CLI 与运行期共用解析器，来源范围见 `vendor/yaml/SOURCE.md` |
 | [zod](https://github.com/colinhacks/zod) | 4.4.3，MIT | 原加速器清单里的嵌套依赖不会由根包装包自动安装。自带 Node ESM runtime，账本显式用相对路径导入，管理器与 CLI 均不依赖原版或 profile 残留；范围见 vendor/zod/SOURCE.md |
@@ -17,7 +17,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮�
 
 ## 2. 实现与检查映射
 
-行为、默认值和拒绝条件只在 SPEC 维护；下表按稳定 ID 定位实现和验证。B1–B22 的代理改动由 `scripts/patch-bili-build.mjs` 重打，B20 的客户端改动由 `scripts/patch-bili-client.mjs` 在构建时施加。`scripts/patch-bili-agent.mjs` 在完整 native factory 中修正 B7/W5 所需的 WS 会话身份请求头。
+行为、默认值和拒绝条件只在 SPEC 维护；下表按稳定 ID 定位实现和验证。B1–B22 的代理改动由 `scripts/patch-bili-build.mjs` 重打，B20 的客户端改动由 `scripts/patch-bili-client.mjs` 在构建时施加。`scripts/patch-bili-agent.mjs` 在完整 native factory 中修正 B7/W5 所需的 WS 会话身份请求头，并补齐 B16 的图片配置键登记。
 
 ### bili：B1–B22
 
@@ -38,7 +38,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮�
 | B13 | 步骤 12 的可替换哨兵块 | `check-image-retention.mjs` 块一致性、三平台命令与本机编码器；不可用后端明确 skip |
 | B14 | 步骤 13；`patches/image-convention.block.js` 两处 seam | `check-image-retention.mjs` 文本、稳定性与关闭 |
 | B15 | 步骤 15；请求独立 attempt/receipt、finalize、`noteSuccessfulForward` 和工具循环/辅助发送成功入口 | `check-image-retention.mjs` 和 mock E2E 的并发成功/失败/纯文字交错、变换后剥图、gzip、循环成功和重放耗尽 |
-| B16 | 步骤 16；`KNOWN_TOP_LEVEL_KEYS` | `check-image-retention.mjs` 配置键登记 |
+| B16 | 代理步骤 16 与 `scripts/patch-bili-agent.mjs`；两个构建的 `KNOWN_TOP_LEVEL_KEYS` | `check-image-retention.mjs`；`check-upstream-ux.mjs` 执行两端实际告警函数，验证合法键不告警、未知键仍告警且去重；宿主旧产物迁移、幂等与坏锚点拒绝接入 installer 和 wrapper 检查 |
 | B17 | 步骤 17；`patches/image-card.*.block.js` | `check-image-card.mjs` 页面解析与假 DOM；真实保存/重载需浏览器 |
 | B18 | 步骤 18；内核默认、页面常量及中英文提示 | `check-views.mjs`、`check-image-card.mjs` |
 | B19 | 步骤 19 删除本地熔断；步骤 22 补预检分支 | `check-upstream-ux.mjs`、`check-preflight.mjs`、mock E2E 的反复连接失败与健康重试；真实 DSH 退避与上限需集成验证 |
@@ -163,4 +163,5 @@ node scripts/install.mjs --profile /path/to/dsh/profile
 - [连续空工具结果修复核对](audits/2026-11-15-snapshot-tool-seam.md)：签名误配、sticky 连续推进、零新增范围的预检重建与本地验证边界。
 - [0.6.9 主线整合审计](audits/2026-11-15-upstream-integration.md)：固定主线、等价采用与本地保留、存储默认与 WAL 修复、全条款和验证边界。
 - [0.6.9 发布复核](audits/2026-11-15-release-0.6.9.md)：独立扫描、二次校正修复、最终产物、本地模拟端到端与发布验收。
+- [宿主图片配置误报警修复](audits/2026-11-15-native-image-config.md)：B16 双构建白名单、真实告警行为、旧产物迁移与不发版边界。
 - 所有历史审计从 [文档目录](README.md) 进入；当前分支、标签和 Release 状态以实时查询为准。
