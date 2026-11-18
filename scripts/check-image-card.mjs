@@ -86,6 +86,8 @@ for (const [name, needle] of [
   ["title wired to i18n", 'data-i18n="cfg.image"'],
   ["zh title", '"cfg.image":"图像"'],
   ["zh retention label", '"cfg.image_retention":"看过的图片不再重传"'],
+  ["image budget fields are translated", "cfg.image_max_request"],
+  ["image retirement step is translated", "cfg.image_offload_quantum"],
   ["en title", '"cfg.image":"Image"'],
 ]) check(name, html.includes(needle), needle);
 check("hydrate call site", html.includes("hydrateImageCard(cfg);"));
@@ -142,6 +144,7 @@ class Element {
     this.style = { cssText: "" };
     this.children = [];
     this.listeners = {};
+    this.attributes = {};
     this.className = "";
     this.textContent = "";
     this.id = "";
@@ -152,6 +155,7 @@ class Element {
   appendChild(node) { this.children.push(node); return node; }
   append(...nodes) { this.children.push(...nodes); }
   addEventListener(type, handler) { this.listeners[type] = handler; }
+  setAttribute(name, value) { this.attributes[name] = value; }
 }
 const makeDoc = () => ({ createElement: (tag) => new Element(tag), createTextNode: (text) => ({ textContent: text }) });
 const walk = (node, visit) => {
@@ -185,8 +189,30 @@ function mount(draft, options = {}) {
 {
   const card = mount({});
   check("defaults: longest side 1200", byId(card.box, "image-max-dim").value === "1200", byId(card.box, "image-max-dim").value);
+  check("defaults: at most 20 request images", byId(card.box, "image-max-request").value === "20");
+  check("defaults: retire 10 images per step", byId(card.box, "image-offload-quantum").value === "10");
+  check("defaults: budget input describes its hint", byId(card.box, "image-max-request").attributes["aria-describedby"] === "image-max-request-hint");
   check("defaults: retention on", byId(card.box, "image-retention").checked === true);
   check("defaults: prompt on", byId(card.box, "image-prompt").checked === true);
+}
+// both budget values are editable, and the retirement step cannot exceed the limit
+{
+  const card = mount({});
+  const max = byId(card.box, "image-max-request");
+  const batch = byId(card.box, "image-offload-quantum");
+  max.value = "32";
+  max.listeners.change();
+  check("budget max 32: saved", card.parsed().maxRequestImages === 32 && card.parsed().imageOffloadCountQuantum === 10, JSON.stringify(card.parsed()));
+  check("budget max 32: retirement max follows", batch.max === "32");
+  batch.value = "8";
+  batch.listeners.change();
+  check("budget batch 8: saved", card.parsed().maxRequestImages === 32 && card.parsed().imageOffloadCountQuantum === 8, JSON.stringify(card.parsed()));
+  max.value = "5";
+  max.listeners.change();
+  check("budget max below batch: rejected", card.parsed().maxRequestImages === 32 && max.value === "32");
+  batch.value = "33";
+  batch.listeners.change();
+  check("budget batch above max: rejected", card.parsed().imageOffloadCountQuantum === 8 && batch.value === "8");
 }
 // values already in the file
 {
@@ -232,7 +258,7 @@ check("parseError: disabled", byId(mount({}, { parseError: true }).box, "image-r
 
 // save posts the raw draft; reset removes the four keys and re-renders
 {
-  const card = mount({ imageRetention: false, imageRetentionKeepLastUser: false, imageRetentionMaxDim: 640, imagePrompt: false, debug: 2 });
+  const card = mount({ imageRetention: false, imageRetentionKeepLastUser: false, imageRetentionMaxDim: 640, imagePrompt: false, maxRequestImages: 32, imageOffloadCountQuantum: 8, debug: 2 });
   const save = new Element("button");
   const reset = new Element("button");
   save.id = "save-image";
@@ -264,10 +290,11 @@ check("parseError: disabled", byId(mount({}, { parseError: true }).box, "image-r
   await reset.listeners.click();
   const draft = JSON.parse(card.editor.value);
   check(
-    "reset: four keys removed",
+    "reset: image behavior flags removed",
     ["imageRetention", "imageRetentionKeepLastUser", "imageRetentionMaxDim", "imagePrompt"].every((key) => !(key in draft)),
     JSON.stringify(draft),
   );
+  check("reset: image budget returns to 20/10", draft.maxRequestImages === 20 && draft.imageOffloadCountQuantum === 10, JSON.stringify(draft));
   check("reset: unknown key kept", draft.debug === 2, JSON.stringify(draft));
   check("reset: card re-rendered", renders === 1, String(renders));
   check("reset: toast shown", toasts[0] === "cfg.image_restored", JSON.stringify(toasts));

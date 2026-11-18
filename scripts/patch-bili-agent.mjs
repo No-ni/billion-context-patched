@@ -21,7 +21,15 @@ const replacement = readFileSync(new URL("../patches/native-ws-headers.block.js"
 // successful patch. A changed upstream implementation needs a fresh audit.
 const original = 'function mergeWsInitHeaders(arg,extra){if(extra===void 0||Object.keys(extra).length===0)return arg;if(arg===void 0||arg===null)return{headers:{...extra}};if(typeof arg==="string"||Array.isArray(arg))return{protocols:arg,headers:{...extra}};if(typeof arg==="object"){const init={...arg};const h=init.headers;if(h===void 0||h===null){init.headers={...extra}}else if(h instanceof Headers){const merged=new Headers(h);for(const[k2,v2]of Object.entries(extra))merged.set(k2,v2);init.headers=merged}else if(Array.isArray(h)){init.headers=[...h,...Object.entries(extra)]}else if(typeof h==="object"){init.headers={...h,...extra}}else{return arg}return init}return arg}';
 const originalConfigKeys = ',"autoModeForge","imageRescale","guardrails","cacheKeepalive","egressTransforms"]);';
-const patchedConfigKeys = ',"autoModeForge","imageRescale","imageRescaleMaxDim","imageRetention","imageRetentionKeepLastUser","imageRetentionMaxDim","imagePrompt","guardrails","cacheKeepalive","egressTransforms"]);';
+const oldPatchedConfigKeys = ',"autoModeForge","imageRescale","imageRescaleMaxDim","imageRetention","imageRetentionKeepLastUser","imageRetentionMaxDim","imagePrompt","guardrails","cacheKeepalive","egressTransforms"]);';
+const patchedConfigKeys = oldPatchedConfigKeys.replace(',"imagePrompt",', ',"imagePrompt","maxRequestImages","imageOffloadCountQuantum",');
+// Use the native plugin's config path and parser, but fail closed on a broken
+// draft rather than writing defaults from loadConfigFile's empty fallback.
+const imageConfig = `export { configFile as biliImageConfigPath };
+export function readBiliImageConfig(path) {
+  try { return parseBiliConfig(readFileSync2(path,"utf8").replace(/^\\uFEFF/,"")); }
+  catch (error) { if (error?.code === "ENOENT") return {}; throw error; }
+}`;
 
 const helperSpan = (source) => {
   const matches = [...source.matchAll(/(?<![\w$])function\s+mergeWsInitHeaders\s*\(/g)];
@@ -32,12 +40,20 @@ const helperSpan = (source) => {
 /** Return a checked candidate string without changing the selected package. */
 export function patchBiliAgentBundle(source) {
   if (typeof source !== "string") throw new TypeError("native agent: source must be a string");
-  const configCounts = [originalConfigKeys, patchedConfigKeys].map(anchor => source.split(anchor).length - 1);
-  if (configCounts[0] + configCounts[1] !== 1) {
+  const configAnchors = [originalConfigKeys, oldPatchedConfigKeys, patchedConfigKeys];
+  const configCounts = configAnchors.map(anchor => source.split(anchor).length - 1);
+  if (configCounts.reduce((sum, count) => sum + count, 0) !== 1) {
     throw new Error("native image config keys: expected one original or patched anchor — re-derive the patch");
   }
-  const configStep = "native image config keys: " + (configCounts[1] === 1 ? "already patched" : "patched");
-  source = source.replace(originalConfigKeys, patchedConfigKeys);
+  const configStep = "native image config keys: " + (configCounts[2] === 1 ? "already patched" : "patched");
+  source = source.replace(configAnchors[configCounts.indexOf(1)], patchedConfigKeys);
+  if (!source.includes(imageConfig)) {
+    if (source.includes("readBiliImageConfig") || !/function configFile\(\)\{|function loadConfigFile\(\)/.test(source) ||
+        !source.includes('readFileSync2(path31,"utf8")') || !source.includes("parseBiliConfig(raw)")) {
+      throw new Error("native image config reader: upstream changed");
+    }
+    source += "\n" + imageConfig + "\n";
+  }
   const span = helperSpan(source);
   const block = source.includes("\r\n") ? replacement.replaceAll("\n", "\r\n") : replacement;
   const [begin, end] = NATIVE_WS_HEADERS_MARKERS;

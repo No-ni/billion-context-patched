@@ -850,3 +850,13 @@ helper 仍以步骤 10 的完整安全块替换，签名与预检修改通过唯
 第二次扫描发现主线 corrective second pass 的 probe 仍直接 `await runPrepare(); requests-=1`。实际 writer-off 保存微任务可先落账 requests=2；异常会连内存也停在 2，提前拒绝则继续访问缺失的 processedMessages。该分支与普通重建采用相同的计数快照、try/finally 恢复和 markDirty，并直接返回 failFast，保留原来的校正门槛与压缩结果处理。真实最终函数和实际 scheduleSave/markDirty 回归覆盖成功、提前拒绝、异常和断开，均证明最终内存和持久化计数为 1；旧代码在成功路径也能使该回归失败。
 
 匿名请求零新增范围重建后的 fit 表达式原来仍加旧 imageTokens，改为已重新计算的 rebuiltImageTokens。回归证明实际重建视图装入窗口时直接返回，不再因已经消失的图片预算进入体积仲裁；恢复旧表达式会使该检查失败。两项只落实 B22 原有要求，不降低 seam、前缀证明、单轮 8 条或窗口拒绝条件。最终独立扫描、重打、检查和交付证据见 [0.6.9 发布复核](audits/2026-11-15-release-0.6.9.md)。
+
+## 31. 2026-11-18：整合 billion-context 0.1.216（0.7.0）
+
+本轮从固定的干净提交 `548e396022b9391e28a3c9061560be297779b8e8` 构建，manifest 为 0.1.216、kernel 为 0.0.198；不是按版本标签猜测来源。完整主线包含 206 个文件的增量，但包装包只复制并运行约定的七个上游产物：代理、DSH native agent、compaction gate、native client、bundle layer、manifest 与 build-info。上游非 DSH adapters、文档、基准脚本和开发期测试不会被误认为运行时交付。
+
+吸收的 DSH 相关改进覆盖请求用途分类及 TTS side lane、快照和 cache ledger 的一致性/生命周期、压缩提醒恢复与诊断归因、重复内容和多模态图片处理、图片重采样缓存、工具/协议流及会话恢复等修复。采用整组重新构建，保留此前纯 SQLite 默认、WAL 头有限读取、工具失败首行判断和断流诊断仅入本地日志；继续通过代理/native/client 补丁器应用本地 B1–B22、图片和包装适配。B8/B10/B22 的 sticky 快照推进、toolCallId 签名和零范围重建仍是本地实现，未以新增上游相似功能替代。
+
+完整来源差异与每条稳定要求的最终结果见 [0.7.0 上游整合审计](audits/2026-11-18-upstream-0.7.0.md)。
+
+Node 24 的 `JSON.stringify` 能处理超过递归 digest 校验栈深的输入，导致上游 `#5627` 的深层消息测试从 `verify-sample` 抛出无消息身份的通用错误，而 Node 22 会更早在序列化阶段失败。补丁器对 `stringifyForStore` 的最终 JSON 做有界括号深度扫描，超过 512 层就在 `plan-ingest` 以带消息 ID 的 `RangeError` 失败；这是存储侧车失败，不影响 legacy 保存或响应。`check-storage.mjs` 从最终 bundle 提取函数，验证深层消息定位和字符串中的括号不误判。

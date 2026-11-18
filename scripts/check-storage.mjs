@@ -32,6 +32,14 @@ for (const [env, file, writer, mode, off] of [
   assert.equal(config.effectiveJsonWriterOff(env, writer, file), off);
   cases++;
 }
+const storageJson = runInNewContext(
+  fn("__biliJsonNestingTooDeep") + "\n" + fn("stringifyForStore") + "\n({stringifyForStore});",
+).stringifyForStore;
+let nested = { leaf: true };
+for (let i = 0; i < 6000; i++) nested = { wrap: nested };
+assert.throws(() => storageJson({ id: "h_deep", payload: nested }), /message h_deep: nesting too deep for JSON serialization/);
+assert.equal(JSON.parse(storageJson({ id: "h_ok", text: "literal { and [ are data" })).text, "literal { and [ are data");
+cases++;
 const root = fs.mkdtempSync(join(tmpdir(), "bili-storage-check-"));
 const require = createRequire(import.meta.url);
 let db;
@@ -70,7 +78,7 @@ try {
   probe(sparse, true);
   const short = join(root, "short.db"); fs.writeFileSync(short, walHead.subarray(0, 99));
   probe(short, false); probe(wal, false, true); probe(join(root, "absent.db"), false);
-  console.log(`storage: ${cases} cases passed (real WAL/rollback, bounded reads, error cleanup and config precedence)`);
+  console.log(`storage: ${cases} cases passed (depth-aware serialization, real WAL/rollback, bounded reads, error cleanup and config precedence)`);
 } finally {
   db?.close();
   fs.rmSync(root, { recursive: true, force: true });

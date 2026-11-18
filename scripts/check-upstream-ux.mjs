@@ -10,9 +10,11 @@
 // The merged client is optional while install.mjs stages the proxy candidate;
 // check-wrapper supplies it once the complete package exists.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import { BANNER_MARKERS, patchBiliClientBundle, uniqueBlockSpan } from "./patch-bili-client.mjs";
@@ -51,7 +53,7 @@ const classSource = (text, name) => {
   return uniqueBlockSpan(text, name, matches[0][0]).block;
 };
 
-const IMAGE_CONFIG_KEYS = ["imageRescaleMaxDim", "imageRetention", "imageRetentionKeepLastUser", "imageRetentionMaxDim", "imagePrompt"];
+const IMAGE_CONFIG_KEYS = ["imageRescaleMaxDim", "imageRetention", "imageRetentionKeepLastUser", "imageRetentionMaxDim", "imagePrompt", "maxRequestImages", "imageOffloadCountQuantum"];
 
 const assertImageConfigKeys = (text, what) => {
   const matches = [...text.matchAll(/\bKNOWN_TOP_LEVEL_KEYS=new Set\((\[[^\]]*\])\)/g)];
@@ -63,7 +65,8 @@ const assertImageConfigKeys = (text, what) => {
     log: (level, message) => warnings.push({ level, message }),
   });
   warn(Object.freeze({ imageRescaleMaxDim: 1200, imageRetention: false,
-    imageRetentionKeepLastUser: false, imageRetentionMaxDim: 900, imagePrompt: false }));
+    imageRetentionKeepLastUser: false, imageRetentionMaxDim: 900, imagePrompt: false,
+    maxRequestImages: 20, imageOffloadCountQuantum: 10 }));
   assert.equal(warnings.length, 0, what + " must accept all five image config keys without warnings");
   warn({ imageRetentoin: false });
   assert.equal(warnings.length, 1, what + " must still warn about unknown config keys");
@@ -73,6 +76,41 @@ const assertImageConfigKeys = (text, what) => {
   assert.equal(warnings.length, 1, what + " must retain warning deduplication");
   console.log("  OK " + what + " accepts image config keys and still warns once for a typo");
   return { initializer: matches[0][0], keys };
+};
+
+const assertProxyImageConfigMigration = (text, config) => {
+  const current = config.initializer;
+  const oldKeys = config.keys.filter(key => !["maxRequestImages", "imageOffloadCountQuantum"].includes(key));
+  const originalKeys = config.keys.filter(key => !IMAGE_CONFIG_KEYS.includes(key));
+  const fixtures = [
+    ["old image registry", "KNOWN_TOP_LEVEL_KEYS=new Set(" + JSON.stringify(oldKeys) + ")"],
+    ["original registry", "KNOWN_TOP_LEVEL_KEYS=new Set(" + JSON.stringify(originalKeys) + ")"],
+  ];
+  const dir = mkdtempSync(join(tmpdir(), "bili-image-config-"));
+  const path = join(dir, "index.js");
+  const patcher = join(here, "scripts", "patch-bili-build.mjs");
+  const run = () => spawnSync(process.execPath, [patcher, path], { encoding: "utf8", timeout: 30000 });
+  try {
+    for (const [label, registry] of fixtures) {
+      writeFileSync(path, text.replace(current, registry), "latin1");
+      let result = run();
+      assert.equal(result.status, 0, label + " migration failed: " + result.stderr);
+      const migrated = readFileSync(path, "latin1");
+      assert.equal(migrated, text, label + " migration must produce the checked candidate byte-for-byte");
+      result = run();
+      assert.equal(result.status, 0, label + " second application failed: " + result.stderr);
+      assert.equal(readFileSync(path, "latin1"), migrated, label + " migration must be idempotent");
+    }
+    const unknown = text.replace(current, current.replace('"imageOffloadCountQuantum"', '"futureImageBudget"'));
+    writeFileSync(path, unknown, "latin1");
+    const result = run();
+    assert.notEqual(result.status, 0, "unknown proxy registry must be rejected");
+    assert.match(result.stderr, /image config keys: expected one original or patched anchor/);
+    assert.equal(readFileSync(path, "latin1"), unknown, "a rejected proxy registry must remain unchanged");
+    console.log("  OK proxy image config registry upgrades old/original forms, is idempotent and rejects unknown forms");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 };
 
 const assertExtractor = () => {
@@ -486,7 +524,8 @@ const assertResponsesWsSink = (text) => {
 
 export const assertDistUpstreamUx = (distPath) => {
   const text = readFileSync(distPath, "latin1");
-  assertImageConfigKeys(text, "proxy");
+  const config = assertImageConfigKeys(text, "proxy");
+  assertProxyImageConfigMigration(text, config);
   expectAbsent(text, [
     "CIRCUIT_OPEN_AFTER", "circuitProbeCooldownMs", "MAX_CIRCUITS",
     "upstreamCircuitBlockReason", "upstreamCircuitLastFailureKind",
@@ -558,6 +597,10 @@ export const assertAgentUpstreamUx = (agentPath) => {
   const previous = text.replace(config.initializer,
     "KNOWN_TOP_LEVEL_KEYS=new Set(" + JSON.stringify(config.keys.filter(key => !IMAGE_CONFIG_KEYS.includes(key))) + ")");
   assert.equal(patchBiliAgentBundle(previous).text, text, "native config migration must preserve every other byte");
+  const oldImageKeys = config.keys.filter(key => !["maxRequestImages", "imageOffloadCountQuantum"].includes(key));
+  const previousImageRegistry = text.replace(config.initializer,
+    "KNOWN_TOP_LEVEL_KEYS=new Set(" + JSON.stringify(oldImageKeys) + ")");
+  assert.equal(patchBiliAgentBundle(previousImageRegistry).text, text, "native legacy image config migration must preserve every other byte");
   assert.throws(() => patchBiliAgentBundle(text + "\n" + config.initializer + ";"), /native image config keys/);
   assert.throws(() => patchBiliAgentBundle(text.replace(config.initializer,
     config.initializer.replace('"cacheKeepalive"', '"futureCacheKeepalive"'))), /native image config keys/);

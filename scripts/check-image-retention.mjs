@@ -43,7 +43,7 @@ ok("dist: final image accounting follows shedding and precedes signing", initial
 ok("dist: commit hook passes its request receipt", dist.includes("biliRetentionCommit(inp&&inp.sessionId,inp&&inp.biliImageReceipt)"));
 ok("dist: prompt seam (function builder)", dist.includes("+biliImageConventionText()}function buildCompressHybridSystemPrompt("));
 ok("dist: prompt seam (hybrid builder)", dist.includes("+biliImageConventionText()}function createContentStore("));
-ok("dist: config keys registered", dist.includes('"imageRetention","imageRetentionKeepLastUser","imageRetentionMaxDim","imagePrompt"'));
+ok("dist: config keys registered", dist.includes('"imageRetention","imageRetentionKeepLastUser","imageRetentionMaxDim","imagePrompt","maxRequestImages","imageOffloadCountQuantum"'));
 ok("dist: the image block sits between sentinels", dist.includes("// <bili-image-blocks begin>") && dist.includes("// <bili-image-blocks end>"));
 ok("dist: the platform chooser is in", dist.includes("function biliRetentionBackendOrder("));
 ok("dist: the Windows backend is in", dist.includes("Add-Type -AssemblyName System.Drawing") && dist.includes("HighQualityBicubic") && dist.includes("Format32bppArgb"));

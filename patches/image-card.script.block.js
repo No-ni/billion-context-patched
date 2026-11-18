@@ -1,14 +1,11 @@
     // <bili-image-card:js begin>
-    // Four top-level keys of this same config file decide whether a picture
-    // leaves once or on every turn (the retention pass in the proxy reads
-    // them). The card edits the draft the raw editor already holds, so one
-    // Save writes one file and the keys stay visible there like any other.
+    // The card and the raw editor share a single config draft and Save.
     function hydrateImageCard(cfg) {
         const box = $("image-fields");
         if (!box) return;
         box.innerHTML = "";
         const fe = $("cfg-file-edit");
-        const MIN_DIM = 128, DEFAULT_DIM = 1200;
+        const MIN_DIM = 128, DEFAULT_DIM = 1200, DEFAULT_IMAGES = 20, DEFAULT_QUANTUM = 10;
         let draft = {};
         try {
             const p = parseConfigDraft(fe && fe.value ? fe.value : "{}");
@@ -57,50 +54,72 @@
             iCtrls.push(inp);
             return inp;
         }
-        function dimValue(d) {
-            return Number.isInteger(d.imageRetentionMaxDim) && d.imageRetentionMaxDim >= MIN_DIM ? d.imageRetentionMaxDim : DEFAULT_DIM;
+        function numberRow(id, key, min, value, onChange) {
+            const w = document.createElement("div");
+            w.style.cssText = "display:flex;gap:12px;align-items:center;flex-wrap:wrap";
+            const label = document.createElement("label");
+            label.htmlFor = id;
+            label.textContent = t(key);
+            const input = document.createElement("input");
+            input.type = "number";
+            input.id = id;
+            input.className = "field-input mono";
+            input.min = String(min);
+            input.step = "1";
+            input.style.flex = "0 1 120px;min-width:0";
+            input.value = String(value);
+            const hint = document.createElement("span");
+            hint.className = "dim small";
+            hint.textContent = t(key + "_hint");
+            input.setAttribute("aria-describedby", id + "-hint");
+            hint.id = id + "-hint";
+            w.appendChild(label);
+            w.appendChild(input);
+            w.appendChild(hint);
+            box.appendChild(w);
+            iCtrls.push(input);
+            input.addEventListener("change", () => {
+                const raw = String(input.value).trim();
+                const n = /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
+                if (!Number.isSafeInteger(n) || n < min || !onChange(n)) {
+                    brokenNote.textContent = t(min === MIN_DIM ? "cfg.image_dim_invalid" : "cfg.image_budget_invalid");
+                    input.value = String(value);
+                } else {
+                    value = n;
+                }
+            });
+            return input;
         }
         const retention = flagRow("image-retention", "cfg.image_retention", "cfg.image_retention_hint");
         retention.addEventListener("change", () => commit((d) => { if (retention.checked) delete d.imageRetention; else d.imageRetention = false; }));
         const keepLast = flagRow("image-keep-last", "cfg.image_keep_last", "cfg.image_keep_last_hint");
         keepLast.addEventListener("change", () => commit((d) => { if (keepLast.checked) delete d.imageRetentionKeepLastUser; else d.imageRetentionKeepLastUser = false; }));
-        const dimWrap = document.createElement("div");
-        dimWrap.style.cssText = "display:flex;gap:12px;align-items:center;flex-wrap:wrap";
-        const dimLab = document.createElement("label");
-        dimLab.htmlFor = "image-max-dim";
-        dimLab.style.cssText = "flex:0 1 auto;max-width:520px";
-        dimLab.textContent = t("cfg.image_max_dim");
-        const dimInp = document.createElement("input");
-        dimInp.type = "number";
-        dimInp.id = "image-max-dim";
-        dimInp.className = "field-input mono";
-        dimInp.min = String(MIN_DIM);
-        dimInp.step = "1";
-        dimInp.style.flex = "0 0 120px";
-        const dimHint = document.createElement("span");
-        dimHint.className = "dim small";
-        dimHint.textContent = t("cfg.image_max_dim_hint");
-        dimWrap.appendChild(dimLab);
-        dimWrap.appendChild(dimInp);
-        dimWrap.appendChild(dimHint);
-        box.appendChild(dimWrap);
-        iCtrls.push(dimInp);
-        dimInp.addEventListener("change", () => {
-            const raw = String(dimInp.value || "").trim();
-            const value = Number(raw);
-            if (!/^[0-9]+$/.test(raw) || !Number.isInteger(value) || value < MIN_DIM) {
-                brokenNote.textContent = t("cfg.image_dim_invalid");
-                dimInp.value = String(dimValue(draft));
-                return;
-            }
-            commit((d) => { d.imageRetentionMaxDim = value; });
+        const number = (value, min, fallback) => Number.isSafeInteger(value) && value >= min ? value : fallback;
+        numberRow("image-max-dim", "cfg.image_max_dim", MIN_DIM,
+            number(draft.imageRetentionMaxDim, MIN_DIM, DEFAULT_DIM), (n) => {
+                commit(d => { d.imageRetentionMaxDim = n; });
+                return true;
+            });
+        let max = number(draft.maxRequestImages, 1, DEFAULT_IMAGES);
+        let batch = Math.min(max, number(draft.imageOffloadCountQuantum, 1, DEFAULT_QUANTUM));
+        function budget(n, count) {
+            if (count > n) return false;
+            commit(d => { d.maxRequestImages = n; d.imageOffloadCountQuantum = count; });
+            max = n;
+            batch = count;
+            batchInput.max = String(n);
+            return true;
+        }
+        numberRow("image-max-request", "cfg.image_max_request", 1, max, n => budget(n, batch));
+        const batchInput = numberRow("image-offload-quantum", "cfg.image_offload_quantum", 1, batch, n => {
+            return budget(max, n);
         });
+        batchInput.max = String(max);
         const promptRow = flagRow("image-prompt", "cfg.image_prompt", "cfg.image_prompt_hint");
         promptRow.addEventListener("change", () => commit((d) => { if (promptRow.checked) delete d.imagePrompt; else d.imagePrompt = false; }));
         retention.checked = draft.imageRetention !== false;
         keepLast.checked = draft.imageRetentionKeepLastUser !== false;
         promptRow.checked = draft.imagePrompt !== false;
-        dimInp.value = String(dimValue(draft));
         if (cfg && cfg.parseError) iCtrls.forEach((el) => { el.disabled = true; });
     }
     // <bili-image-card:js end>

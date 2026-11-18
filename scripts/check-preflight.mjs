@@ -510,13 +510,15 @@ await check("actual receive, gzip decode and ingest limits keep 413/stage with C
 });
 await check("actual side-request classification and window guard preserve short Chinese 413 with diagnostic detail", () => {
   const names = ["defaultCountTokens", "estimateRawBodyTokens", "outputBudgetField", "readOutputBudget",
-    "isServerToolUtilityCall", "isStructuredOutputCall", "isSideRequest", "resolveSideLane", "sideRequestGuard"];
+    "isServerToolUtilityCall", "isStructuredOutputCall", "isAudioOutputCall", "isSideRequest", "resolveSideLane", "sideRequestGuard"];
   const formats = source.match(/var STRUCTURED_FORMAT_TYPES=new Set\(\[[^\]]+\]\);/g);
   assert.equal(formats?.length, 1, "actual structured-output formats must be unique");
-  const functions = formats[0] + names.map(name => uniqueBlockSpan(source, name, "function " + name + "(", { expression: true }).block).join("\n");
+  const serverToolTypes = source.match(/var SERVER_EXECUTED_TOOL_TYPES=\/[^;]+;/g);
+  assert.equal(serverToolTypes?.length, 1, "actual server-executed tool types must be unique");
+  const functions = formats[0] + serverToolTypes[0] + names.map(name => uniqueBlockSpan(source, name, "function " + name + "(", { expression: true }).block).join("\n");
   const context = { NON_TEXT_BODY_KEYS: new Set(["data", "url", "b64_json", "file_data", "image_url"]),
     SIDE_REQUEST_AGENTS: new Set(["title"]), SIDE_REQUEST_MAX_TOKENS: 200, SIDE_REQUEST_GUARD_TOLERANCE: 1.15 };
-  const api = runInNewContext(functions + "\n({isSideRequest,resolveSideLane,sideRequestGuard});", context);
+  const api = runInNewContext(functions + "\n({isAudioOutputCall,isSideRequest,resolveSideLane,sideRequestGuard});", context);
   const parsed = { model: "mock-32k", max_tokens: 128, messages: [{ role: "user", content: "A".repeat(160000) }] };
   const sideIntent = api.isSideRequest(parsed);
   assert.equal(sideIntent, true);
@@ -524,6 +526,12 @@ await check("actual side-request classification and window guard preserve short 
   assert(api.isSideRequest(structured));
   assert(!api.isSideRequest({ ...structured, tools: [{ type: "function" }] }));
   assert(!api.isSideRequest(structured, "main"));
+  const tts = { model: "tts", messages: [{ role: "user", content: "Speak this" }], audio: { format: "mp3", voice: "alloy" } };
+  assert(api.isAudioOutputCall(tts));
+  assert(api.isSideRequest(tts));
+  assert(!api.isAudioOutputCall({ ...tts, audio: {} }));
+  assert(!api.isAudioOutputCall({ ...tts, tools: [{ type: "function" }] }));
+  assert(!api.isSideRequest({ ...tts, tools: [{ type: "function" }] }));
   assert.equal(api.resolveSideLane({ protocol: "openai", countTokens: false, responsesCompact: false, stripApplied: false, sideIntent }).lane, "side");
   const guard = api.sideRequestGuard(parsed, "openai", 32768, "bytes", undefined, 1, 0, 0, false);
   assert.equal(guard.blocked, true); assert(guard.estimate > guard.limit);

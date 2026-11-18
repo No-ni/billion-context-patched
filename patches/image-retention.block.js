@@ -14,6 +14,7 @@
 // Off switch: imageRetention:false in the config file, or BILI_IMAGE_RETENTION=0.
 
 var BILI_RETENTION_SEEN_CAP = 400;
+var BILI_RETENTION_HOST_REF_CAP = 256;
 var BILI_RETENTION_SHRINK_CACHE_CAP = 16;
 var BILI_RETENTION_VARIANT_CACHE_CAP = 16;
 var BILI_RETENTION_TRIGGER_BYTES = 100 * 1024;
@@ -90,6 +91,122 @@ function biliRetentionRemember(session, hashes) {
     md.biliImageSeen = list.slice(-BILI_RETENTION_SEEN_CAP);
     if (typeof markDirty === "function") markDirty(session);
   } catch (err) {}
+}
+
+// Host attachment ids hash the normalized source bytes, not their base64 text.
+// Only publish a bridge when those exact bytes resolve to one local plugin ref.
+async function biliRetentionHostImage(session, mediaType, b64) {
+  const index = session && session.incomingImageIndex;
+  if (!(index instanceof Map) || typeof b64 !== "string") return;
+  const bytes = Buffer.from(b64, "base64");
+  let match;
+  for (const [ref, entries] of index) {
+    if (!/^m\d{5,}$/.test(ref) || !Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      if (entry?.mediaType !== mediaType || entry.bytes !== bytes.length || typeof entry.path !== "string") continue;
+      let stored;
+      try { stored = await readFile6(entry.path); } catch { continue; }
+      if (!stored.equals(bytes)) continue;
+      if (match !== void 0 && match.ref !== ref) return;
+      match = { ref, mediaType: entry.mediaType };
+    }
+  }
+  if (match === void 0) return;
+  return {
+    sha256: require("node:crypto").createHash("sha256").update(bytes).digest("hex"),
+    ref: match.ref,
+    mediaType: match.mediaType,
+  };
+}
+
+function biliRetentionRememberHostImages(session, images) {
+  if (!session || !Array.isArray(images)) return;
+  try {
+    const md = session.metadata ?? (session.metadata = {});
+    const list = Array.isArray(md.biliHostImageRefs) ? md.biliHostImageRefs.slice() : [];
+    let changed = false;
+    for (const image of images) {
+      if (!/^[a-f0-9]{64}$/.test(image?.hostSha256 ?? "") || !/^m\d{5,}$/.test(image?.ref ?? "") ||
+          typeof image.noteWithTool !== "string" || typeof image.noteWithoutTool !== "string") continue;
+      const prior = list.find(entry => entry?.sha256 === image.hostSha256);
+      if (prior === void 0) {
+        list.push({
+          sha256: image.hostSha256,
+          ref: image.ref,
+          mediaType: image.mediaType,
+          noteWithTool: image.noteWithTool,
+          noteWithoutTool: image.noteWithoutTool,
+        });
+        changed = true;
+      } else if (prior.ref !== null && (prior.ref !== image.ref || prior.mediaType !== image.mediaType)) {
+        prior.ref = null;
+        prior.mediaType = null;
+        prior.noteWithTool = null;
+        prior.noteWithoutTool = null;
+        changed = true;
+      } else if (prior.ref === image.ref && prior.mediaType === image.mediaType &&
+          (prior.noteWithTool !== image.noteWithTool || prior.noteWithoutTool !== image.noteWithoutTool)) {
+        prior.noteWithTool = image.noteWithTool;
+        prior.noteWithoutTool = image.noteWithoutTool;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    md.biliHostImageRefs = list.slice(-BILI_RETENTION_HOST_REF_CAP);
+    if (typeof markDirty === "function") markDirty(session);
+  } catch (err) {}
+}
+
+function biliRetentionHostImageRef(session, sha256) {
+  try {
+    const list = session?.metadata?.biliHostImageRefs;
+    if (!Array.isArray(list)) return;
+    const matches = list.filter(entry => entry?.sha256 === sha256);
+    if (matches.length !== 1 || !/^m\d{5,}$/.test(matches[0].ref ?? "") || typeof matches[0].mediaType !== "string" ||
+        typeof matches[0].noteWithTool !== "string" || typeof matches[0].noteWithoutTool !== "string") return;
+    return matches[0];
+  } catch (err) {
+    return;
+  }
+}
+
+function biliRetentionRestoreHostImages(protocol, body, session, armed) {
+  let restored = 0;
+  const restoreText = value => {
+    if (typeof value !== "string" || !value.startsWith("[image omitted to fit request image limits; ") || !value.endsWith("]")) return value;
+    const identity = /^\[image omitted to fit request image limits; (?:(?:"(?:\\.|[^"\\])*" )?\()?sha256:([a-f0-9]{64})\)?\.([\s\S]*)\]$/.exec(value);
+    const hostDetails = identity?.[2];
+    const knownHostFormat = typeof hostDetails === "string" && /^(?: Normalized copy \(read-only; may be resized or re-encoded\): "[^"\r\n]+" \(\d+x\d+px, [a-z0-9.+-]+\/[a-z0-9.+-]+\)\. Source dimensions, format, and byte size may differ\. Copy to a writable path ending in \.[a-z0-9]{2,5} before editing\.| No local normalized image path is available; ask the user to attach it again if needed\.)$/.test(hostDetails);
+    if (identity === null || !knownHostFormat || (value.match(/sha256:/g) ?? []).length !== 1) return value;
+    const image = biliRetentionHostImageRef(session, identity[1]);
+    if (image === void 0) return value;
+    restored++;
+    return armed ? image.noteWithTool : image.noteWithoutTool;
+  };
+  const visitParts = parts => {
+    if (!Array.isArray(parts)) return;
+    for (const part of parts) {
+      if (!isObj4(part)) continue;
+      if (protocol === "google") {
+        if (typeof part.text === "string" && part.type === void 0) part.text = restoreText(part.text);
+        if (isObj4(part.functionResponse)) visitParts(part.functionResponse.parts);
+      } else {
+        if (["text", "input_text", "output_text"].includes(part.type) && typeof part.text === "string") part.text = restoreText(part.text);
+        if (part.type === "tool_result") visitParts(part.content);
+      }
+    }
+  };
+  if (protocol === "google") {
+    for (const content of body.contents ?? []) if (isObj4(content)) visitParts(content.parts);
+  } else if (protocol === "responses") {
+    for (const item of body.input ?? []) if (isObj4(item)) {
+      visitParts(item.content);
+      visitParts(item.output);
+    }
+  } else {
+    for (const message of body.messages ?? []) if (isObj4(message)) visitParts(message.content);
+  }
+  return restored;
 }
 
 function biliRetentionAttempt(value) {
@@ -172,8 +289,13 @@ function biliRetentionCommit(sessionId, receipt) {
   if (accepted === void 0 || accepted.sessionId !== sessionId || accepted.session.id !== sessionId) return;
   biliRetentionReceipts.delete(receipt);
   const hashes = [];
-  for (const image of accepted.images) hashes.push(image.originalHash, image.wireHash);
+  const hostImages = [];
+  for (const image of accepted.images) {
+    hashes.push(image.originalHash, image.wireHash);
+    if (image.hostSha256 !== void 0) hostImages.push(image);
+  }
   biliRetentionRemember(accepted.session, hashes);
+  biliRetentionRememberHostImages(accepted.session, hostImages);
 }
 
 // A retry may start from the already resized outbound copy. Remember its
@@ -689,9 +811,11 @@ async function biliRetentionApply(body, protocol, session, ctx) {
     // An uninstrumented send has no receipt owner: preserve its pixels and
     // make no session-id guess about which request might later succeed.
     if (attempt === void 0) return noop;
-    if (!biliRetentionEnabled()) return noop;
-    if (typeof body !== "string" || body.length < 256) return noop;
-    if (body.indexOf("base64") === -1 && body.indexOf("inlineData") === -1) return noop;
+    if (typeof body !== "string") return noop;
+    const retentionEnabled = biliRetentionEnabled();
+    const hasHostOffload = body.includes("[image omitted to fit request image limits; ");
+    if (!hasHostOffload && (!retentionEnabled || body.length < 256 ||
+      body.indexOf("base64") === -1 && body.indexOf("inlineData") === -1)) return noop;
     let parsed;
     try {
       parsed = JSON.parse(body);
@@ -700,8 +824,10 @@ async function biliRetentionApply(body, protocol, session, ctx) {
     }
     if (!isObj4(parsed)) return noop;
     const requestBody = biliRetentionRequestBody(protocol, parsed);
+    const restored = biliRetentionRestoreHostImages(protocol, requestBody, session, biliRetentionToolsArmed(requestBody));
+    if (!retentionEnabled) return restored === 0 ? noop : { body: JSON.stringify(parsed), changed: true, folded: 0, shrunk: 0 };
     const occurrences = biliRetentionCollect(protocol, requestBody);
-    if (occurrences.length === 0) return noop;
+    if (occurrences.length === 0) return restored === 0 ? noop : { body: JSON.stringify(parsed), changed: true, folded: 0, shrunk: 0 };
     const seen = biliRetentionSeen(session);
     const armed = biliRetentionToolsArmed(requestBody);
     const fresh = biliRetentionKeepLastUser() ? biliRetentionFreshUpload(protocol, requestBody) : -1;
@@ -725,6 +851,19 @@ async function biliRetentionApply(body, protocol, session, ctx) {
         if (typeof ref !== "string" || !/^m\d{5,}$/.test(ref)) ref = void 0;
       } catch (err) {
         ref = void 0;
+      }
+      let hostImage;
+      if (ref !== void 0) {
+        try {
+          const exact = await biliRetentionHostImage(session, origMediaType, origB64);
+          if (exact?.ref === ref) {
+            hostImage = {
+              ...exact,
+              noteWithTool: biliRetentionNote(origMediaType, origB64, ref, true),
+              noteWithoutTool: biliRetentionNote(origMediaType, origB64, ref, false),
+            };
+          }
+        } catch (err) {}
       }
       // Already looked at: fold first, so a doomed picture never pays for a
       // resize that would be thrown away in the same pass. No recoverable ref
@@ -751,10 +890,20 @@ async function biliRetentionApply(body, protocol, session, ctx) {
         shrunk++;
         changed = true;
       }
-      images.push({ originalHash: hashOrig, wireHash: hashWire });
+      images.push({
+        originalHash: hashOrig,
+        wireHash: hashWire,
+        ...(hostImage === void 0 ? {} : {
+          hostSha256: hostImage.sha256,
+          ref: hostImage.ref,
+          mediaType: hostImage.mediaType,
+          noteWithTool: hostImage.noteWithTool,
+          noteWithoutTool: hostImage.noteWithoutTool,
+        }),
+      });
     }
     biliRetentionMarkPending(session, images, attempt);
-    if (!changed) return noop;
+    if (!changed && restored === 0) return noop;
     const next = JSON.stringify(parsed);
     return { body: next, changed: true, folded: folded, shrunk: shrunk };
   } catch (err) {

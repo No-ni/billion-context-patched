@@ -1,5 +1,5 @@
         // <bili-image-card:listeners begin>
-        // The card edits four top-level keys of the same draft; its Save is the
+        // The card edits keys of the same draft; its Save is the
         // quick card's Save (one whole-file PUT, validated server-side).
         const si = $("save-image");
         if (si) si.addEventListener("click", async () => {
@@ -32,6 +32,9 @@
             delete draft.imageRetentionKeepLastUser;
             delete draft.imageRetentionMaxDim;
             delete draft.imagePrompt;
+            // Reset must also replace an earlier budget persisted in pi-ai.
+            draft.maxRequestImages = 20;
+            draft.imageOffloadCountQuantum = 10;
             if (el) el.value = JSON.stringify(draft, null, 2);
             refreshDirtyFlag();
             hydrateImageCard();

@@ -387,4 +387,58 @@ check("nudge growth default is 80k", () => {
   assert(!source.includes("const NUDGE_DEFAULT = 50000, NUDGE_STEP = 5000"));
   assert(!source.includes("kernel default 50000"));
 });
+check("aborted-turn growth only consumes a trusted usage anchor", () => {
+  const effective = uniqueBlockSpan(source, "effective token count", "function effectiveTokenCount(", {expression:true}).block;
+  const absorb = uniqueBlockSpan(source, "aborted-turn growth", "function absorbAbortedTurnGrowth(", {expression:true}).block;
+  const meter = runInNewContext(
+    effective + "\n({effectiveTokenCount});",
+    {
+      usageAnchorCycleStale: () => false,
+      estimateCoreMessagesUpper: () => 120,
+      SIDE_LANE_ANCHOR_IMPOSSIBLE_RATIO: 8,
+      SIDE_LANE_ANCHOR_MIN_ABS_DELTA: 25000,
+      staleSmallAnchorFallback: () => null,
+      postRebuildAnchorTokens: () => 0,
+    }
+  ).effectiveTokenCount;
+  const realUsage = meter(
+    {stats:{lastInputTokens:75,lastInputTokensSource:"usage",compressCreditTokens:1}},
+    []
+  );
+  const estimate = meter({stats:{},metadata:{anonymousPrefixAffinity:true}}, []);
+  assert.equal(realUsage.source, "usage");
+  assert.equal(estimate.source, "estimate");
+
+  const api = runInNewContext(
+    absorb + "\n({absorbAbortedTurnGrowth});",
+    {Date:{now:()=>1000},ABORT_REANCHOR_MAX_AGE_MS:60000,log:()=>{}}
+  );
+  const makeSession = () => ({
+    id:"test",
+    transient:{abortReanchor:{anchor:100,at:1000}},
+    state:{nudge:{lastPerMessageNudgeTokens:80,absorbCount:0,absorbedDebt:0,lastNudgeShownTokens:15,lastShownByTier:{1:15}}},
+  });
+  const estimated = makeSession();
+  api.absorbAbortedTurnGrowth(estimated,150,estimate.source);
+  assert.deepEqual(estimated.transient.abortReanchor,{anchor:100,at:1000});
+  assert.equal(estimated.state.nudge.lastPerMessageNudgeTokens,80);
+  assert.equal(estimated.state.nudge.absorbCount,0);
+  assert.equal(estimated.state.nudge.lastNudgeShownTokens,15);
+
+  const measured = makeSession();
+  api.absorbAbortedTurnGrowth(measured,150,realUsage.source);
+  assert.equal(measured.transient.abortReanchor,undefined);
+  assert.equal(measured.state.nudge.lastPerMessageNudgeTokens,150);
+  assert.equal(measured.state.nudge.absorbCount,1);
+  assert.equal(measured.state.nudge.absorbedDebt,20);
+  assert.equal(measured.state.nudge.lastNudgeShownTokens,0);
+  assert.equal(Object.keys(measured.state.nudge.lastShownByTier).length,0);
+
+  const expired = makeSession();
+  expired.transient.abortReanchor.at=0;
+  api.absorbAbortedTurnGrowth(expired,150,estimate.source);
+  assert.deepEqual(expired.transient.abortReanchor,{anchor:100,at:0});
+
+  assert.equal((source.match(/absorbAbortedTurnGrowth\(session,tokenCount,tokenCountSource\);/g) ?? []).length,4);
+});
 console.log("views: " + checks + " checks passed");

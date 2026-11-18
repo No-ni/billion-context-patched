@@ -77,6 +77,16 @@ const editInside = (label, body, find, replacement) => {
   return body.replace(find, replacement);
 };
 
+// Node 24 can stringify nesting that overflows the recursive digest verifier.
+// Reject it at the message boundary so storage forensics retain the row id.
+const STORE_DEPTH_HELPER = 'function __biliJsonNestingTooDeep(json){if(typeof json!=="string")return false;let depth=0,inString=false,escaped=false;for(let i=0;i<json.length;i++){const c=json.charCodeAt(i);if(inString){if(escaped)escaped=false;else if(c===92)escaped=true;else if(c===34)inString=false;continue}if(c===34){inString=true;continue}if(c===123||c===91){if(++depth>512)return true}else if(c===125||c===93)depth--}return false}\n';
+if (!text.includes("function __biliJsonNestingTooDeep(")) {
+  replaceOnce("storage JSON depth helper", "function stringifyForStore(", STORE_DEPTH_HELPER + "function stringifyForStore(");
+}
+editFunction("storage JSON depth guard", "stringifyForStore", body => editInside("storage JSON depth guard", body,
+  'try{return JSON.stringify(m2)}catch(err2){',
+  'try{const json=JSON.stringify(m2);if(__biliJsonNestingTooDeep(json))throw new RangeError("JSON nesting depth exceeds the storage limit");return json}catch(err2){'));
+
 // ── 1. outbound request-body compression ────────────────────────────────────
 const BLOCK = readFileSync(join(here, "patches", "outbound-encoding.block.js"), "latin1").replace(/\s+$/, "");
 const FETCH_ANCHOR = "async function fetchWithTimeout(";
@@ -513,11 +523,18 @@ if (text.includes(FORWARD_PATCHED)) {
 }
 // ── 16. the new knobs are top-level config keys ─────────────────────────────
 const CONFIG_KEYS_ANCHOR = ',"autoModeForge","imageRescale","guardrails","cacheKeepalive","egressTransforms"]);';
-const CONFIG_KEYS_PATCHED = ',"autoModeForge","imageRescale","imageRescaleMaxDim","imageRetention","imageRetentionKeepLastUser","imageRetentionMaxDim","imagePrompt","guardrails","cacheKeepalive","egressTransforms"]);';
-if (text.includes(CONFIG_KEYS_PATCHED)) {
+const CONFIG_KEYS_PREVIOUS = ',"autoModeForge","imageRescale","imageRescaleMaxDim","imageRetention","imageRetentionKeepLastUser","imageRetentionMaxDim","imagePrompt","guardrails","cacheKeepalive","egressTransforms"]);';
+const CONFIG_KEYS_PATCHED = ',"autoModeForge","imageRescale","imageRescaleMaxDim","imageRetention","imageRetentionKeepLastUser","imageRetentionMaxDim","imagePrompt","maxRequestImages","imageOffloadCountQuantum","guardrails","cacheKeepalive","egressTransforms"]);';
+const CONFIG_KEYS_ANCHORS = [CONFIG_KEYS_ANCHOR, CONFIG_KEYS_PREVIOUS, CONFIG_KEYS_PATCHED];
+const configKeyCounts = CONFIG_KEYS_ANCHORS.map(anchor => text.split(anchor).length - 1);
+if (configKeyCounts.reduce((sum, count) => sum + count, 0) !== 1) {
+  throw new Error("image config keys: expected one original or patched anchor — re-derive the patch");
+}
+if (configKeyCounts[2] === 1) {
   console.log("image config keys: already patched");
 } else {
-  replaceOnce("image config keys", CONFIG_KEYS_ANCHOR, CONFIG_KEYS_PATCHED);
+  text = text.replace(CONFIG_KEYS_ANCHORS[configKeyCounts.indexOf(1)], CONFIG_KEYS_PATCHED);
+  changed = true;
   console.log("image config keys: patched");
 }
 // ── 17. the image card in the config page ───────────────────────────────────
@@ -548,6 +565,11 @@ const IMAGE_CARD_COPY_ZH = {
   "cfg.image_max_dim": "上送时的最长边（像素）",
   "cfg.image_max_dim_hint": "低于 128 会被拒绝；只缩不放，压不到原图八成以下就按原样发送。",
   "cfg.image_dim_invalid": "请输入不小于 128 的整数",
+  "cfg.image_max_request": "每条请求最多保留的图片数",
+  "cfg.image_max_request_hint": "默认 20 张；超过后宿主会把最早的图片改成占位说明，避免原始请求体持续变大。",
+  "cfg.image_offload_quantum": "每次退役的图片数",
+  "cfg.image_offload_quantum_hint": "默认 10 张；达到上限时按这个数量逐批退役，不能大于图片上限。",
+  "cfg.image_budget_invalid": "请输入正整数，且每次退役数量不能大于图片上限",
   "cfg.image_prompt": "在系统提示里提醒模型少看图",
   "cfg.image_prompt_hint": "追加一段图像使用约定：先问文字与数据，能不看图就不看，看过就把结论写下来。",
   "cfg.image_reset": "恢复默认",
@@ -563,6 +585,11 @@ const IMAGE_CARD_COPY_EN = {
   "cfg.image_max_dim": "Longest side on upload (px)",
   "cfg.image_max_dim_hint": "Values below 128 are rejected; it only shrinks, and sends the original when it cannot get under 80 percent.",
   "cfg.image_dim_invalid": "Enter a whole number of at least 128",
+  "cfg.image_max_request": "Maximum images kept per request",
+  "cfg.image_max_request_hint": "Defaults to 20. Above the limit, the host replaces the oldest images with placeholders so the original request body cannot keep growing.",
+  "cfg.image_offload_quantum": "Images retired per step",
+  "cfg.image_offload_quantum_hint": "Defaults to 10. Images are retired in batches at the limit; this cannot exceed the image limit.",
+  "cfg.image_budget_invalid": "Enter positive whole numbers; the retirement count cannot exceed the image limit",
   "cfg.image_prompt": "Remind the model not to look at images",
   "cfg.image_prompt_hint": "Appends an image convention: ask for text and data first, skip the picture when it can, and write the conclusion down once seen.",
   "cfg.image_reset": "Restore defaults",
@@ -653,6 +680,27 @@ for (const [label, find, replacement] of NUDGE_EDITS) {
   nudged++;
 }
 console.log("nudge growth default: " + (nudged > 0 ? "patched (" + nudged + "/" + NUDGE_EDITS.length + ")" : "already patched"));
+// Estimates are useful for window checks but cannot prove an aborted request
+// reached the model. Only trusted usage may consume its one-shot reanchor.
+editFunction("aborted-turn growth source", "absorbAbortedTurnGrowth", body => editInside(
+  "aborted-turn growth source",
+  body,
+  "function absorbAbortedTurnGrowth(session,tokenCount){",
+  "function absorbAbortedTurnGrowth(session,tokenCount,tokenCountSource){if(tokenCountSource!==\"usage\")return;"
+));
+const ABORT_GROWTH_CALL = "absorbAbortedTurnGrowth(session,tokenCount);";
+const ABORT_GROWTH_CALL_WITH_SOURCE = "absorbAbortedTurnGrowth(session,tokenCount,tokenCountSource);";
+const abortGrowthCalls = text.split(ABORT_GROWTH_CALL).length - 1;
+const abortGrowthCallsWithSource = text.split(ABORT_GROWTH_CALL_WITH_SOURCE).length - 1;
+if (abortGrowthCalls === 4) {
+  text = text.split(ABORT_GROWTH_CALL).join(ABORT_GROWTH_CALL_WITH_SOURCE);
+  changed = true;
+  console.log("aborted-turn growth callers: patched (4)");
+} else if (abortGrowthCalls === 0 && abortGrowthCallsWithSource === 4) {
+  console.log("aborted-turn growth callers: already patched (4)");
+} else {
+  throw new Error("aborted-turn growth callers: expected four source-aware calls, found " + abortGrowthCalls + " old and " + abortGrowthCallsWithSource + " patched");
+}
 // ── 19. no upstream circuit breaker ────────────────────────────────────────
 // The proxy counted pre-response failures per upstream host and, after three,
 // stopped contacting that host for a minute: every request then failed with

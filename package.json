@@ -1,6 +1,6 @@
 {
   "name": "bili-context-patch",
-  "version": "0.6.9",
+  "version": "0.7.0",
   "description": "billion-context, patched: verified snapshot reuse, fork inheritance, request-body compression, and the model-request accelerator in one plugin.",
   "license": "MIT",
   "repository": {
@@ -49,7 +49,7 @@
     }
   },
   "patchBuild": {
-    "id": "1c41e0429f4254ea9097b60a47ca2900c00017ba1b6bb48803d546cf927477d1",
-    "createdAt": "2026-11-15T10:29:27.455Z"
+    "id": "4e9eeb77077af85690bd33222009ec287d136e86d183a14b4d5247c01cbb4a4d",
+    "createdAt": "2026-11-18T15:06:20.338Z"
   }
 }
