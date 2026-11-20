@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
 import { request, createServer } from "node:http";
+import { runInNewContext } from "node:vm";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, renameSync, rmSync, existsSync, statSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -32,6 +33,8 @@ assert(!(nativeOnly && storageOnly), "choose at most one E2E subset");
 const entry = statSync(bili).isDirectory() ? join(bili, "dist/index.js") : bili;
 const pkg = dirname(dirname(entry));
 const candidate = readFileSync(entry, "utf8");
+const nudgeCompressionWrapper = readFileSync(join(repo, "patches/nudge-compress-wrapper.block.js"), "utf8").trimEnd();
+assert(candidate.includes(nudgeCompressionWrapper), "candidate must contain the tested one-compression-per-nudge wrapper");
 const candidateHash = createHash("sha256").update(candidate).digest("hex");
 const nativeEntry = join(pkg, "dist/agent/dsh-native.js");
 const nativeCandidate = existsSync(nativeEntry) ? readFileSync(nativeEntry, "utf8") : "";
@@ -461,6 +464,145 @@ async function nativeWsChecks() {
   assert(forwarded[0].raw.includes(nativeSummary), "the first native response.create must already carry inherited compression"); assert(forwarded[0].raw.includes("NATIVE_WS_FIRST_FORK")); assert(forwarded[1].raw.includes("NATIVE_WS_CONTINUE_ALLOWED"));
   assert(!forwarded.some(record => /NATIVE_WS_(?:IDENTITY|MODEL|ORIGIN)_FORBIDDEN/.test(record.raw))); assert.equal(forwarded[0].headers["session-id"], nativeChild);
 }
+async function nudgeCompressionChecks() {
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise(done => { resolve = done; });
+    return { promise, resolve };
+  };
+  const oldCall = deferred(), newCall = deferred(), oldStarted = deferred(), newStarted = deferred();
+  const calls = [];
+  const session = { transient: { unpromptedGate: { credit: 20, nudgeId: 1, completedNudgeId: 0, compressionInFlightNudgeId: 0 } } };
+  const gateOf = current => {
+    const gate = current.transient?.unpromptedGate;
+    if (!gate) return { nudgeId: 0, compressed: false, compressionInFlight: false };
+    return {
+      armed: Number.isFinite(gate.credit) && gate.credit > 0,
+      nudgeId: Number.isSafeInteger(gate.nudgeId) ? gate.nudgeId : 0,
+      compressed: Number.isSafeInteger(gate.nudgeId) && gate.nudgeId > 0 && gate.completedNudgeId === gate.nudgeId,
+      compressionInFlight: Number.isSafeInteger(gate.nudgeId) && gate.nudgeId > 0 && gate.compressionInFlightNudgeId === gate.nudgeId,
+    };
+  };
+  const apply = runInNewContext(nudgeCompressionWrapper + "\napplyConfiguredCompression;", {
+    unpromptedGateOf: gateOf,
+    compressResult: (result, outcome, blocksCreated, code) => ({ result, outcome, blocksCreated, code }),
+    applyConfiguredCompressionCore: input => {
+      calls.push(input);
+      if (input === "old") { oldStarted.resolve(); return oldCall.promise; }
+      if (input === "new") { newStarted.resolve(); return newCall.promise; }
+      if (input === "throw") throw new Error("fixture failure");
+      if (input === "zero") return { outcome: "refused", blocksCreated: 0 };
+      if (input === "retry" || input === "expired") return { outcome: "applied", blocksCreated: 1 };
+      throw new Error("unexpected compression call: " + input);
+    },
+  });
+  const context = { session, log() {} };
+  const oldPending = apply("old", context, "old", undefined);
+  await oldStarted.promise;
+  Object.assign(session.transient.unpromptedGate, { credit: 20, nudgeId: 2 });
+  const newPending = apply("new", context, "new", undefined);
+  await newStarted.promise;
+  oldCall.resolve({ outcome: "applied", blocksCreated: 1 });
+  await oldPending;
+  assert.equal(session.transient.unpromptedGate.completedNudgeId, 1, "an old completion may only complete its own generation");
+  assert.equal(session.transient.unpromptedGate.credit, 20, "the old completion must not consume the new nudge credit");
+  assert.equal(session.transient.unpromptedGate.compressionInFlightNudgeId, 2, "the old finally block must preserve the new generation's lock");
+  const locked = await apply("third", context, "third", undefined);
+  assert.equal(locked.outcome, "refused");
+  assert.equal(calls.length, 2, "a third call must not enter the core while the new generation is in flight");
+  newCall.resolve({ outcome: "partial", blocksCreated: 1 });
+  await newPending;
+  assert.equal(session.transient.unpromptedGate.completedNudgeId, 2, "a partial new-generation success must complete that generation");
+  assert.equal(session.transient.unpromptedGate.credit, 0);
+  assert.equal(session.transient.unpromptedGate.compressionInFlightNudgeId, 0);
+
+  Object.assign(session.transient.unpromptedGate, { credit: 20, nudgeId: 3 });
+  await assert.rejects(apply("throw", context, "throw", undefined), /fixture failure/);
+  assert.equal(session.transient.unpromptedGate.completedNudgeId, 2, "a thrown compression must not consume the nudge");
+  assert.equal(session.transient.unpromptedGate.credit, 20, "a thrown compression must preserve retry credit");
+  assert.equal(session.transient.unpromptedGate.compressionInFlightNudgeId, 0, "a thrown compression must release its lock");
+  await apply("retry", context, "retry", undefined);
+  assert.equal(session.transient.unpromptedGate.completedNudgeId, 3, "the same generation may retry after an exception");
+  assert.equal(session.transient.unpromptedGate.credit, 0);
+
+  Object.assign(session.transient.unpromptedGate, { credit: 20, nudgeId: 4 });
+  const zero = await apply("zero", context, "zero", undefined);
+  assert.equal(zero.blocksCreated, 0);
+  assert.equal(session.transient.unpromptedGate.completedNudgeId, 3, "a zero-block result must not consume the nudge");
+  assert.equal(session.transient.unpromptedGate.credit, 20, "a zero-block result must preserve retry credit");
+  assert.equal(session.transient.unpromptedGate.compressionInFlightNudgeId, 0, "a zero-block result must release its lock");
+  await apply("retry", context, "retry-after-zero", undefined);
+  assert.equal(session.transient.unpromptedGate.completedNudgeId, 4, "a zero-block result must allow a successful retry in the same generation");
+  assert.equal(session.transient.unpromptedGate.credit, 0);
+
+  Object.assign(session.transient.unpromptedGate, { credit: 0, nudgeId: 5 });
+  await apply("expired", context, "expired", undefined);
+  assert.equal(session.transient.unpromptedGate.completedNudgeId, 4, "an expired, unconsumed nudge must not claim a later manual compression");
+  assert.equal(session.transient.unpromptedGate.compressionInFlightNudgeId, 0);
+
+  const config = { ...baseConfiguration, compress: { ...baseConfiguration.compress, nudgeGrowthTokens: 500, requireNudge: true, requireRecommendation: false } };
+  const cid = "e2e-nudge-compress-once", history = [
+    { role: "system", content: "You are the isolated local E2E mock assistant." },
+    { role: "user", content: "NUDGE_GATE_USAGE_BASELINE" },
+  ];
+  try {
+    await applyConfiguration(config);
+    const baseline = await chat(cid, history, "off", randomUUID(), { maxTokens: 256, headers: { "x-bili-plugin-context-window": "100000" } });
+    assert.equal(baseline.status, 200, baseline.text);
+    history.push({ role: "assistant", content: "NUDGE_GATE_USAGE_BASELINE_ACK" });
+    for (let i = 0; i < 6; i++) {
+      history.push({ role: "user", content: `NUDGE_GATE_OLD_USER_${i}: ` + "The original local passage remains available for one bounded summary. ".repeat(200) });
+      history.push({ role: "assistant", content: `NUDGE_GATE_OLD_ASSISTANT_${i}: ` + "The earlier work was completed and its evidence is preserved. ".repeat(200) });
+    }
+    history.push({ role: "user", content: "NUDGE_GATE_INITIAL_TURN" });
+    const measurement = await chat(cid, history, "off", randomUUID(), { maxTokens: 256, headers: { "x-bili-plugin-context-window": "100000" } });
+    assert.equal(measurement.status, 200, measurement.text);
+    const before = await snapshot(cid), refs = before.orderedMessages.filter(message => message.ref);
+    assert(refs.length >= 12, "the nudge fixture needs several compressible messages");
+    const injectionCount = () => proxyLog().split(/\r?\n/).filter(line => line.includes(`[${before.sessionId}] nudge INJECT T1:`)).length;
+    assert.equal(injectionCount(), 0, "the larger request first establishes its real usage sample");
+    history.push({ role: "assistant", content: measurement.body.choices?.[0]?.message?.content ?? "NUDGE_GATE_USAGE_MEASUREMENT_ACK" });
+    history.push({ role: "user", content: "NUDGE_GATE_INITIAL_USAGE_SETTLED" });
+    const initial = await chat(cid, history, "off", randomUUID(), { maxTokens: 256, headers: { "x-bili-plugin-context-window": "100000" } });
+    assert.equal(initial.status, 200, initial.text);
+    assert.equal(injectionCount(), 1, "the localhost turn must inject one real T1 compression nudge\n" + proxyLog().split(/\r?\n/).filter(line => line.includes(`[${before.sessionId}] nudge `)).join("\n"));
+    const invalid = await tool(cid, "compress", { content: JSON.stringify([{ startId: "m99998", endId: "m99999", summary: "invalid range" }]) });
+    assert.equal(invalid.status, 200, invalid.text); assert.equal(invalid.body.blocksCreated, 0, invalid.text); assert.equal(invalid.body.outcome, "refused", invalid.text);
+
+    const growth = [];
+    for (let i = 0; i < 6; i++) {
+      growth.push({ role: "user", content: `NUDGE_GATE_NEW_USER_${i}: ` + "New local work is ready for a separate compression nudge after the previous one completed. ".repeat(140) });
+      growth.push({ role: "assistant", content: `NUDGE_GATE_NEW_ASSISTANT_${i}: ` + "This new section records completed work beyond the previous nudge. ".repeat(140) });
+    }
+    growth.push({ role: "user", content: "NUDGE_GATE_SECOND_NUDGE" });
+    const growthHistory = [...history, { role: "assistant", content: "NUDGE_GATE_FIRST_COMPRESSION_ACK" }, ...growth];
+    const growthMeasurement = await chat(cid, growthHistory, "off", randomUUID(), { maxTokens: 256, headers: { "x-bili-plugin-context-window": "100000" } });
+    assert.equal(growthMeasurement.status, 200, growthMeasurement.text);
+    assert.equal(injectionCount(), 1, "the growth request first establishes its real usage sample");
+    const measuredGrowth = await snapshot(cid), concurrentRefs = measuredGrowth.orderedMessages.filter(message => message.ref).slice(-8, -2);
+    assert.equal(concurrentRefs.length, 6, "the new nudge needs two independent compressible ranges");
+    growthHistory.push({ role: "assistant", content: growthMeasurement.body.choices?.[0]?.message?.content ?? "NUDGE_GATE_GROWTH_MEASUREMENT_ACK" });
+    growthHistory.push({ role: "user", content: "NUDGE_GATE_SECOND_NUDGE_SETTLED" });
+    const refreshed = await chat(cid, growthHistory, "off", randomUUID(), { maxTokens: 256, headers: { "x-bili-plugin-context-window": "100000" } });
+    assert.equal(refreshed.status, 200, refreshed.text); assert.equal(injectionCount(), 2, "new growth must inject a second nudge in the same session\n" + proxyLog().split(/\r?\n/).filter(line => line.includes(`[${before.sessionId}] nudge `)).join("\n"));
+    const concurrentRanges = [
+      { startId: concurrentRefs[0].ref, endId: concurrentRefs[2].ref, summary: "NUDGE_GATE_SECOND_A: first concurrent range." },
+      { startId: concurrentRefs[3].ref, endId: concurrentRefs[5].ref, summary: "NUDGE_GATE_SECOND_B: second concurrent range." },
+    ];
+    const invalidRange = { startId: "m99998", endId: "m99999", summary: "invalid range" };
+    const concurrent = await Promise.all(concurrentRanges.map((range, i) => tool(cid, "compress", { content: JSON.stringify([range, invalidRange]) }, { toolCallId: `nudge-gate-concurrent-${i}` })));
+    for (const result of concurrent) assert.equal(result.status, 200, result.text);
+    assert.equal(concurrent.filter(result => result.body.blocksCreated > 0).length, 1, JSON.stringify(concurrent.map(result => result.body)));
+    const partial = concurrent.find(result => result.body.blocksCreated > 0);
+    assert.equal(partial.body.outcome, "partial", partial.text);
+    const refusedConcurrent = concurrent.find(result => result.body.blocksCreated === 0);
+    assert.equal(refusedConcurrent.body.outcome, "refused", refusedConcurrent.text);
+    assert.match(refusedConcurrent.body.result, /already completed a successful compression|already in progress/);
+    const duplicateRange = concurrentRanges[concurrent.indexOf(partial)];
+    const duplicate = await tool(cid, "compress", { content: JSON.stringify([duplicateRange]) });
+    assert.equal(duplicate.status, 200, duplicate.text); assert.equal(duplicate.body.outcome, "refused", duplicate.text); assert.match(duplicate.body.result, /already completed a successful compression/);
+  } finally { await applyConfiguration(baseConfiguration); }
+}
 
 try {
   gateway = await startGateway(); env.BILI_ANNOUNCEMENTS_URL = gateway.origin + "/announcements";
@@ -484,6 +626,7 @@ try {
     const empty = await json(active.port, "/__bili/config"); assert.deepEqual(JSON.parse(empty.body.raw).egressTransforms, []);
     await applyConfiguration(baseConfiguration);
   });
+  await check("one successful model compression per injected nudge, including partial and concurrent calls", nudgeCompressionChecks);
   if (hasKvMigration) await check("real startup migrates legacy affinity, order and conversation files into SQLite KV", async () => {
     const kv = await eventually(() => { const value = readKv(sessions); return value["prefix-affinity/v1"] && value["session-order/v1"] && value["plugin-conversations/table"] ? value : false; }, "KV startup migration");
     assert(kv["prefix-affinity/v1"].entries.some(x => x.sessionId === "e2e-legacy-affinity" && x.tailHash === "legacy-tail"));

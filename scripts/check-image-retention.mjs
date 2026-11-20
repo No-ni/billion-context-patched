@@ -769,7 +769,6 @@ async function main() {
 
       for (const [name, index] of [
         ["no incoming image index", void 0],
-        ["ambiguous duplicate originals", new Map([["m00042", [entry(originalPath)]], ["m00043", [entry(originalPath)]]])],
         ["evicted originals", new Map([["m00042", [entry(join(dir, "missing-a.png"))]], ["m00043", [entry(join(dir, "missing-b.png"))]]])]
       ]) {
         const missing = { id: name, metadata: { biliImageSeen: [imageHash(smallPng)] }, incomingImageIndex: index };
@@ -777,6 +776,48 @@ async function main() {
         const kept = await applyRetention(isolated, body, "google", missing, {});
         ok("published resolver " + name + " retains pixels", kept.body === body && kept.folded === 0);
       }
+
+      const repeated = { id: "duplicate-originals", metadata: {}, incomingImageIndex: new Map([
+        ["m00042", [entry(originalPath)]]
+      ]) };
+      const repeatedApi = makeApi({}, void 0, { refForItemBytes: upstream.refForItemBytes });
+      const firstLook = await applyRetention(repeatedApi, body, "google", repeated, {});
+      commitForward(repeatedApi, firstLook.body, "google", repeated);
+      repeated.incomingImageIndex.set("m00043", [entry(originalPath)]);
+      okEq("upstream resolver still declines duplicate refs", await upstream.refForItemBytes(repeated, "image/png", smallPng), void 0);
+
+      const withRepeatedUpload = JSON.stringify({
+        tools: [{ functionDeclarations: [{ name: "acp_read_original_image" }] }],
+        contents: [
+          { role: "user", parts: [{ inlineData: { mimeType: "image/png", data: smallPng } }] },
+          { role: "model", parts: [{ text: "first look" }] },
+          { role: "user", parts: [{ inlineData: { mimeType: "image/png", data: smallPng } }] }
+        ]
+      });
+      const secondLook = await applyRetention(repeatedApi, withRepeatedUpload, "google", repeated, {});
+      okEq("duplicate ref folds the old image but keeps the current upload", secondLook.folded, 1);
+      const secondContents = JSON.parse(secondLook.body).contents;
+      ok("old duplicate becomes a placeholder", secondContents[0].parts[0].text.includes('acp_read_original_image("m00042")'));
+      okEq("last user upload remains pixels", secondContents[2].parts[0].inlineData.data, smallPng);
+      commitForward(repeatedApi, secondLook.body, "google", repeated);
+
+      repeated.incomingImageIndex.set("m00044", [entry(originalPath)]);
+      const afterAnotherMessage = JSON.stringify({
+        tools: [{ functionDeclarations: [{ name: "acp_read_original_image" }] }],
+        contents: [
+          ...JSON.parse(withRepeatedUpload).contents,
+          { role: "model", parts: [{ text: "handled" }] },
+          { role: "user", parts: [{ text: "one more question" }] }
+        ]
+      });
+      const thirdLook = await applyRetention(repeatedApi, afterAnotherMessage, "google", repeated, {});
+      okEq("later message folds both historical copies", thirdLook.folded, 2);
+      ok("later message does not restore either image", !thirdLook.body.includes(smallPng));
+      const repeatedNote = JSON.parse(thirdLook.body).contents[0].parts[0].text;
+      const repeatedRef = /acp_read_original_image\("([^"]+)"\)/.exec(repeatedNote)?.[1];
+      okEq("duplicate ref selection stays stable after another copy appears", repeatedRef, "m00042");
+      const duplicateRead = await upstream.executeReadOriginalImage({ ref: repeatedRef }, repeated, () => {});
+      okEq("selected duplicate ref still retrieves the original bytes", duplicateRead.image?.base64, smallPng);
 
       const large = { id: "large", metadata: {}, incomingImageIndex: new Map([["m00044", [{
         path: largePath, mediaType: "image/png", bytes: Buffer.byteLength(bigPng, "base64"), width: 1500, height: 1000

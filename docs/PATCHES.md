@@ -6,9 +6,9 @@
 
 - 上游：<https://github.com/ranxianglei/billion-context>（MIT，Copyright (c) 2026 ranxianglei）
 - 当前固定基线：上游 `0d94a8a2`（上游版本号仍是 0.1.213，kernel 0.0.196）；从旧 `406193b2` 的迁移见第 28 节，第 15 节保存当时的来源历史。
-- 我们的改动不是一份 diff：bili 构建上的二十二组补丁由 `scripts/patch-bili-build.mjs`（B20 在 `scripts/patch-bili-client.mjs`）按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
+- 我们的改动不是一份 diff：bili 构建上的二十三组补丁由 `scripts/patch-bili-build.mjs`（B20 在 `scripts/patch-bili-client.mjs`）按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
 
-项目需求及验收以 [SPEC.md](SPEC.md) 为准。当前维护分为 bili 构建 B1–B22、包装包 W1–W7、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
+项目需求及验收以 [SPEC.md](SPEC.md) 为准。当前维护分为 bili 构建 B1–B23、包装包 W1–W7、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
 
 ## 0. 一页看完（改了什么、下次怎么核对）
 
@@ -25,7 +25,7 @@
 
 当前仍保留指定中转主机渠道的压缩缺省值规则（仅补缺失键）。`promptCache.routing=enabled` 默认值已在 0.5.4 恢复并纳入第 11 组补丁，见第 7、19 节；显式配置优先。
 
-### 0.2 我们对 bili 构建的二十二组补丁
+### 0.2 我们对 bili 构建的二十三组补丁
 
 代理补丁由 `scripts/patch-bili-build.mjs` 按顺序重打；B20 在 client 补丁器，native 的 WS 头在 agent 补丁器。新插入位置要求唯一命中，步骤 6/7 缺锚点已改为失败；helper 标记不能代替源一致性和最终行为检查。下表的旧锚点是历史定位，0.6.8 对新上游的实际锚点及相邻发送路径以脚本和第 28 节为准。
 
@@ -53,6 +53,7 @@
 | 20 | 删掉客户端 shell 上的上游红框横幅、10 秒轮询与四个词条；页面里的连接失败提示改成读者能看懂的说法 | 客户端 bundle `dist/agent/dsh-native-client.js`：`var UPSTREAM_POLL_MS = 1e4;`、`function parseUpstreamHealth(raw)`、`const upstreamBanner = ...`、`ctx.slots.inject("shell.overlay", ...)` 那四行、`upstreams_label`/`upstreams_down_one`/`upstreams_down_many`/`upstream_retry_hint`（中英各一份） | `scripts/patch-bili-client.mjs`，由 `install.mjs` 合并客户端 bundle 前施加；幂等，二次运行打印 already removed | 第 25 节 |
 | 21 | 代理失败与流内联错误改成中文短句，英文诊断只进 detail 与日志；413 保留、其余 502，不再发 retry-after | `function buildProxyFailureResponse(msg,err2){`、`var TRANSPORT_FAILURE_LABELS={`、两处 `adapter.emitError(`、`upstream stream truncated (`、`ended before a completion event`、`[ACP] stream error:`、note 三元与“the follow-up request to the model failed”句 | 第 21 节，新增 `__biliFailureTextZh(msg,uf)`；<b>不能改</b> `[ACP] ... FAILED:` 里的 `FAILED`（吸收判定依赖它） | 第 25 节 |
 | 22 | 快照暂时缺行的有界等待/重渲染及预检错误口径；当前 request 的 kernel/post-processing guard 和重做计数落盘纠正 | `preflightCompressIfNeeded`、四协议 prepare、`maybeSnapshotView`、`recordNudgeObservation` | `patches/preflight.block.js` 可替换哨兵；live/插件标记/storage 模式与覆盖条件保留 | 第 26、28 节 |
+| 23 | 每条注入的压缩提醒 generation 只允许一次成功的模型折叠；零块可重试、partial 成功计入完成、同 generation 并发拒绝，旧调用不能清除新提醒的锁 | `storeUnpromptedGate` / `unpromptedGateOf`、`applyConfiguredCompression` | `patches/nudge-compress-wrapper.block.js`；自动 `preflightCompress` 不经过模型工具包装 | 第 32 节 |
 
 第 4 组依赖第 2、3 组，第 8 组依赖 pin，第 10 组升级第 4、8、9 组并同时检查普通与增量拼接点；按脚本顺序执行，所有步骤支持重复运行。
 
@@ -787,6 +788,8 @@ pin 额外记录影响该前缀的摘要状态指纹，包括 retire/restore、r
 
 Google 图片收集以 MIME 区分图片与音频/视频/PDF，兼容 request.contents、工具回图和原图异步取回；缩图映射与缓存有界、隔离、不猜歧义原图。四协议及系统编码器能力继续由图片专项与实际 localhost 测试验证。
 
+2026-11-19 的完整会话报告与 debug 日志定位到另一处本地接缝：相同图片字节在会话 `incomingImageIndex` 中有多个 ref 时，上游 `refForItemBytes` 因引用歧义返回空值；本地 `biliRetentionApply` 因拿不到 ref 而保留已成功看过的历史图，像素重新进入出站请求。只在折叠路径逐个调用上游 resolver 验证单 ref 的首条存储记录，再按 ref 字符顺序选第一个可读且字节精确匹配的项。通用 resolver 和图片缩放调用不变；最后一条普通 user 图片继续豁免，宿主图片回填也继续对重复 SHA/ref fail-closed。`check-image-retention.mjs` 覆盖旧图已记账、同字节新上传、随后追加消息三轮连续行为及所选 ref 的真实原图读取。
+
 ### 28.3 快照保护、计数与错误出口
 
 实际一次 SQLite transcript read miss 在 raw fallback 进入 kernel 后，会先触发重复实例编号和 sync-blocks，使最后 active 块消失，随后 B22 无从恢复。新 WeakMap 只记本次 maybeSnapshotView 的原始数组和允许条件；正常 compaction/reconcile 后，对已识别暂时 miss 暂缓该次 kernel，并用私有 turn marker 跳过后置 history rewrite/archive/orphan 和诊断重复计数。快照、同步索引、保存排队保持，原有一秒保存 barrier 和一次 runPrepare 重做保留；开关、显式 legacy、真实编辑/rebase 和 B9/B10 拒绝条件继续生效。
@@ -860,3 +863,13 @@ helper 仍以步骤 10 的完整安全块替换，签名与预检修改通过唯
 完整来源差异与每条稳定要求的最终结果见 [0.7.0 上游整合审计](audits/2026-11-18-upstream-0.7.0.md)。
 
 Node 24 的 `JSON.stringify` 能处理超过递归 digest 校验栈深的输入，导致上游 `#5627` 的深层消息测试从 `verify-sample` 抛出无消息身份的通用错误，而 Node 22 会更早在序列化阶段失败。补丁器对 `stringifyForStore` 的最终 JSON 做有界括号深度扫描，超过 512 层就在 `plan-ingest` 以带消息 ID 的 `RangeError` 失败；这是存储侧车失败，不影响 legacy 保存或响应。`check-storage.mjs` 从最终 bundle 提取函数，验证深层消息定位和字符串中的括号不误判。
+
+## 32. 2026-11-19：同一提醒重复折叠（B23，0.7.2）
+
+完整报告记录一次 T1 提醒之后产生两次模型折叠：首次回收约 70K token、cache hit 28.5%；第二次又回收约 15K、cache hit 33.3%。同一提醒推荐约 100K，报告将两次折叠都归入该提醒；debug 日志在 17:28:19 只记录一次 T1 注入，17:28:29 和 17:28:37 分别记录独立的 `compress` 请求。它们再次改变有效前缀，解释了连续两次缓存下降。报告里 17:25 的缓存接缝早于这两次折叠，不据此归因给 B23；本修复不声称解决上游缓存丢失。
+
+根因在本地显式模型工具路径：提醒将 transient credit 设为 20 个模型回合，但 `applyConfiguredCompression` 成功创建 block 后没有消费该 credit。模型随后仍可在同一提醒下再次调用 `compress`，而不同调用各自创建摘要 block，令请求前缀再次变化。窗口预检的 `preflightCompress` 使用另一条自动压缩路径，不是本次重复折叠的触发点。
+
+B23 在模型工具包装入口按提醒 generation 记录 in-flight 和完成状态。调用开始时须有有效 credit 才认领未消费提醒；同一 generation 的并发调用拒绝。零 block 或异常释放锁且保留重试机会；创建一个或多个 block（包括 partial）即消费 credit，后续同 generation 调用拒绝。新提醒递增 generation；旧调用只更新自己 generation 的完成记录，不能清空新 generation 的 credit 或锁。已消费标记保留到新提醒到来，过期但未消费的旧提醒不会反过来认领独立的手动折叠。自动窗口预检保持原行为。
+
+完整回归、构建哈希和本地 DSH 安装状态见[同一提醒重复折叠审计](audits/2026-11-19-duplicate-nudge-compression.md)。

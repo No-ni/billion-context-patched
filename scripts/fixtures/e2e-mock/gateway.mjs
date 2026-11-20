@@ -21,7 +21,10 @@ export async function startGateway() {
       if (req.url.includes("fail-401")) { res.writeHead(401, { "content-type": "application/json" }); res.end('{"error":{"message":"mock upstream unauthorized","type":"authentication_error"}}'); return; }
       const number = ++sequence;
       const text = `MOCK_REPLY_${number}`;
-      const usage = { prompt_tokens: 256, completion_tokens: 8, total_tokens: 264, prompt_tokens_details: { cached_tokens: 128 } };
+      const tracksNudgeUsage = Array.isArray(body.messages) && body.messages.some(message => JSON.stringify(message).includes("NUDGE_GATE_USAGE_BASELINE"));
+      const inputTokens = tracksNudgeUsage ? Math.max(256, Math.ceil(decoded.length / 4)) : 256;
+      const cachedTokens = tracksNudgeUsage ? Math.floor(inputTokens / 2) : 128;
+      const usage = { prompt_tokens: inputTokens, completion_tokens: 8, total_tokens: inputTokens + 8, prompt_tokens_details: { cached_tokens: cachedTokens } };
       if (step?.kind === "compress") {
         if (!body.stream) throw new Error("the local compression-loop plan requires an actual streaming request");
         res.writeHead(200, { "content-type": "text/event-stream" });
@@ -30,7 +33,7 @@ export async function startGateway() {
         res.end(`data: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`); return;
       }
       if (req.url.includes("responses")) {
-        const response = { id: `resp_mock_${number}`, object: "response", status: "completed", model: body.model, output: [{ id: `msg_mock_${number}`, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text, annotations: [] }] }], usage: { input_tokens: 256, output_tokens: 8, total_tokens: 264, input_tokens_details: { cached_tokens: 128 } } };
+        const response = { id: `resp_mock_${number}`, object: "response", status: "completed", model: body.model, output: [{ id: `msg_mock_${number}`, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text, annotations: [] }] }], usage: { input_tokens: inputTokens, output_tokens: 8, total_tokens: inputTokens + 8, input_tokens_details: { cached_tokens: cachedTokens } } };
         if (body.stream) {
           res.writeHead(200, { "content-type": "text/event-stream" });
           res.end(`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response })}\n\n`);

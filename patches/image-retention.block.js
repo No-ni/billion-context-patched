@@ -62,6 +62,24 @@ function biliRetentionHash(b64) {
   return hashContent(b64).slice(0, 32);
 }
 
+// The shared resolver rejects duplicate refs; retention probes each ref alone.
+async function biliRetentionResolveRef(session, mediaType, b64) {
+  const index = session && session.incomingImageIndex;
+  if (!(index instanceof Map)) return refForItemBytes(session, mediaType, b64);
+  const refs = Array.from(index.keys()).filter(function (ref) {
+    return typeof ref === "string" && /^m\d{5,}$/.test(ref);
+  }).sort();
+  for (const ref of refs) {
+    const entries = index.get(ref);
+    const first = Array.isArray(entries) ? entries[0] : void 0;
+    if (first === void 0 || first.mediaType !== mediaType || first.bytes !== Buffer.byteLength(b64, "base64")) continue;
+    try {
+      const resolved = await refForItemBytes({ incomingImageIndex: new Map([[ref, [first]]]) }, mediaType, b64);
+      if (resolved === ref) return ref;
+    } catch (err) {}
+  }
+}
+
 // --- what the session already looked at ------------------------------------
 
 function biliRetentionSeen(session) {
@@ -847,7 +865,7 @@ async function biliRetentionApply(body, protocol, session, ctx) {
       const isFresh = occurrence.entryIndex === fresh;
       let ref;
       try {
-        ref = session === void 0 ? void 0 : await refForItemBytes(session, origMediaType, origB64);
+        ref = session === void 0 ? void 0 : await biliRetentionResolveRef(session, origMediaType, origB64);
         if (typeof ref !== "string" || !/^m\d{5,}$/.test(ref)) ref = void 0;
       } catch (err) {
         ref = void 0;

@@ -680,6 +680,38 @@ for (const [label, find, replacement] of NUDGE_EDITS) {
   nudged++;
 }
 console.log("nudge growth default: " + (nudged > 0 ? "patched (" + nudged + "/" + NUDGE_EDITS.length + ")" : "already patched"));
+// A nudge grants a time-limited model-tool opportunity, but one successful
+// fold must consume it. Keep completion and in-flight ownership by generation
+// so a later nudge cannot erase an older operation's lock or inherit its result.
+const NUDGE_GATE_STATE_OLD = "const credit=stamp2.nudgeInjected?NUDGE_CREDIT_ROUNDS:isModelRound?prevCredit-1:prevCredit;t.unpromptedGate={credit:Math.max(0,credit),requireNudge:stamp2.requireNudge===true,requireRecommendation:stamp2.requireRecommendation===true}";
+const NUDGE_GATE_STATE_DRAFT = "const credit=stamp2.nudgeInjected?NUDGE_CREDIT_ROUNDS:isModelRound?prevCredit-1:prevCredit;const previousNudgeId=Number.isSafeInteger(prev?.nudgeId)?prev.nudgeId:0;const nudgeId=stamp2.nudgeInjected?previousNudgeId+1:previousNudgeId;const compressed=!stamp2.nudgeInjected&&prev?.compressed===true;const compressionInFlight=!stamp2.nudgeInjected&&prev?.compressionInFlight===true;t.unpromptedGate={credit:Math.max(0,credit),requireNudge:stamp2.requireNudge===true,requireRecommendation:stamp2.requireRecommendation===true,nudgeId,compressed,compressionInFlight}";
+const NUDGE_GATE_STATE = "const credit=stamp2.nudgeInjected?NUDGE_CREDIT_ROUNDS:isModelRound?prevCredit-1:prevCredit;const previousNudgeId=Number.isSafeInteger(prev?.nudgeId)?prev.nudgeId:0;const nudgeId=stamp2.nudgeInjected?previousNudgeId+1:previousNudgeId;const completedNudgeId=Number.isSafeInteger(prev?.completedNudgeId)&&prev.completedNudgeId>=0?prev.completedNudgeId:prev?.compressed===true&&previousNudgeId>0?previousNudgeId:0;const compressionInFlightNudgeId=Number.isSafeInteger(prev?.compressionInFlightNudgeId)&&prev.compressionInFlightNudgeId>0?prev.compressionInFlightNudgeId:prev?.compressionInFlight===true&&previousNudgeId>0?previousNudgeId:0;t.unpromptedGate={credit:Math.max(0,credit),requireNudge:stamp2.requireNudge===true,requireRecommendation:stamp2.requireRecommendation===true,nudgeId,completedNudgeId,compressionInFlightNudgeId}";
+const replaceGateShape = (label, previous, replacement) => {
+  if (text.includes(replacement)) {
+    console.log(label + ": already patched");
+    return;
+  }
+  const anchor = previous.find(value => text.includes(value));
+  if (!anchor) throw new Error(label + ": internal anchor moved");
+  replaceOnce(label, anchor, replacement);
+  console.log(label + ": patched");
+};
+replaceGateShape("nudge compression state", [NUDGE_GATE_STATE_OLD, NUDGE_GATE_STATE_DRAFT], NUDGE_GATE_STATE);
+const NUDGE_GATE_READ_OLD = "return{armed:Number.isFinite(g2.credit)&&g2.credit>0,requireNudge:g2.requireNudge===true,requireRecommendation:g2.requireRecommendation===true}";
+const NUDGE_GATE_READ_DRAFT = "return{armed:Number.isFinite(g2.credit)&&g2.credit>0,requireNudge:g2.requireNudge===true,requireRecommendation:g2.requireRecommendation===true,nudgeId:Number.isSafeInteger(g2.nudgeId)?g2.nudgeId:0,compressed:g2.compressed===true,compressionInFlight:g2.compressionInFlight===true}";
+const NUDGE_GATE_READ = "return{armed:Number.isFinite(g2.credit)&&g2.credit>0,requireNudge:g2.requireNudge===true,requireRecommendation:g2.requireRecommendation===true,nudgeId:Number.isSafeInteger(g2.nudgeId)?g2.nudgeId:0,compressed:Number.isSafeInteger(g2.nudgeId)&&g2.nudgeId>0&&g2.completedNudgeId===g2.nudgeId,compressionInFlight:Number.isSafeInteger(g2.nudgeId)&&g2.nudgeId>0&&g2.compressionInFlightNudgeId===g2.nudgeId}";
+replaceGateShape("nudge compression state read", [NUDGE_GATE_READ_OLD, NUDGE_GATE_READ_DRAFT], NUDGE_GATE_READ);
+const NUDGE_COMPRESS_WRAPPER_DRAFT = 'async function applyConfiguredCompression(input,ctx,callId,signal){const gate=unpromptedGateOf(ctx.session);if(gate.compressionInFlight||gate.armed&&gate.compressed){const reason=gate.armed&&gate.compressed?"this nudge already completed one successful compression":"a compression for this nudge is already in progress";ctx.log(`[acp-proxy: refused duplicate nudge compression: ${reason}]`);return compressResult(`[Compression REFUSED: ${reason}. Do not call compress again for this nudge; continue the task. A new compression nudge is required before another fold.]`,"refused",0,"nudge-compress-once")}const nudgeId=gate.nudgeId;const ownsNudge=gate.armed;const current=ownsNudge?ctx.session.transient?.unpromptedGate:void 0;if(ownsNudge&&current&&current.nudgeId===nudgeId)current.compressionInFlight=true;try{const result=await applyConfiguredCompressionCore(input,ctx,callId,signal);const latest=ctx.session.transient?.unpromptedGate;if(ownsNudge&&latest&&latest.nudgeId===nudgeId){latest.compressionInFlight=false;if(latest.credit>0&&result?.outcome==="applied"&&result.blocksCreated>0)latest.compressed=true}return result}finally{const latest=ctx.session.transient?.unpromptedGate;if(ownsNudge&&latest&&latest.nudgeId===nudgeId)latest.compressionInFlight=false}}\n';
+const NUDGE_COMPRESS_WRAPPER = readFileSync(join(here, "patches", "nudge-compress-wrapper.block.js"), "latin1").trimEnd() + "\n";
+if (text.includes(NUDGE_COMPRESS_WRAPPER)) {
+  console.log("one successful compression per nudge: already patched");
+} else if (text.includes(NUDGE_COMPRESS_WRAPPER_DRAFT)) {
+  replaceOnce("one successful compression per nudge", NUDGE_COMPRESS_WRAPPER_DRAFT, NUDGE_COMPRESS_WRAPPER);
+  console.log("one successful compression per nudge: updated");
+} else {
+  replaceOnce("one successful compression per nudge", "async function applyConfiguredCompression(", NUDGE_COMPRESS_WRAPPER + "async function applyConfiguredCompressionCore(");
+  console.log("one successful compression per nudge: patched");
+}
 // Estimates are useful for window checks but cannot prove an aborted request
 // reached the model. Only trusted usage may consume its one-shot reanchor.
 editFunction("aborted-turn growth source", "absorbAbortedTurnGrowth", body => editInside(
