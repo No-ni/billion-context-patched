@@ -21,4 +21,6 @@ B1 的默认策略有误：当请求没有 `x-accel-compress` 指令时，helper
 
 `origin` 已有 `v0.7.2` 标签，指向修复前基线 `55de884`，不能覆盖该标签。用户确认按 `v0.7.3` 发布；`node scripts/release.mjs 0.7.3` 已准备候选并再次通过全部 15 个离线检查入口。
 
-功能提交 `39a73c0` 的首次 GitHub 检查中，macOS Node 24 的 wrapper 检查因子进程 localhost `fetch` 报 `TypeError: fetch failed` 失败，日志没有保留底层连接原因。按同一提交重跑后，macOS Node 24、Ubuntu Node 22/24、Windows Node 24 四个 job 全部通过（run `44693848583`，attempt 2）；没有为该次失败改动代码。版本候选提交的跨平台检查仍待完成，本审计不将其写成已发布状态。
+功能提交 `39a73c0` 的首次 GitHub 检查中，macOS Node 24 的 wrapper 检查因子进程 localhost `fetch` 报 `TypeError: fetch failed` 失败，日志没有保留底层连接原因。按同一提交重跑后，macOS Node 24、Ubuntu Node 22/24、Windows Node 24 四个 job 全部通过（run `44693848583`，attempt 2）。
+
+版本候选提交 `7e75f80` 的 macOS Node 24 检查再次在 wrapper 的嵌套 profile 安装中报同样错误；该 job 前面的独立编码检查已完成 116 次发送并通过，Ubuntu Node 22/24 与 Windows Node 24 也通过。本机直接编码检查和完整 wrapper 检查均通过。为定位嵌套调用的间歇性失败，编码测试新增用例名、底层网络 `cause` 与错误码输出；携带此诊断的后续跨平台检查待运行。此前两次 CI 失败均未改变生产策略，候选不发布、不打标签，直到完整矩阵通过。

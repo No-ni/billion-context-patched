@@ -128,12 +128,19 @@ const checkWire=(record,expected,encoding,label)=>{
   const decoded=encoding==="gzip"?gunzipSync(record.body):encoding==="br"?brotliDecompressSync(record.body):record.body;
   assert.deepEqual(decoded,Buffer.from(expected),label+": exact decoded body");
 };
+const fetchLocal=async(url,options,label)=>{
+  try{return await fetch(url,options)}
+  catch(error){
+    const cause=error?.cause;
+    throw new Error(label+": "+(cause?.code?cause.code+": "+cause.message:String(error)),{cause:error});
+  }
+};
 const send=async(api,opts,text,encoding,label,path="/v1/chat/completions")=>{
   const url=base+path;
   activeApi=api;
   api.encode(opts,url);
   const before=seen.length;
-  const response=await fetch(url,{...opts,signal:AbortSignal.timeout(5000)});
+  const response=await fetchLocal(url,{...opts,signal:AbortSignal.timeout(5000)},label);
   assert.equal(response.status,200,label+": localhost status");
   await response.arrayBuffer();
   assert.equal(seen.length,before+1,label+": receiver saw request");
@@ -144,7 +151,8 @@ const send=async(api,opts,text,encoding,label,path="/v1/chat/completions")=>{
 };
 const getStats=async(api,rid)=>{
   activeApi=api;
-  const response=await fetch(base+"/__bili/encode-stats"+(rid?"?rid="+encodeURIComponent(rid):""),{signal:AbortSignal.timeout(5000)});
+  const url=base+"/__bili/encode-stats"+(rid?"?rid="+encodeURIComponent(rid):"");
+  const response=await fetchLocal(url,{signal:AbortSignal.timeout(5000)},"encode-stats"+(rid?" "+rid:""));
   assert.equal(response.status,200,"encode-stats status");
   assert.equal(response.headers.get("cache-control"),"no-store","encode-stats cache policy");
   const body=await response.json();
@@ -362,6 +370,7 @@ try{
   console.log("outbound-encoding: OK - "+cases+" cases, "+requests+" real localhost sends on Node "+process.version+(blockOnly?" (source block)":" (candidate build)"));
 }catch(error){
   console.error("outbound-encoding: FAILED - "+(error?.stack??String(error)));
+  if(error?.cause)console.error("outbound-encoding: cause - "+String(error.cause)+" (code="+(error.cause.code??"unknown")+")");
   process.exitCode=1;
 }finally{
   try{
