@@ -71,7 +71,7 @@ B12–B16 的完整行为见第 8 节；B17 对应 W7 的图像卡。B19–B21 �
 
 ### B1：出站请求压缩与回执
 
-必须支持折叠后请求体的 off/gzip/br 传输，消费 `x-accel-compress`、`x-accel-rid` 指令并记录压缩回执。仅在 POST、目标包含 `/chat/completions`、`/v1/messages` 或 `/responses`、请求体至少 1024 字节且压缩结果小于原文 95% 时应用压缩，已有 content-encoding 时不再次压缩；重复调用保留已有决定。压缩后删除旧 content-length，由发送层计算正确长度。
+必须支持折叠后请求体的 off/gzip/br 传输，消费 `x-accel-compress`、`x-accel-rid` 指令并记录压缩回执。只有明确的 `gzip`、`br` 或 `on` 指令才允许压缩；指令缺失、空值或未知值默认 `off`，不能继承全局上游编码配置。显式 `on` 才使用全局算法（未设置时为 gzip）。仅在 POST、目标包含 `/chat/completions`、`/v1/messages` 或 `/responses`、请求体至少 1024 字节且压缩结果小于原文 95% 时应用压缩，已有 content-encoding 时不再次压缩；重复调用保留已有决定。压缩后删除旧 content-length，由发送层计算正确长度。
 
 回执环最多 300 条，保留 encode-stats 查询能力。验收：`smoke.mjs` 验证三路真实本地传输、长度及重复调用；回执接口需真实代理核对。开关与实现细节见维护清单及 PATCHES 第 1–4、10 节。
 
@@ -337,6 +337,7 @@ IMG-10 验收：`scripts/check-image-card.mjs` 覆盖 20/10 默认、可编辑�
 | 事项 | 依据与结果 |
 | --- | --- |
 | 默认开启缓存钥匙 | 用户明确要求；旧实现见 `537d590`；0.5.0 的 `f2b9fd6` 刷新基线时漏迁，属于回归，不是需求变更 |
+| 未指定渠道默认不压缩 | 用户明确要求只有明确选择压缩的渠道才压缩；渠道无配置时 accelerator 不发送 `x-accel-compress`，B1 将缺失/空/未知指令设为 off，仅显式 `on` 可使用全局算法。全局 `upstream.encoding` 不再隐式开启其他渠道的压缩 |
 | 0.5.4 恢复 | `710b657` 恢复默认值与设置页，加入 B11、自动检查和维护记录 |
 | 0.6.0 图片只发一次 | 用户明确要求（老会话也要生效，不接受新开会话）；上游 jimp 降采样链未安装，压缩改走系统 sips |
 | 0.6.1 压缩覆盖三平台 | 用户明确要求「不止是 mac 用的」；不装依赖，按平台借 sips / PowerShell System.Drawing / ImageMagick |

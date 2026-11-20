@@ -14,6 +14,7 @@
 | [0.7.0 上游整合审计](audits/2026-11-18-upstream-0.7.0.md) | 固定上游基线、兼容更新、本地定制逐项复核、端到端验证与安装边界 |
 | [重复图片引用根因与 0.7.1 本机更新](audits/2026-11-19-duplicate-image-ref-retention.md) | 多 ref 图片导致历史像素回发的本地根因、回归验证与 DSH 安装记录 |
 | [同一提醒重复折叠根因与 0.7.2 本机更新](audits/2026-11-19-duplicate-nudge-compression.md) | 一次 T1 提醒后多次独立折叠的根因、并发/partial 防护、隔离验证与 DSH 安装记录 |
+| [未指定渠道默认压缩修复](audits/2026-11-20-unspecified-compression-off.md) | B1 默认关闭压缩、保留渠道显式规则、旧构建迁移与离线验证 |
 | [连续空工具结果修复核对](audits/2026-11-15-snapshot-tool-seam.md) | 快照拼接误配、连续旧画面复用、零新增范围的预检重建与验证边界 |
 | [0.6.9 主线整合审计](audits/2026-11-15-upstream-integration.md) | 固定主线、上游优先与本地保留、SQLite 默认与 WAL 回归、全条款和验证边界 |
 | [0.6.9 发布复核](audits/2026-11-15-release-0.6.9.md) | 最终独立扫描、相邻预检修复、本地模拟端到端及发布验收 |

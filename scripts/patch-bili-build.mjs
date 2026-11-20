@@ -92,6 +92,17 @@ const BLOCK = readFileSync(join(here, "patches", "outbound-encoding.block.js"), 
 const FETCH_ANCHOR = "async function fetchWithTimeout(";
 const ENTER = "checkOutboundBody(opts.body);";
 const LOGS_ROUTE = "return sendWebLogs(res,req);";
+const LEGACY_ENCODING_POLICY = `function __biliEncPolicy(source,projected,opts){
+  var sm=__biliEncMeta(source),pm=__biliEncMeta(projected),prior=(sm&&sm.policy)||(pm&&pm.policy);
+  var dir=__biliEncHeaderRead(source,"x-accel-compress"),rid=__biliEncHeaderRead(source,"x-accel-rid");
+  if(dir===null&&projected!==source)dir=__biliEncHeaderRead(projected,"x-accel-compress");
+  if(rid===null&&projected!==source)rid=__biliEncHeaderRead(projected,"x-accel-rid");
+  dir=dir===null?(prior?prior.dir:opts&&typeof opts.__biliCompress==="string"?opts.__biliCompress:""):dir.trim().toLowerCase();
+  rid=rid===null?(prior?prior.rid:opts&&typeof opts.__biliRid==="string"?opts.__biliRid:null):(rid||null);
+  var policy=prior&&prior.dir===dir&&prior.rid===rid?prior:{dir:dir,rid:rid,resolved:false,encoding:""};
+  if(source&&typeof source==="object")__biliEncHeaderMeta.set(source,{policy:policy,own:sm&&sm.own,decision:sm&&sm.decision});
+  return policy;
+}`;
 
 if (text.includes("var __biliEncZlib=")) {
   for (const match of BLOCK.matchAll(/function (__bili\w+)\(/g)) {
@@ -100,7 +111,15 @@ if (text.includes("var __biliEncZlib=")) {
     const actual = uniqueBlockSpan(text, "encoding artifact " + name, opener, { expression: true }).block;
     // B5's diagnostic call is the only later edit inside an encoder function.
     const normalized = name === "__biliEncodeOutbound" ? actual.replace("__biliDumpBody(opts,url);", "") : actual;
-    if (normalized !== expected) throw new Error("outbound encoding: helper body differs; rebuild from the selected clean upstream (" + name + ")");
+    if (normalized !== expected) {
+      if (name !== "__biliEncPolicy" || actual !== LEGACY_ENCODING_POLICY) {
+        throw new Error("outbound encoding: helper body differs; rebuild from the selected clean upstream (" + name + ")");
+      }
+      const span = uniqueBlockSpan(text, "legacy encoding policy", opener, { expression: true });
+      text = text.slice(0, span.start) + expected + text.slice(span.end);
+      changed = true;
+      console.log("outbound encoding: migrated missing-directive default to off");
+    }
   }
   console.log("outbound encoding: already patched");
 } else {

@@ -23,7 +23,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮�
 
 | ID | 实现位置 | 检查与覆盖边界 |
 | --- | --- | --- |
-| B1 | 步骤 1；`patches/outbound-encoding.block.js`、明文头投影和重发入口 | `smoke.mjs`、`check-outbound-encoding.mjs` 的真实本地传输与重复编码、请求头所有权、回执；mock E2E 检查实际代理回执；网关需真机 |
+| B1 | 步骤 1；`patches/outbound-encoding.block.js`、明文头投影和重发入口 | `smoke.mjs`、`check-outbound-encoding.mjs` 的真实本地传输、缺失/无效指令默认 off、显式算法、重复编码、请求头所有权、回执与旧 helper 迁移；mock E2E 检查实际代理回执；网关需真机 |
 | B2 | 步骤 2；`__biliPluginLaneSnapshot` | 标记与 live/shadow 开关联动需真机 |
 | B3 | 步骤 3；`__biliForkTranscriptSource` | `check-e2e-mock.mjs` 的真实代理 fork、保存和重启；DSH 操作仍需真机 |
 | B4 | 步骤 4，最终函数体由步骤 10 提供 | `check-views.mjs`；B2/B3 联动需真机 |

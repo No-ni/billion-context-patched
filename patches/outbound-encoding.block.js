@@ -39,7 +39,9 @@ function __biliEncPolicy(source,projected,opts){
   var dir=__biliEncHeaderRead(source,"x-accel-compress"),rid=__biliEncHeaderRead(source,"x-accel-rid");
   if(dir===null&&projected!==source)dir=__biliEncHeaderRead(projected,"x-accel-compress");
   if(rid===null&&projected!==source)rid=__biliEncHeaderRead(projected,"x-accel-rid");
-  dir=dir===null?(prior?prior.dir:opts&&typeof opts.__biliCompress==="string"?opts.__biliCompress:""):dir.trim().toLowerCase();
+  dir=dir===null?(prior?prior.dir:opts&&typeof opts.__biliCompress==="string"?opts.__biliCompress:"off"):dir;
+  dir=typeof dir==="string"?dir.trim().toLowerCase():"off";
+  if(dir!=="off"&&dir!=="gzip"&&dir!=="br"&&dir!=="on")dir="off";
   rid=rid===null?(prior?prior.rid:opts&&typeof opts.__biliRid==="string"?opts.__biliRid:null):(rid||null);
   var policy=prior&&prior.dir===dir&&prior.rid===rid?prior:{dir:dir,rid:rid,resolved:false,encoding:""};
   if(source&&typeof source==="object")__biliEncHeaderMeta.set(source,{policy:policy,own:sm&&sm.own,decision:sm&&sm.decision});

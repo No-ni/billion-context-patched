@@ -6,10 +6,12 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { createServer } from "node:http";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { uniqueBlockSpan } from "./patch-bili-client.mjs";
 import { brotliCompressSync, brotliDecompressSync, gzipSync, gunzipSync } from "node:zlib";
 
 const here=dirname(fileURLToPath(import.meta.url));
@@ -81,6 +83,17 @@ const rawValues=(raw,name)=>{
 const payload=(label,repetitions)=>JSON.stringify({model:"localhost-test",messages:[{role:"user",content:label+" \u4e2d\u6587 "+("recoverable context "+label+" ").repeat(repetitions)}]});
 const firstText=payload("original",1300);
 const recoveryText=payload("new-body",850);
+const legacyPolicy=`function __biliEncPolicy(source,projected,opts){
+  var sm=__biliEncMeta(source),pm=__biliEncMeta(projected),prior=(sm&&sm.policy)||(pm&&pm.policy);
+  var dir=__biliEncHeaderRead(source,"x-accel-compress"),rid=__biliEncHeaderRead(source,"x-accel-rid");
+  if(dir===null&&projected!==source)dir=__biliEncHeaderRead(projected,"x-accel-compress");
+  if(rid===null&&projected!==source)rid=__biliEncHeaderRead(projected,"x-accel-rid");
+  dir=dir===null?(prior?prior.dir:opts&&typeof opts.__biliCompress==="string"?opts.__biliCompress:""):dir.trim().toLowerCase();
+  rid=rid===null?(prior?prior.rid:opts&&typeof opts.__biliRid==="string"?opts.__biliRid:null):(rid||null);
+  var policy=prior&&prior.dir===dir&&prior.rid===rid?prior:{dir:dir,rid:rid,resolved:false,encoding:""};
+  if(source&&typeof source==="object")__biliEncHeaderMeta.set(source,{policy:policy,own:sm&&sm.own,decision:sm&&sm.decision});
+  return policy;
+}`;
 const seen=[];
 const sockets=new Set();
 let activeApi;
@@ -193,6 +206,19 @@ try{
   console.log("  retry chains: object / Headers / tuple; gzip / br / off / on");
 
   for(const form of forms){
+    for(const dir of [null,"","unknown"]){
+      const api=fresh("gzip"),rid="unspecified-"+form.name+"-"+(dir===null?"missing":dir||"empty");
+      const entries=[["Content-Type","application/json"],["Authorization","Bearer local-test"],["X-Accel-Rid",rid],["Content-Length",String(Buffer.byteLength(firstText))]];
+      if(dir!==null)entries.push(["X-Accel-Compress",dir]);
+      const opts={method:"POST",headers:form.make(entries),body:form.body(firstText)};
+      const record=await send(api,opts,firstText,"",rid+": fail closed");
+      expectRecords(await getStats(api,rid),"off",rid,[firstText],[record],"");
+      cases++;
+    }
+  }
+  console.log("  missing, empty and unknown directives default off despite global gzip");
+
+  for(const form of forms){
     for(const dir of ["gzip","br","off","on"]){
       const api=fresh(),rid="projection-"+form.name+"-"+dir;
       const encoding=dir==="off"?"":dir==="on"?"gzip":dir;
@@ -303,6 +329,22 @@ try{
   await send(frozen,{method:"POST",headers:freshHeaders,body:recoveryText},recoveryText,"","plaintext API before encoding");
   cases++;
   console.log("  internal directives stay private on every path; frozen sources work");
+
+  if(!blockOnly){
+    const currentPolicy=uniqueBlockSpan(source,"current encoding policy","function __biliEncPolicy(").block;
+    assert.notEqual(currentPolicy,legacyPolicy,"candidate must contain the updated encoding policy");
+    const migrationFixture=join(scratch,"legacy-encoding-policy.mjs");
+    writeFileSync(migrationFixture,source.replace(currentPolicy,legacyPolicy));
+    const patcher=join(here,"patch-bili-build.mjs");
+    const patch=()=>execFileSync(process.execPath,[patcher,migrationFixture],{cwd:join(here,".."),stdio:"pipe"});
+    patch();
+    const migrated=readFileSync(migrationFixture,"latin1");
+    assert(migrated.includes(currentPolicy),"known 0.7.2 encoding policy migrates to the new fail-closed behavior");
+    patch();
+    assert.equal(readFileSync(migrationFixture,"latin1"),migrated,"migrated candidate is byte-idempotent");
+    cases++;
+    console.log("  known previous encoding helper migrates once and stays byte-idempotent");
+  }
 
   const capped=fresh();
   for(let i=0;i<360;i++)capped.encode({method:"POST",headers:{"x-accel-rid":"ring-"+i,"x-accel-compress":"off"},body:"small"},base+"/v1/responses");

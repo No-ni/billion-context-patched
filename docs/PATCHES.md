@@ -873,3 +873,11 @@ Node 24 的 `JSON.stringify` 能处理超过递归 digest 校验栈深的输入�
 B23 在模型工具包装入口按提醒 generation 记录 in-flight 和完成状态。调用开始时须有有效 credit 才认领未消费提醒；同一 generation 的并发调用拒绝。零 block 或异常释放锁且保留重试机会；创建一个或多个 block（包括 partial）即消费 credit，后续同 generation 调用拒绝。新提醒递增 generation；旧调用只更新自己 generation 的完成记录，不能清空新 generation 的 credit 或锁。已消费标记保留到新提醒到来，过期但未消费的旧提醒不会反过来认领独立的手动折叠。自动窗口预检保持原行为。
 
 完整回归、构建哈希和本地 DSH 安装状态见[同一提醒重复折叠审计](audits/2026-11-19-duplicate-nudge-compression.md)。
+
+## 33. 2026-11-20：未配置渠道默认关闭请求压缩
+
+accelerator 只为已配置的 provider 发出 `x-accel-compress`；其他渠道按设计不发指令头，交由代理的全局规则处理。但插件自身的 B1 编码器把缺失指令解释为读取全局 `upstream.encoding`，所以机器上的全局 gzip 意外覆盖了 provider 级 opt-in：未配置的 `deepseek-account` 请求被压缩后送到不接受压缩请求的中转站并返回 400。
+
+B1 现将缺失、空和未知指令统一收敛为 `off`。显式 `gzip` / `br` 仍指定算法，显式 `on` 才允许读取全局算法；指定中转渠道的 I4 默认值与 accelerator 发出的 `br` 指令不变。补丁器只接受并迁移已知的上一版 B1 policy helper，其他 helper 漂移继续报错。
+
+`check-outbound-encoding.mjs` 使用隔离的全局 gzip 配置和真实 localhost 接收器，验证 object、Headers、tuple 三种头形态下缺失/空/未知指令均原样发送；同时回归显式 off/gzip/br/on、回执、重发，并从旧 helper 构建一次候选、验证迁移后字节幂等。完整结果见[未指定压缩策略审计](audits/2026-11-20-unspecified-compression-off.md)。
