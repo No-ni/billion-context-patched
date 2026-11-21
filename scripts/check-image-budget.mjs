@@ -13,6 +13,7 @@ const check = (name, fn) => {
   console.log("  OK " + name);
 };
 const native = (provider, settingsNs) => ({ provider, settingsNs, settingsPath: [] });
+const pi = (provider = "test") => ({ provider, settingsNs: "llm-pi-ai", settingsPath: ["providers", provider] });
 const row = (ns, user = {}, value = { maxImagesPerRequest: 600, imageOffloadCountQuantum: 20 }) => ({ ns, user, value, revision: 1 });
 const deepseekApiKey = native("deepseek-official", "llm-deepseek-api-key");
 const deepseekAccount = native("deepseek-account", "llm-deepseek-account");
@@ -80,27 +81,87 @@ check("invalid values and expressions fail closed", () => {
   assert.deepEqual(imageBudgetOps({ __jsExpr: "config" }, row("llm-deepseek-api-key"), deepseekApiKey), []);
   assert.deepEqual(imageBudgetOps({}, row("llm-deepseek-api-key", { maxImagesPerRequest: { __jsExpr: "limit" } }), deepseekApiKey), []);
 });
+check("PI routes receive compact image projection defaults", () => {
+  assert.deepEqual(imageBudgetOps({}, row("llm-pi-ai", { providers: { test: {} } }, { providers: { test: {} } }), pi()), [
+    { op: "set", path: ["providers", "test", "requestImageMaxBytes"], value: 153600 },
+    { op: "set", path: ["providers", "test", "requestImagePixelBudget"], value: 1440000 },
+    { op: "set", path: ["providers", "test", "maxRequestImageBytes"], value: 2097152 },
+  ]);
+});
+check("PI defaults replace a loose authored provider budget", () => {
+  const authored = { requestImageMaxBytes: 180000, requestImagePixelBudget: 900000, maxRequestImageBytes: 4000000 };
+  assert.equal(imageBudgetOps({}, row("llm-pi-ai", { providers: { test: authored } }, { providers: { test: authored } }), pi()).length, 3);
+});
+check("explicit plugin PI budgets override provider values", () => {
+  const root = row("llm-pi-ai", { providers: { test: { requestImageMaxBytes: 180000 } } }, {
+    providers: { test: { requestImageMaxBytes: 180000 } },
+  });
+  assert.deepEqual(imageBudgetOps({ requestImageMaxBytes: 153600, maxRequestImageBytes: 2097152 }, root, pi()), [
+    { op: "set", path: ["providers", "test", "requestImageMaxBytes"], value: 153600 },
+    { op: "set", path: ["providers", "test", "requestImagePixelBudget"], value: 1440000 },
+    { op: "set", path: ["providers", "test", "maxRequestImageBytes"], value: 2097152 },
+  ]);
+});
+check("invalid PI budgets fail closed", () => {
+  assert.deepEqual(imageBudgetOps({ requestImageMaxBytes: 0 }, row("llm-pi-ai"), pi()), []);
+  assert.deepEqual(imageBudgetOps({ maxRequestImageBytes: 2.5 }, row("llm-pi-ai"), pi()), []);
+  assert.equal(imageBudgetOps({}, row("llm-pi-ai", { providers: { test: { requestImageMaxBytes: 0 } } }), pi()).length, 3);
+});
+check("an untouched catalog route is never given a profile", () => {
+  // DSH reports a provider as configured as soon as its profile exists, so a
+  // budget must only land on a profile the user stored themselves.
+  assert.deepEqual(imageBudgetOps({}, row("llm-pi-ai", {}, { providers: { anthropic: {} } }), pi("anthropic")), []);
+  assert.deepEqual(imageBudgetOps({}, row("llm-pi-ai"), pi("openai")), []);
+  assert.deepEqual(imageBudgetOps({ maxRequestImageBytes: 2097152 }, row("llm-pi-ai"), pi("groq")), []);
+});
+check("a stored but malformed PI profile fails closed", () => {
+  assert.deepEqual(imageBudgetOps({}, row("llm-pi-ai", { providers: { test: "inline" } }), pi()), []);
+});
 
 const home = mkdtempSync(join(tmpdir(), "bili-image-budget-"));
 try {
   const configPath = join(home, "billion-context.json");
   writeFileSync(configPath, "{}");
+  // Every PI route shares one namespace, and each accepted write advances the
+  // revision the next route was read at — the conflict the real settings
+  // service raises, which must not cost the pass the profiles after it.
+  const profiles = ["test", "ylinkimi", "gateway-a", "gateway-b", "gateway-c"];
+  const declared = () => Object.fromEntries(profiles.map(name => [
+    name, { api: "openai-completions", baseURL: "https://" + name + ".test/v1" },
+  ]));
   const rows = [
     row("llm-deepseek-api-key"),
     row("llm-deepseek-account"),
-    row("llm-pi-ai"),
+    row("llm-pi-ai", { providers: declared() }, { providers: declared() }),
   ];
-  const routes = [deepseekApiKey, deepseekAccount, native("openai", "llm-pi-ai")];
+  const routes = [deepseekApiKey, deepseekAccount, ...profiles.map(name => pi(name))];
   let writes = 0;
   const settings = {
-    describe: () => rows,
+    // The real service hands out a fresh descriptor per call, so a snapshot kept
+    // across a write goes stale instead of aliasing the incremented revision.
+    describe: () => rows.map(descriptor => ({ ...descriptor })),
     mutate: async (ns, ops, revision) => {
       const target = rows.find(candidate => candidate.ns === ns);
-      assert.equal(target.revision, revision);
+      if (target.revision !== revision) {
+        const error = new Error(`settings namespace "${ns}" changed since it was read (expected revision ${revision}, now ${target.revision})`);
+        error.code = "SETTINGS_CONFLICT";
+        throw error;
+      }
       for (const op of ops) {
-        const key = op.path[0];
-        target.value[key] = op.value;
-        target.user[key] = op.value;
+        let value = target.value;
+        let user = target.user;
+        for (const segment of op.path.slice(0, -1)) {
+          value = value[segment] ??= {};
+          user = user[segment] ??= {};
+        }
+        const key = op.path.at(-1);
+        if (op.op === "unset") {
+          delete value[key];
+          delete user[key];
+        } else {
+          value[key] = op.value;
+          user[key] = op.value;
+        }
       }
       target.revision++;
       writes++;
@@ -132,16 +193,30 @@ try {
     configPath: () => configPath,
     readConfig: path => JSON.parse(readFileSync(path, "utf8")),
   });
-  await eventually(() => rows.slice(0, 2).every(target => target.user.maxImagesPerRequest === 20 && target.user.imageOffloadCountQuantum === 10));
-  assert.equal(writes, 2);
-  assert.equal(rows[2].user.maxImagesPerRequest, undefined);
+  const profile = name => rows[2].user.providers[name];
+  const budgeted = () => profiles.every(name => profile(name).requestImageMaxBytes === 153600 &&
+    profile(name).requestImagePixelBudget === 1440000 && profile(name).maxRequestImageBytes === 2097152);
+  await eventually(() => rows.slice(0, 2).every(target => target.user.maxImagesPerRequest === 20 && target.user.imageOffloadCountQuantum === 10) && budgeted());
+  assert.equal(writes, 2 + profiles.length);
+  for (const name of profiles) {
+    assert.deepEqual(profile(name), {
+      api: "openai-completions",
+      baseURL: "https://" + name + ".test/v1",
+      requestImageMaxBytes: 153600,
+      requestImagePixelBudget: 1440000,
+      maxRequestImageBytes: 2097152,
+    });
+  }
 
   writeFileSync(configPath, JSON.stringify({ maxRequestImages: 34, imageOffloadCountQuantum: 7 }));
   await eventually(() => rows.slice(0, 2).every(target => target.user.maxImagesPerRequest === 34 && target.user.imageOffloadCountQuantum === 7));
-  assert.equal(writes, 4);
-  dispose();
+  assert.equal(writes, 2 + profiles.length + 2);
+  await dispose();
   assert.deepEqual(rows.slice(0, 2).map(target => [target.user.maxImagesPerRequest, target.user.imageOffloadCountQuantum]), [[34, 7], [34, 7]]);
-  console.log("  OK persisted host values survive wrapper disposal and follow saved image settings");
+  for (const name of profiles) {
+    assert.deepEqual(profile(name), { api: "openai-completions", baseURL: "https://" + name + ".test/v1" });
+  }
+  console.log("  OK every configured PI profile is budgeted, and persisted host values survive disposal");
   checks++;
 } finally {
   rmSync(home, { recursive: true, force: true });

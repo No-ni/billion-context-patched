@@ -1,14 +1,17 @@
 #!/usr/bin/env node
-// Offline check for the "image" card in bili's own config page.
+// Offline check for the "image budget" card in bili's own config page.
 //
-// Why this exists: the card is injected into the 8.5 MB bundle by sentinels,
-// not by a hand edit, and its controls edit the config draft before anything is
-// saved. A wrong anchor or a broken toggle still yields a page that loads, so
-// the failure would only show up as a card that silently does nothing. This
-// check starts the build on a private HOME, asserts the markup and the call
-// site, parses the inline page script, and then runs the extracted handlers
-// against a fake DOM: defaults, stored values, toggle writes, dimension bounds,
-// parse-error disable, save and reset.
+// Why this exists: the card is injected into the bundle by sentinels, not by a
+// hand edit, and its controls edit the config draft before anything is saved.
+// A wrong anchor still yields a page that loads, so the failure would only show
+// up as a card that silently does nothing. This check starts the build on a
+// private HOME, asserts the markup and the call site, parses the inline page
+// script, and then runs the extracted handlers against a fake DOM: defaults,
+// stored values, budget bounds, parse-error disable, save and reset.
+//
+// B12-B15 (retention, shrink, image convention) were removed in 0.7.5. The card
+// now only carries the five DSH-native budget numbers; this check asserts the
+// removed controls stay absent.
 //
 // Usage: node scripts/check-image-card.mjs [path/to/dist/index.js]
 // Offline: no model calls, no network beyond the local server it starts.
@@ -84,15 +87,17 @@ for (const [name, needle] of [
   ["save button", 'id="save-image"'],
   ["reset button", 'id="reset-image"'],
   ["title wired to i18n", 'data-i18n="cfg.image"'],
-  ["zh title", '"cfg.image":"图像"'],
-  ["zh retention label", '"cfg.image_retention":"看过的图片不再重传"'],
-  ["image budget fields are translated", "cfg.image_max_request"],
-  ["image retirement step is translated", "cfg.image_offload_quantum"],
-  ["en title", '"cfg.image":"Image"'],
+  ["zh title", '"cfg.image":"\u56fe\u50cf\u9884\u7b97"'],
+  ["zh budget label", '"cfg.image_max_request"'],
+  ["zh retirement label", '"cfg.image_offload_quantum"'],
+  ["en title", '"cfg.image":"Image budget"'],
 ]) check(name, html.includes(needle), needle);
 check("hydrate call site", html.includes("hydrateImageCard(cfg);"));
 check("dirty watch", html.includes('"card-file", "card-image", "summary-settings"'));
 check("broken-config disable list", html.includes('"save-image", "reset-image"'));
+check("retention toggle removed", !html.includes('id="image-retention"'));
+check("dimension input removed", !html.includes('id="image-max-dim"'));
+check("prompt toggle removed", !html.includes('id="image-prompt"'));
 
 // 2. the inline page script must be a single parseable program
 const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
@@ -185,28 +190,38 @@ function mount(draft, options = {}) {
   return { hydrate, box, editor, $, document, parsed: () => JSON.parse(editor.value) };
 }
 
-// defaults
+// defaults: five native budget numbers, and nothing else
 {
   const card = mount({});
-  check("defaults: longest side 1200", byId(card.box, "image-max-dim").value === "1200", byId(card.box, "image-max-dim").value);
+  check("defaults: per-image request target 150 KiB", byId(card.box, "image-request-kb").value === "150");
+  check("defaults: total image cap 2048 KiB", byId(card.box, "image-total-kb").value === "2048");
+  check("defaults: pixel budget 1440000", byId(card.box, "image-pixel-budget").value === "1440000");
   check("defaults: at most 20 request images", byId(card.box, "image-max-request").value === "20");
   check("defaults: retire 10 images per step", byId(card.box, "image-offload-quantum").value === "10");
   check("defaults: budget input describes its hint", byId(card.box, "image-max-request").attributes["aria-describedby"] === "image-max-request-hint");
-  check("defaults: retention on", byId(card.box, "image-retention").checked === true);
-  check("defaults: prompt on", byId(card.box, "image-prompt").checked === true);
+  check("defaults: retention toggle absent", byId(card.box, "image-retention") === null);
+  check("defaults: prompt toggle absent", byId(card.box, "image-prompt") === null);
 }
-// both budget values are editable, and the retirement step cannot exceed the limit
+// budget relationships: request <= total, retirement step <= image cap
 {
   const card = mount({});
+  const request = byId(card.box, "image-request-kb");
+  const total = byId(card.box, "image-total-kb");
   const max = byId(card.box, "image-max-request");
   const batch = byId(card.box, "image-offload-quantum");
+  request.value = "4096";
+  request.listeners.change();
+  check("request above total: rejected", card.parsed().requestImageMaxBytes === undefined && request.value === "150", request.value);
+  total.value = "100";
+  total.listeners.change();
+  check("total below request: rejected", card.parsed().maxRequestImageBytes === undefined && total.value === "2048", total.value);
   max.value = "32";
   max.listeners.change();
   check("budget max 32: saved", card.parsed().maxRequestImages === 32 && card.parsed().imageOffloadCountQuantum === 10, JSON.stringify(card.parsed()));
   check("budget max 32: retirement max follows", batch.max === "32");
   batch.value = "8";
   batch.listeners.change();
-  check("budget batch 8: saved", card.parsed().maxRequestImages === 32 && card.parsed().imageOffloadCountQuantum === 8, JSON.stringify(card.parsed()));
+  check("budget batch 8: saved", card.parsed().maxRequestImages === 32 && card.parsed().imageOffloadCountQuantum === 8);
   max.value = "5";
   max.listeners.change();
   check("budget max below batch: rejected", card.parsed().maxRequestImages === 32 && max.value === "32");
@@ -216,49 +231,44 @@ function mount(draft, options = {}) {
 }
 // values already in the file
 {
-  const card = mount({ imageRetention: false, imageRetentionKeepLastUser: false, imageRetentionMaxDim: 640, imagePrompt: false });
-  check("stored: retention off", byId(card.box, "image-retention").checked === false);
-  check("stored: keep-last off", byId(card.box, "image-keep-last").checked === false);
-  check("stored: prompt off", byId(card.box, "image-prompt").checked === false);
-  check("stored: longest side 640", byId(card.box, "image-max-dim").value === "640");
+  const card = mount({
+    requestImageMaxBytes: 102400, maxRequestImageBytes: 4 * 1024 * 1024,
+    requestImagePixelBudget: 1000000, maxRequestImages: 30, imageOffloadCountQuantum: 5,
+  });
+  check("stored: per-image 100 KiB", byId(card.box, "image-request-kb").value === "100");
+  check("stored: total 4096 KiB", byId(card.box, "image-total-kb").value === "4096");
+  check("stored: pixel budget", byId(card.box, "image-pixel-budget").value === "1000000");
+  check("stored: max 30", byId(card.box, "image-max-request").value === "30");
+  check("stored: batch 5", byId(card.box, "image-offload-quantum").value === "5");
 }
-// toggling edits the draft and keeps keys it does not own
+// a non-integer or zero is refused in place
 {
-  const card = mount({ imageRetention: false, debug: 1 });
-  const box = byId(card.box, "image-retention");
-  box.checked = true;
-  box.listeners.change();
-  check("toggle on: key removed", !("imageRetention" in card.parsed()), JSON.stringify(card.parsed()));
-  check("toggle on: unknown key kept", card.parsed().debug === 1, JSON.stringify(card.parsed()));
-  const again = byId(card.box, "image-retention");
-  again.checked = false;
-  again.listeners.change();
-  check("toggle off: key false", card.parsed().imageRetention === false, JSON.stringify(card.parsed()));
-}
-// a too-small or non-integer longest side is refused in place
-{
-  const card = mount({ imageRetentionMaxDim: 640 });
-  const dim = byId(card.box, "image-max-dim");
-  dim.value = "100";
-  dim.listeners.change();
-  check("dim 100: draft untouched", card.parsed().imageRetentionMaxDim === 640, JSON.stringify(card.parsed()));
-  check("dim 100: input restored", dim.value === "640", dim.value);
+  const card = mount({ requestImagePixelBudget: 1000000 });
+  const pixels = byId(card.box, "image-pixel-budget");
+  pixels.value = "0";
+  pixels.listeners.change();
+  check("pixel 0: draft untouched", card.parsed().requestImagePixelBudget === 1000000);
+  check("pixel 0: input restored", pixels.value === "1000000");
   let note = null;
   walk(card.box, (node) => {
     if (!note && node.style && String(node.style.cssText).includes("color:#cf222e")) note = node;
   });
-  check("dim 100: refused in place", note !== null && note.textContent === "cfg.image_dim_invalid", note && note.textContent);
-  dim.value = "900";
-  dim.listeners.change();
-  check("dim 900: written", card.parsed().imageRetentionMaxDim === 900, JSON.stringify(card.parsed()));
+  check("pixel 0: refused in place", note !== null && note.textContent === "cfg.image_budget_invalid", note && note.textContent);
+  pixels.value = "1200000";
+  pixels.listeners.change();
+  check("pixel 1200000: written", card.parsed().requestImagePixelBudget === 1200000);
 }
 // a broken config file disables every control instead of guessing
-check("parseError: enabled", byId(mount({}).box, "image-retention").disabled !== true);
-check("parseError: disabled", byId(mount({}, { parseError: true }).box, "image-retention").disabled === true);
+check("parseError: enabled", byId(mount({}).box, "image-request-kb").disabled !== true);
+check("parseError: disabled", byId(mount({}, { parseError: true }).box, "image-request-kb").disabled === true);
 
-// save posts the raw draft; reset removes the four keys and re-renders
+// save posts the raw draft; reset writes the five defaults and drops retired keys
 {
-  const card = mount({ imageRetention: false, imageRetentionKeepLastUser: false, imageRetentionMaxDim: 640, imagePrompt: false, maxRequestImages: 32, imageOffloadCountQuantum: 8, debug: 2 });
+  const card = mount({
+    imageRetention: false, imageRetentionKeepLastUser: false, imageRetentionMaxDim: 640,
+    imagePrompt: false, imageRescaleMaxDim: 900,
+    maxRequestImages: 32, imageOffloadCountQuantum: 8, debug: 2,
+  });
   const save = new Element("button");
   const reset = new Element("button");
   save.id = "save-image";
@@ -290,11 +300,12 @@ check("parseError: disabled", byId(mount({}, { parseError: true }).box, "image-r
   await reset.listeners.click();
   const draft = JSON.parse(card.editor.value);
   check(
-    "reset: image behavior flags removed",
-    ["imageRetention", "imageRetentionKeepLastUser", "imageRetentionMaxDim", "imagePrompt"].every((key) => !(key in draft)),
+    "reset: retired image keys removed",
+    ["imageRetention", "imageRetentionKeepLastUser", "imageRetentionMaxDim", "imagePrompt", "imageRescaleMaxDim"].every((key) => !(key in draft)),
     JSON.stringify(draft),
   );
-  check("reset: image budget returns to 20/10", draft.maxRequestImages === 20 && draft.imageOffloadCountQuantum === 10, JSON.stringify(draft));
+  check("reset: image budget returns to defaults", draft.maxRequestImages === 20 && draft.imageOffloadCountQuantum === 10 &&
+    draft.requestImageMaxBytes === 153600 && draft.requestImagePixelBudget === 1440000 && draft.maxRequestImageBytes === 2097152, JSON.stringify(draft));
   check("reset: unknown key kept", draft.debug === 2, JSON.stringify(draft));
   check("reset: card re-rendered", renders === 1, String(renders));
   check("reset: toast shown", toasts[0] === "cfg.image_restored", JSON.stringify(toasts));

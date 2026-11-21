@@ -5,7 +5,8 @@
         if (!box) return;
         box.innerHTML = "";
         const fe = $("cfg-file-edit");
-        const MIN_DIM = 128, DEFAULT_DIM = 1200, DEFAULT_IMAGES = 20, DEFAULT_QUANTUM = 10;
+        const DEFAULT_REQUEST_KB = 150, DEFAULT_TOTAL_KB = 2048, DEFAULT_PIXELS = 1440000;
+        const DEFAULT_IMAGES = 20, DEFAULT_QUANTUM = 10;
         let draft = {};
         try {
             const p = parseConfigDraft(fe && fe.value ? fe.value : "{}");
@@ -31,28 +32,6 @@
             draft = fresh;
             broken(false);
             refreshDirtyFlag();
-        }
-        function flagRow(id, labelKey, hintKey) {
-            const w = document.createElement("div");
-            w.style.cssText = "display:flex;gap:12px;align-items:center;flex-wrap:wrap";
-            const lab = document.createElement("label");
-            lab.style.cssText = "flex:0 1 auto;max-width:520px";
-            const inp = document.createElement("input");
-            inp.type = "checkbox";
-            inp.id = id;
-            lab.appendChild(inp);
-            lab.append(document.createTextNode(" \u2009" + t(labelKey)));
-            const ctl = document.createElement("div");
-            ctl.style.flex = "0 0 auto";
-            const hint = document.createElement("span");
-            hint.className = "dim small";
-            hint.textContent = t(hintKey);
-            ctl.appendChild(hint);
-            w.appendChild(lab);
-            w.appendChild(ctl);
-            box.appendChild(w);
-            iCtrls.push(inp);
-            return inp;
         }
         function numberRow(id, key, min, value, onChange) {
             const w = document.createElement("div");
@@ -82,7 +61,7 @@
                 const raw = String(input.value).trim();
                 const n = /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
                 if (!Number.isSafeInteger(n) || n < min || !onChange(n)) {
-                    brokenNote.textContent = t(min === MIN_DIM ? "cfg.image_dim_invalid" : "cfg.image_budget_invalid");
+                    brokenNote.textContent = t("cfg.image_budget_invalid");
                     input.value = String(value);
                 } else {
                     value = n;
@@ -90,14 +69,28 @@
             });
             return input;
         }
-        const retention = flagRow("image-retention", "cfg.image_retention", "cfg.image_retention_hint");
-        retention.addEventListener("change", () => commit((d) => { if (retention.checked) delete d.imageRetention; else d.imageRetention = false; }));
-        const keepLast = flagRow("image-keep-last", "cfg.image_keep_last", "cfg.image_keep_last_hint");
-        keepLast.addEventListener("change", () => commit((d) => { if (keepLast.checked) delete d.imageRetentionKeepLastUser; else d.imageRetentionKeepLastUser = false; }));
         const number = (value, min, fallback) => Number.isSafeInteger(value) && value >= min ? value : fallback;
-        numberRow("image-max-dim", "cfg.image_max_dim", MIN_DIM,
-            number(draft.imageRetentionMaxDim, MIN_DIM, DEFAULT_DIM), (n) => {
-                commit(d => { d.imageRetentionMaxDim = n; });
+        const kib = (value, fallback) => Number.isSafeInteger(value) && value >= 1024
+            ? Math.max(1, Math.round(value / 1024)) : fallback;
+        let requestKb = kib(draft.requestImageMaxBytes, DEFAULT_REQUEST_KB);
+        let totalKb = kib(draft.maxRequestImageBytes, DEFAULT_TOTAL_KB);
+        function requestBudget(n) {
+            if (n > totalKb) return false;
+            commit(d => { d.requestImageMaxBytes = n * 1024; });
+            requestKb = n;
+            return true;
+        }
+        function totalBudget(n) {
+            if (n < requestKb) return false;
+            commit(d => { d.maxRequestImageBytes = n * 1024; });
+            totalKb = n;
+            return true;
+        }
+        numberRow("image-request-kb", "cfg.image_request_kb", 1, requestKb, requestBudget);
+        numberRow("image-total-kb", "cfg.image_total_kb", 1, totalKb, totalBudget);
+        numberRow("image-pixel-budget", "cfg.image_pixel_budget", 1,
+            number(draft.requestImagePixelBudget, 1, DEFAULT_PIXELS), n => {
+                commit(d => { d.requestImagePixelBudget = n; });
                 return true;
             });
         let max = number(draft.maxRequestImages, 1, DEFAULT_IMAGES);
@@ -115,11 +108,6 @@
             return budget(max, n);
         });
         batchInput.max = String(max);
-        const promptRow = flagRow("image-prompt", "cfg.image_prompt", "cfg.image_prompt_hint");
-        promptRow.addEventListener("change", () => commit((d) => { if (promptRow.checked) delete d.imagePrompt; else d.imagePrompt = false; }));
-        retention.checked = draft.imageRetention !== false;
-        keepLast.checked = draft.imageRetentionKeepLastUser !== false;
-        promptRow.checked = draft.imagePrompt !== false;
         if (cfg && cfg.parseError) iCtrls.forEach((el) => { el.disabled = true; });
     }
     // <bili-image-card:js end>

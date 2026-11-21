@@ -41,12 +41,13 @@ bili 面板的「配置」页管理上下文压缩、缓存钥匙和图像设置
 | --- | --- | --- |
 | `promptCache.routing` | `enabled` | 支持路径上启用缓存钥匙；显式 enabled / auto / disabled 保留 |
 | `compress.nudgeGrowthTokens` | `80000` | 两次折叠之间的压缩增长阈值；显式值优先 |
-| `imageRetention` | `true` | 成功发送后的图片折叠与首次按需压缩 |
-| `imageRetentionKeepLastUser` | `true` | 当前回合用户上传的图保留，不提前折叠 |
-| `imageRetentionMaxDim` | `1200` | 首次压缩的长边上限，最小 128 |
-| `imagePrompt` | `true` | 恒定的图像使用约定 |
+| `maxRequestImages` | `20` | 支持的 DeepSeek 路由每条请求最多保留的图片数 |
+| `imageOffloadCountQuantum` | `10` | 超限时每批退役的图片数，不能大于上限 |
+| `requestImageMaxBytes` | `153600` | PI 路由每张图片的请求编码目标（150 KiB） |
+| `requestImagePixelBudget` | `1440000` | PI 路由每张图片的像素预算 |
+| `maxRequestImageBytes` | `2097152` | PI 路由单次请求图片总上限（2 MiB） |
 
-图像卡先修改页面草稿，点击保存后对下一条请求生效。「恢复默认」删除四个图像配置键，其他配置保留。同名环境变量仍然优先；页面展示文件中的配置。
+图像卡先修改页面草稿，点击保存后对下一条请求生效。「恢复默认」写回五项预算默认值并删除旧版的图片行为键，其他配置保留。同名环境变量仍然优先；页面展示文件中的配置。
 
 ### 指定中转渠道
 
@@ -54,11 +55,11 @@ bili 面板的「配置」页管理上下文压缩、缓存钥匙和图像设置
 
 `auto` 在支持的路径上优先 br，可在不支持或拒绝 br 时回退 gzip；`gzip` 只尝试 gzip。手动关闭、显式算法、null、配置表达式及显式全局 gzip 不会被默认值覆盖。其他主机需在加速器设置页自行开启。
 
-### 图片折叠与压缩
+### 图片预算
 
-图片只有在请求成功发送后才记为看过；失败或超时的请求不会提前折叠。折叠后的文字包含尺寸、引用号和取回提示，原图可通过 `acp_read_original_image` 按引用取回。
+0.7.5 起插件不再折叠、压缩或改写图片，也不注入图像使用约定；历史图片按上游行为在后续请求中重发。插件只把五项 DSH 原生预算参数写进宿主：支持的路由每条请求最多 20 张、超限每批退役 10 张；PI 路由每图目标 150 KiB、像素预算 1,440,000、单请求总量 2 MiB。
 
-首次压缩借用已有编码器：macOS 的 sips、Windows PowerShell 的 System.Drawing，其他平台的 ImageMagick。没有可用编码器时保留原图；压缩产物达不到收益条件时也保留原图。修改长边上限后，下一条请求按新值重新计算。
+这些数字在 bili「配置」页的图片卡里可改；退役数量不能超过上限。旧配置里的 `imageRetention*`、`imagePrompt`、`imageRescaleMaxDim` 不再生效，点「恢复默认」会顺手删除。
 
 ### 快照渲染与诊断
 

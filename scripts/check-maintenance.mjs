@@ -29,7 +29,8 @@ const mapped = [...maintenance.matchAll(/^\| ((?:B|W|I)\d+) \|/gm)].map(match =>
 assert.equal(new Set(mapped).size, mapped.length, "duplicate implementation mappings");
 assert.deepEqual(mapped.toSorted(), expectedMapped.toSorted(), "SPEC and implementation/check mappings differ");
 assert(maintenance.includes("IMG-10") && maintenance.includes("check-image-budget.mjs"), "IMG-10 must map to its budget check");
-assert(maintenance.includes("IMG-11") && maintenance.includes("check-host-image-fallback.mjs"), "IMG-11 must map to its host fallback check");
+assert(/IMG-11[^\n]*已删除/.test(maintenance), "IMG-11 must be marked deleted");
+assert(!maintenance.includes("check-image-retention.mjs") || maintenance.includes("已删除"), "deleted image checks must not be required");
 const pck = spec.match(/PCK-01–PCK-(\d+)/);
 assert(pck);
 for (let n = 1; n <= Number(pck[1]); n++) assert(spec.includes("### PCK-" + String(n).padStart(2, "0") + "："));

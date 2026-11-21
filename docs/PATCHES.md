@@ -42,20 +42,12 @@
 | 9 | 最新块缺行时保留其原文 | `blockSeqs.size===0` | 0.5.3 要求所有覆盖消息都在实际尾部 | 第 17、18 节 |
 | 10 | 完整前缀、摘要有效性和跳过块覆盖校验 | `buildView`、`buildAnchoredView`、pin helpers | `patches/view-safety.block.js`；普通与增量两条路径都检查 | 第 18 节 |
 | 11 | 默认开启 prompt_cache_key，保留显式三档设置 | `parsePromptCacheRouting` | 未设置/无效值回落 enabled；精确锚点、幂等检查 | 第 19 节 |
-| 12 | 图片看过一次后就折叠成一行占位说明，可按 ref 取回原图 | `async function shedWireImages(body,protocol,targetBytes,opts={}){`（块插在它前面）、pre-send 的 `shedEgressIfOverBudget` 调用 | `patches/image-retention.block.js`；`imageRetention`（默认开）、`imageRetentionKeepLastUser`（默认开） | 第 20 节 |
-| 13 | 首次上送按需压到 `imageRetentionMaxDim`（默认 1200），JPEG(q80) 与 PNG 两路取小 | 同一个块的 `biliRetentionShrinkOne`、`biliRetentionBackendSteps` | 按平台借宿主编码器：macOS sips、Windows PowerShell System.Drawing、其它 ImageMagick；上游 jimp 未安装时这是唯一可用的压缩路径 | 第 20 节 |
-| 14 | 两个压缩提示构建器的返回尾部追加恒定图像约定 | `}function buildCompressHybridSystemPrompt(`、`}function createContentStore(){` | `patches/image-convention.block.js`；`imagePrompt`（默认开） | 第 20 节 |
-| 15 | 折叠记账只在上游真正接收后发生 | `function noteSuccessfulForward(inp){` | 拒收/失败不算看过 | 第 20 节 |
-| 16 | 新增顶层配置键登记，避免启动警告 | `,"autoModeForge","imageRescale","guardrails","cacheKeepalive"]);` | imageRetention / imageRetentionKeepLastUser / imageRetentionMaxDim / imagePrompt / imageRescaleMaxDim | 第 20 节 |
-| 17 | bili Web UI「配置」页新增「图像」卡（四个开关 + 保存 + 恢复默认），中英词条一并补齐 | `function translate(locale,key2,vars){`、`<div class="card" id="summary-settings">`、`    function hydrateQuickConfig(cfg) {`、`            await putCfg(sq, { file: raw });` 那段的 `});` 之后、初始化调用点、两处 id 列表 | `patches/image-card.{markup,script,listeners}.block.js`；带哨兵，重复运行按整段替换或跳过 | 第 21 节 |
-| 18 | 压缩增长阈值（`compress.nudgeGrowthTokens`）的默认值改成 80000：内核 `defaultConfig` 的 floor/cap、Web UI 快速配置的默认值、中英文提示里的「内核默认 50000」一起对齐 | `growthFloor:5e4,growthCap:5e4`、`const NUDGE_DEFAULT = 50000, NUDGE_STEP = 5000`、`内核默认 50000`（zh）、`kernel default 50000`（en） | 只改缺省值，配置文件或环境变量里的显式值照旧优先；页面删掉该键即回落到 80000 | 第 22 节 |
-| 19 | 删掉上游熔断：不再按主机累计失败、不提前失败、不发 503 与 retry-after，连接类失败按普通失败交给 DSH 重试 | `var CIRCUIT_OPEN_AFTER=3;`、`function recordUpstreamCircuitFailure(url,error,viaProxy,detail){`、`function getOpenUpstreamCircuits(){`、`const circuitBlock=upstreamCircuitBlockReason(upstreamUrl);`、`const openCircuits=getOpenUpstreamCircuits();`、`/__bili/upstreams` 路由、`clearUpstreamAlertsForHost(...);recordUpstreamCircuitSuccess(upstreamUrl)`、`recordUpstreamCircuitFailure(...)` 整句 | 第 19 节；幂等判据是没有 `CIRCUIT_OPEN_AFTER` 与 `/__bili/upstreams`。保留 `classifyUpstreamFailure`、`describeUpstreamFailure`、`isFailFastUpstreamKind` 与 alerts | 第 25 节 |
-| 20 | 删掉客户端 shell 上的上游红框横幅、10 秒轮询与四个词条；页面里的连接失败提示改成读者能看懂的说法 | 客户端 bundle `dist/agent/dsh-native-client.js`：`var UPSTREAM_POLL_MS = 1e4;`、`function parseUpstreamHealth(raw)`、`const upstreamBanner = ...`、`ctx.slots.inject("shell.overlay", ...)` 那四行、`upstreams_label`/`upstreams_down_one`/`upstreams_down_many`/`upstream_retry_hint`（中英各一份） | `scripts/patch-bili-client.mjs`，由 `install.mjs` 合并客户端 bundle 前施加；幂等，二次运行打印 already removed | 第 25 节 |
-| 21 | 代理失败与流内联错误改成中文短句，英文诊断只进 detail 与日志；413 保留、其余 502，不再发 retry-after | `function buildProxyFailureResponse(msg,err2){`、`var TRANSPORT_FAILURE_LABELS={`、两处 `adapter.emitError(`、`upstream stream truncated (`、`ended before a completion event`、`[ACP] stream error:`、note 三元与“the follow-up request to the model failed”句 | 第 21 节，新增 `__biliFailureTextZh(msg,uf)`；<b>不能改</b> `[ACP] ... FAILED:` 里的 `FAILED`（吸收判定依赖它） | 第 25 节 |
-| 22 | 快照暂时缺行的有界等待/重渲染及预检错误口径；当前 request 的 kernel/post-processing guard 和重做计数落盘纠正 | `preflightCompressIfNeeded`、四协议 prepare、`maybeSnapshotView`、`recordNudgeObservation` | `patches/preflight.block.js` 可替换哨兵；live/插件标记/storage 模式与覆盖条件保留 | 第 26、28 节 |
-| 23 | 每条注入的压缩提醒 generation 只允许一次成功的模型折叠；零块可重试、partial 成功计入完成、同 generation 并发拒绝，旧调用不能清除新提醒的锁 | `storeUnpromptedGate` / `unpromptedGateOf`、`applyConfiguredCompression` | `patches/nudge-compress-wrapper.block.js`；自动 `preflightCompress` 不经过模型工具包装 | 第 32 节 |
-
-第 4 组依赖第 2、3 组，第 8 组依赖 pin，第 10 组升级第 4、8、9 组并同时检查普通与增量拼接点；按脚本顺序执行，所有步骤支持重复运行。
+| 12 | 已删除（0.7.5）：原来把看过的图片折叠成占位说明 | — | 不再有 `image-retention` 块；历史图片按上游行为重发 | 第 34 节 |
+| 13 | 已删除（0.7.5）：原来首次上送按长边上限本地压缩 | — | 上游 `imageRescale` 保持原样 | 第 34 节 |
+| 14 | 已删除（0.7.5）：原来在压缩提示尾部注入图像约定 | — | 不再有 `imagePrompt` | 第 34 节 |
+| 15 | 已删除（0.7.5）：原来按成功回执记账并改写工具/JSON 后续发送 | — | 不再有 `biliImageReceipt` | 第 34 节 |
+| 16 | 只登记五项 DSH 原生图片预算键 | `,"autoModeForge","imageRescale","guardrails","cacheKeepalive"]);` | `maxRequestImages` / `imageOffloadCountQuantum` / `requestImageMaxBytes` / `requestImagePixelBudget` / `maxRequestImageBytes` | 第 34 节 |
+| 17 | bili 配置页只保留五项预算数字 | 翻译、卡片、脚本、监听器、调用点、脏/禁用列表 | `patches/image-card.*.block.js`；无行为开关 | 第 34 节 |
 
 ### 0.3 上游没动的部分
 
@@ -497,6 +489,8 @@ function __biliForkTranscriptSource(session,store){
 
 ## 20. 图片只发一次与图像约定（0.6.0 起，B12–B16）
 
+> **0.7.5 已删除**：本节描述的折叠、压缩、约定与回执行为已在 2026-11-21 按用户要求全部删除；以下只保留实现历史，不得据此恢复。
+
 问题：模型请求是无状态的，每轮把整段对话重新发一遍；图片以 base64 内联，体积约为原文件的 4/3。被调查的一个表格排版会话里，45 次调用把请求体从 83.8 KB 抬到 1.51 MB，其中图片占 78%（6 张不重复截图各 78–288 KB）。缓存命中率 99.4%，token 花费很低，但请求体和带宽一轮都没省。
 
 上游的 `applyImageRescalePass` 本来能做降采样，但它依赖 `jimp`：`vendor/billion-context/package.json` 的 optionalDependencies 写着 `jimp 1.6.1`，实际从未安装，`loadJimp` 每次都落到 catch 分支打印 `image rescaling disabled for this process (originals pass through)`，所以 1663×1306 / 283 KB 的整页截图原样发出。这也是为什么不改上游常量：`IMAGE_RESCALE_DEFAULT_MAX_DIM` 从 1600 改成 1200 不会有任何效果，而要给这条链补上 jimp，还得同时改 5 个方言重建点里的 media_type/mimeType，否则会出现"标着 png 的 jpeg 字节"。
@@ -537,17 +531,16 @@ function __biliForkTranscriptSource(session,store){
 
 选恒定文案而不是"有图时才注入"，理由是缓存：`stampAnthropicSystemCacheControl` 把 `cache_control` 打在 system 的最后一块上，恒定文本落在缓存前缀里，稳态零成本；按条件注入会让整段 system 前缀每轮作废——`GENERATION_BOUNDARY_NOTE` 已经是这样一个潜在 miss 源，不再加第二个。代价是这两个构建器被 7 处内部压缩/摘要子调用复用，每次多约 200 token，可以接受。
 
-文案本身（用户逐字认可，改之前先问）：
+当前文案为追加在原提示尾部的简洁英文规则：
 
 ```text
-关于图像：能用文字或数据看到的信息，就不要通过看图获取——图片有体积和重传成本，且看过后不会一直保留。
-· 只有确实需要"看"（版面、配色、布局、图形细节）时才出图或读图。
-· 要看就一次看够：同一版面不要重复渲染；改动后先自查差异，确认必要再看。
-· 出图够判断即可，不要整页高分辨率；能裁剪就裁剪。
-· 图是临时的：你看过之后，后续请求里它会被替换成一行占位说明，只有你写下来的文字会留下。看完请把事情写成文字（结论、差异、待办）；确实需要回看时，用 acp_read_original_image("<ref>") 按引用取回。
+Image use rules:
+- Prefer existing text, structured data, tool output, and recorded conclusions. Inspect an image only when visual evidence is required.
+- Read each image once and inspect only the detail needed to answer. Do not re-read or re-render the same view without a concrete reason.
+- Use the smallest useful image or crop. After reading, record the conclusion in text. Retrieve an image by ref only to verify a specific unresolved visual detail.
 ```
 
-中文以 \uXXXX 转义写进块文件：dist 以 latin1 读写，非 ASCII 字面量会被打坏，补丁脚本对块内容做了非 ASCII 检查并在命中时直接抛错。
+块文件保持 ASCII：dist 以 latin1 读写，非 ASCII 字面量会被打坏，补丁脚本对块内容做了非 ASCII 检查并在命中时直接抛错。
 
 ### 20.5 配置、回滚与验证（B16）
 
@@ -558,10 +551,13 @@ function __biliForkTranscriptSource(session,store){
 | `imageRetentionMaxDim` / `BILI_IMAGE_RETENTION_MAX_DIM` | 1200 | 首传压缩的长边上限，最小 128 |
 | `imagePrompt` / `BILI_IMAGE_PROMPT` | 开 | 系统提示尾部的图像约定 |
 | `imageRescaleMaxDim` | 未设 | 上游 jimp 那条链的键，当前无效果，登记它是为了让配置不报未知键 |
+| `requestImageMaxBytes` | 153600 | `llm-pi-ai` 每张图片的请求编码目标（150 KiB） |
+| `requestImagePixelBudget` | 1440000 | `llm-pi-ai` 每张图片的像素预算 |
+| `maxRequestImageBytes` | 2097152 | `llm-pi-ai` 单次请求图片总上限（2 MiB） |
 
 环境变量里 `0`/`false`/`off` 视为关闭，优先级高于配置文件。五个键须同时登记进代理和 native 宿主构建的 `KNOWN_TOP_LEVEL_KEYS`。代理由步骤 16 重打；宿主由 `scripts/patch-bili-agent.mjs` 在 installer 的候选阶段补齐，兼容已打 WS 补丁但漏登记配置键的旧构建，重复应用不变，缺失或重复锚点拒绝写入。2026-11-15 发现此前仅代理登记、宿主仍误报警，已按 B16/IMG-08 补齐。
 
-`check-upstream-ux.mjs` 从两个实际构建提取白名单和 `warnUnknownTopLevelKeys` 执行：五个合法键不告警，拼错的键仍告警且相同告警只记录一次；另验证宿主迁移只增加这五键、其余字节保持，以及重复应用和坏锚点拒绝。宿主检查由 installer 替换前和 wrapper 的完整产物检查执行，后续构建与合并不能只核对代理端。
+`check-upstream-ux.mjs` 从两个实际构建提取白名单和 `warnUnknownTopLevelKeys` 执行：图像配置键不告警，拼错的键仍告警且相同告警只记录一次；另验证宿主迁移只增加这些键、其余字节保持，以及重复应用和坏锚点拒绝。宿主检查由 installer 替换前和 wrapper 的完整产物检查执行，后续构建与合并不能只核对代理端。
 
 `node scripts/check-image-retention.mjs [dist]` 是离线检查：结构上核对块已插入、折叠在体积削减之前、记账挂在 `noteSuccessfulForward`、两处 prompt seam、配置键登记；行为上把两个块注入 shim 后跑 11 组用例——首见不折叠 / 记账后再见折叠、上传豁免、关掉豁免则折、tool_result 里的图折叠、google 的裸 `inlineData`（夹具里不含 "base64" 字样）、openai 的 image_url、responses 的 function_call_output、总开关、三平台后端顺序与命令行（sips、PowerShell、ImageMagick 各自的参数、只缩不放、引号转义）、本机后端的真实压缩（自造 1500×1000 PNG）、约定文本的开头/关键词/稳定性/关闭。Windows 的端到端压缩需要 Windows 主机，其它平台跳过；不联网、不调模型。
 
@@ -573,6 +569,8 @@ function __biliForkTranscriptSource(session,store){
 - 用户明确不考虑"新开会话"作为解决方案，所以这里的默认值是"老会话里也立刻生效"。
 
 ## 21. bili 配置页里的图像卡（0.6.4，B17）
+
+> **0.7.5 已删除**：本节描述的折叠、压缩、约定与回执行为已在 2026-11-21 按用户要求全部删除；以下只保留实现历史，不得据此恢复。
 
 图像那几个开关原来只能改配置文件或环境变量。0.6.4 把它做成 bili Web UI「配置」页里的一张卡：内嵌 iframe 里点「配置」，快速配置卡下面就是「图像」，四个控件直接编辑同一份 `billion-context.json`，保存复用配置页原有的 `PUT /__bili/config`。
 
@@ -881,3 +879,28 @@ accelerator 只为已配置的 provider 发出 `x-accel-compress`；其他渠道
 B1 现将缺失、空和未知指令统一收敛为 `off`。显式 `gzip` / `br` 仍指定算法，显式 `on` 才允许读取全局算法；指定中转渠道的 I4 默认值与 accelerator 发出的 `br` 指令不变。补丁器只接受并迁移已知的上一版 B1 policy helper，其他 helper 漂移继续报错。
 
 `check-outbound-encoding.mjs` 使用隔离的全局 gzip 配置和真实 localhost 接收器，验证 object、Headers、tuple 三种头形态下缺失/空/未知指令均原样发送；同时回归显式 off/gzip/br/on、回执、重发，并从旧 helper 构建一次候选、验证迁移后字节幂等。完整结果见[未指定压缩策略审计](audits/2026-11-20-unspecified-compression-off.md)。
+
+## 34. 2026-11-21：删除自加图片处理（0.7.5）
+
+用户明确要求「把我们自己加的这个图片处理的功能全部都删掉吧」，只保留 DSH 原生的图片预算参数注入。本轮删除的是本插件在 0.6.x/0.7.x 自行添加的行为，不是上游 billion-context 的功能：
+
+- 删除 B12（看过折叠）、B13（首次上送本地压缩）、B14（系统提示图像约定）、B15（成功回执与工具/JSON 后续发送改写）以及 B17 里的行为开关。`patches/image-retention.block.js`、`image-convention.block.js`、`image-egress.block.js` 删除；`scripts/patch-bili-build.mjs` 的步骤 12–15 删除。
+- 保留 B1 的明文请求头所有权修复：它原本和 B15 一起改，但解决的是压缩请求头复用，不是图片处理；retry 与辅助发送继续重置明文头并重签。
+- 保留 B16，但只登记五项 DSH 原生预算键：`maxRequestImages`、`imageOffloadCountQuantum`、`requestImageMaxBytes`、`requestImagePixelBudget`、`maxRequestImageBytes`。`imageRescaleMaxDim`、`imageRetention`、`imageRetentionKeepLastUser`、`imageRetentionMaxDim`、`imagePrompt` 不再登记。
+- 保留 B17 的预算卡，只显示和编辑五项数字；旧配置里的四个行为键与 `imageRescaleMaxDim` 由「恢复默认」删除。
+- 删除 IMG-01–IMG-09、IMG-11 与对应检查 `check-image-retention.mjs`、`check-host-image-fallback.mjs`；保留 IMG-10/IMG-10a 和 `check-image-budget.mjs`。
+- `lib/index.js` 改用 `biliConfigPath` / `readBiliConfig`；`scripts/patch-bili-agent.mjs` 只导出这个通用读取器，并拒绝仍含 `readBiliImageConfig` 的旧 native 构建，避免把 0.7.4 的宿主恢复逻辑带回来。
+- 版本升到 0.7.5；上游固定来源仍是 `548e396022b9391e28a3c9061560be297779b8e8`，vendor 从该提交的干净构建重打，不采用 npm 上由 `6a641f378` 构建的 0.1.216 包。
+
+验收：`check-image-card.mjs` 只覆盖五项预算默认值、边界、坏配置、保存与恢复默认，并断言折叠/尺寸/约定控件不存在；`check-upstream-ux.mjs` 只认五项键、未知键仍告警；mock E2E 删除图片回执/并发场景。完整构建哈希与不变量见本轮审计记录。
+
+## 35. 2026-11-22：PI 图片预算逐路由写入（IMG-10a）
+
+实机会话复核（session-38607dba…，72 次请求全部完成）发现 `llm-pi-ai` 的图片预算几乎没落到位：本次实际使用的 `test` 路由按 DSH 默认值 `requestImageMaxBytes=1 MiB`、`requestImagePixelBudget=4 MiB` 运行，用户自填的 `maxRequestImageBytes=32 MiB` 也没被覆盖。宿主侧 `maxImagesPerRequest=20`、`imageOffloadCountQuantum=10` 已写入，说明写入链路本身可用。
+
+根因在 `lib/defaults.js` 的 `flush()`：它每次只调用一次 `settings.describe()`，然后对每条路由逐个 `mutate(row.ns, ops, row.revision)`。`llm-pi-ai` 下所有 provider profile 共用一个命名空间，第一次写入成功就把 revision 加一，之后每条路由拿的都是过期 revision，必然 `SETTINGS_CONFLICT`；而冲突计数在整个 `flush` 内累加，`++conflicts > 3` 直接抛出，整轮放弃。结果是每次 `flush` 只写进一个 provider，靠后续 settings 事件才轮到下一个——真机上先写了 `amazon-bedrock`，两分半钟后才写 `ant-ling`，`test` 与 `ylinkimi` 始终没有。日志证据：`desktop-next.log` 中 `settings namespace "llm-pi-ai" changed since it was read (expected revision 0, now 1)` 与 `(expected revision 1, now 2)`。
+
+修复分两部分。其一，`flush()` 在每次成功写入后重新 `describe()`，并入 `for (;;)` 内层循环：只有 `SETTINGS_CONFLICT` 且当前路由重试未超过 3 次时才重读快照重试当前路由，其他错误和其他路由不再被牵连；同一命名空间的多条路由可以在一次 `flush` 内全部写完。其二，`piImageBudgetOps` 只填写用户已建档的 provider profile：`route.settingsPath[1]` 在 `row.user.providers` 里没有对应档案时返回空操作。`llm-pi-ai` 的可配置路由目录包含全部内置 catalog provider（真机 30 余个），而 DSH 的模型设置页把「`value` 上存在该 provider 路径」当作已配置（`ui-settings-models` 的 `configured` 派生），替没人配置的 provider 建档会一次性把它们全部显示为已配置。用户之后新增 provider 时，`settings/document-updated` 会再触发一次 `flush` 补上。
+
+`check-image-budget.mjs` 增加三条单元检查（未配置 catalog 路由不写入、坏 profile 失败关闭、PI 默认值需要档案）并把集成场景改为同命名空间五条 provider 路由：模拟 `describe()` 返回快照、`mutate` 对过期 revision 抛 `SETTINGS_CONFLICT`、每次写入使 revision +1。换回旧 `flush` 时该场景以真机同款报错超时失败，修复后 16 项全部通过。完整证据见[PI 图片预算路由冲突审计](audits/2026-11-22-image-budget-route-conflict.md)。
+

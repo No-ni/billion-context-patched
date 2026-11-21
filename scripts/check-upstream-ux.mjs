@@ -53,7 +53,7 @@ const classSource = (text, name) => {
   return uniqueBlockSpan(text, name, matches[0][0]).block;
 };
 
-const IMAGE_CONFIG_KEYS = ["imageRescaleMaxDim", "imageRetention", "imageRetentionKeepLastUser", "imageRetentionMaxDim", "imagePrompt", "maxRequestImages", "imageOffloadCountQuantum"];
+const IMAGE_CONFIG_KEYS = ["maxRequestImages", "imageOffloadCountQuantum", "requestImageMaxBytes", "requestImagePixelBudget", "maxRequestImageBytes"];
 
 const assertImageConfigKeys = (text, what) => {
   const matches = [...text.matchAll(/\bKNOWN_TOP_LEVEL_KEYS=new Set\((\[[^\]]*\])\)/g)];
@@ -64,26 +64,23 @@ const assertImageConfigKeys = (text, what) => {
     COMPRESS_SETTING_FIELDS: new Set(), INERT_REMOVED_COMPRESS_KEYS: [],
     log: (level, message) => warnings.push({ level, message }),
   });
-  warn(Object.freeze({ imageRescaleMaxDim: 1200, imageRetention: false,
-    imageRetentionKeepLastUser: false, imageRetentionMaxDim: 900, imagePrompt: false,
-    maxRequestImages: 20, imageOffloadCountQuantum: 10 }));
-  assert.equal(warnings.length, 0, what + " must accept all five image config keys without warnings");
+  warn(Object.freeze({ maxRequestImages: 20, imageOffloadCountQuantum: 10,
+    requestImageMaxBytes: 153600, requestImagePixelBudget: 1440000, maxRequestImageBytes: 2097152 }));
+  assert.equal(warnings.length, 0, what + " must accept all image budget keys without warnings");
   warn({ imageRetentoin: false });
   assert.equal(warnings.length, 1, what + " must still warn about unknown config keys");
   assert.equal(warnings[0].level, "warn");
   assert.match(warnings[0].message, /unknown top-level config key\(s\): imageRetentoin/);
   warn({ imageRetentoin: false });
   assert.equal(warnings.length, 1, what + " must retain warning deduplication");
-  console.log("  OK " + what + " accepts image config keys and still warns once for a typo");
+  console.log("  OK " + what + " accepts the image budget keys and still warns once for a typo");
   return { initializer: matches[0][0], keys };
 };
 
-const assertProxyImageConfigMigration = (text, config) => {
+const assertProxyConfigMigration = (text, config) => {
   const current = config.initializer;
-  const oldKeys = config.keys.filter(key => !["maxRequestImages", "imageOffloadCountQuantum"].includes(key));
   const originalKeys = config.keys.filter(key => !IMAGE_CONFIG_KEYS.includes(key));
   const fixtures = [
-    ["old image registry", "KNOWN_TOP_LEVEL_KEYS=new Set(" + JSON.stringify(oldKeys) + ")"],
     ["original registry", "KNOWN_TOP_LEVEL_KEYS=new Set(" + JSON.stringify(originalKeys) + ")"],
   ];
   const dir = mkdtempSync(join(tmpdir(), "bili-image-config-"));
@@ -101,13 +98,13 @@ const assertProxyImageConfigMigration = (text, config) => {
       assert.equal(result.status, 0, label + " second application failed: " + result.stderr);
       assert.equal(readFileSync(path, "latin1"), migrated, label + " migration must be idempotent");
     }
-    const unknown = text.replace(current, current.replace('"imageOffloadCountQuantum"', '"futureImageBudget"'));
+    const unknown = text.replace(current, current.replace('"maxRequestImages"', '"futureImageBudget"'));
     writeFileSync(path, unknown, "latin1");
     const result = run();
     assert.notEqual(result.status, 0, "unknown proxy registry must be rejected");
-    assert.match(result.stderr, /image config keys: expected one original or patched anchor/);
+    assert.match(result.stderr, /image budget config keys/);
     assert.equal(readFileSync(path, "latin1"), unknown, "a rejected proxy registry must remain unchanged");
-    console.log("  OK proxy image config registry upgrades old/original forms, is idempotent and rejects unknown forms");
+    console.log("  OK proxy image budget registry upgrades the original form, is idempotent and rejects unknown forms");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -525,7 +522,7 @@ const assertResponsesWsSink = (text) => {
 export const assertDistUpstreamUx = (distPath) => {
   const text = readFileSync(distPath, "latin1");
   const config = assertImageConfigKeys(text, "proxy");
-  assertProxyImageConfigMigration(text, config);
+  assertProxyConfigMigration(text, config);
   expectAbsent(text, [
     "CIRCUIT_OPEN_AFTER", "circuitProbeCooldownMs", "MAX_CIRCUITS",
     "upstreamCircuitBlockReason", "upstreamCircuitLastFailureKind",
@@ -597,13 +594,10 @@ export const assertAgentUpstreamUx = (agentPath) => {
   const previous = text.replace(config.initializer,
     "KNOWN_TOP_LEVEL_KEYS=new Set(" + JSON.stringify(config.keys.filter(key => !IMAGE_CONFIG_KEYS.includes(key))) + ")");
   assert.equal(patchBiliAgentBundle(previous).text, text, "native config migration must preserve every other byte");
-  const oldImageKeys = config.keys.filter(key => !["maxRequestImages", "imageOffloadCountQuantum"].includes(key));
-  const previousImageRegistry = text.replace(config.initializer,
-    "KNOWN_TOP_LEVEL_KEYS=new Set(" + JSON.stringify(oldImageKeys) + ")");
-  assert.equal(patchBiliAgentBundle(previousImageRegistry).text, text, "native legacy image config migration must preserve every other byte");
-  assert.throws(() => patchBiliAgentBundle(text + "\n" + config.initializer + ";"), /native image config keys/);
+  assert.throws(() => patchBiliAgentBundle(text + "\n" + config.initializer + ";"), /native image budget config keys/);
+  assert.throws(() => patchBiliAgentBundle(text.replace("readBiliConfig", "readBiliImageConfig")), /removed image patches/);
   assert.throws(() => patchBiliAgentBundle(text.replace(config.initializer,
-    config.initializer.replace('"cacheKeepalive"', '"futureCacheKeepalive"'))), /native image config keys/);
+    config.initializer.replace('"cacheKeepalive"', '"futureCacheKeepalive"'))), /native image budget config keys/);
   expectPresent(text, NATIVE_WS_HEADERS_MARKERS, "native agent bundle");
   assert.equal(patchBiliAgentBundle(text).text, text, "published native agent is not the idempotent patched result");
   const source = functionSource(text, "mergeWsInitHeaders");

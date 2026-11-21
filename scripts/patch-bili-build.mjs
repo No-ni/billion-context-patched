@@ -444,125 +444,27 @@ for (const [before, after] of cacheUiChanges) {
     replaceOnce("cache-key-ui", before, after);
   }
 }
-// ── 12. image retention and the image convention ────────────────────────────
-// A picture is re-sent on every later turn because the whole transcript goes
-// out again each time. After one successful look the pass replaces it with a
-// one-line note (acp_read_original_image brings the original back by ref). The
-// same pass shrinks what still leaves, through the host's own encoder: sips on
-// macOS, PowerShell's System.Drawing on Windows, ImageMagick on PATH. The
-// convention paragraph rides on the tail of the standing compression prompt:
-// that text is inside the cached prefix's last block, so a constant paragraph
-// costs nothing after the first turn.
-//
-// The block sits between two sentinels so a later revision of it replaces the
-// old text in place instead of being skipped as "already patched".
-const IMAGE_BLOCK_START = "// <bili-image-blocks begin>";
-const IMAGE_BLOCK_END = "// <bili-image-blocks end>";
-const IMAGE_BLOCK_TEXT = [
-  readFileSync(join(here, "patches", "image-convention.block.js"), "utf8"),
-  readFileSync(join(here, "patches", "image-retention.block.js"), "utf8")
-].map((block) => block.replace(/\s+$/, "")).join("\n");
-if (/[^\x00-\x7e]/.test(IMAGE_BLOCK_TEXT)) {
-  throw new Error("image blocks: non-ASCII bytes would be mangled by the latin1 write; keep them escaped");
-}
-const IMAGE_BLOCK_BODY = IMAGE_BLOCK_START + "\n" + IMAGE_BLOCK_TEXT + "\n" + IMAGE_BLOCK_END;
-const IMAGE_HELPERS_MARK = "function biliRetentionApply(";
-const IMAGE_CONVENTION_LEGACY_START = "// --- image convention: a picture is expensive, look once";
-const IMAGE_LEGACY_START = "// --- image retention: a picture is worth one look";
-const SHED_ANCHOR = "async function shedWireImages(body,protocol,targetBytes,opts={}){";
-{
-  const startAt = text.indexOf(IMAGE_BLOCK_START);
-  const endAt = text.indexOf(IMAGE_BLOCK_END);
-  if (startAt >= 0 && endAt > startAt) {
-    const current = text.slice(startAt, endAt + IMAGE_BLOCK_END.length);
-    if (current === IMAGE_BLOCK_BODY) {
-      console.log("image helpers: already patched");
-    } else {
-      text = text.slice(0, startAt) + IMAGE_BLOCK_BODY + text.slice(endAt + IMAGE_BLOCK_END.length);
-      changed = true;
-      console.log("image helpers: updated");
-    }
-  } else if (text.includes(IMAGE_HELPERS_MARK)) {
-    const shedAt = text.indexOf(SHED_ANCHOR);
-    const starts = [IMAGE_CONVENTION_LEGACY_START, IMAGE_LEGACY_START]
-      .map((marker) => text.indexOf(marker))
-      .filter((at) => at >= 0);
-    if (starts.length === 0 || shedAt < 0) {
-      throw new Error("image helpers: a block without sentinels is present but its bounds were not found");
-    }
-    const legacyAt = Math.min(...starts);
-    const legacySlice = text.slice(legacyAt, shedAt);
-    if (legacySlice.split(IMAGE_HELPERS_MARK).length !== 2) {
-      throw new Error("image helpers: the legacy bounds do not wrap exactly one retention block");
-    }
-    text = text.slice(0, legacyAt) + IMAGE_BLOCK_BODY + "\n" + text.slice(shedAt);
-    changed = true;
-    console.log("image helpers: updated (sentinels added around the legacy block)");
-  } else {
-    replaceOnce("image helpers", SHED_ANCHOR, IMAGE_BLOCK_BODY + "\n" + SHED_ANCHOR);
-    console.log("image helpers: patched");
-  }
-}
-// ── 13. the convention rides on both standing-prompt builders ───────────────
-// Two independent section arrays feed two builders; responses picks between them
-// per turn, so both tails are appended (after applySectionOverrides, where a
-// user's section overrides cannot drop it).
-const PROMPT_SEAMS = [
-  "}function buildCompressHybridSystemPrompt(prompts=defaultPrompts,sections){",
-  "}function createContentStore(){return{version:1,byHash:{},byRef:{}}}"
-];
-for (const seam of PROMPT_SEAMS) {
-  const withConvention = "+biliImageConventionText()" + seam;
-  if (text.includes(withConvention)) {
-    console.log("image prompt: already patched");
-    continue;
-  }
-  replaceOnce("image prompt", seam, withConvention);
-  console.log("image prompt: patched");
-}
-// ── 14. retention runs before the size shedder ──────────────────────────────
-// Folding first is what makes the budget shedder see the real payload; it stays
-// in place for the images that are still leaving.
-const SHED_CALL = 'const shed=await shedEgressIfOverBudget(wireBody,prepared.protocol,{sessionId:prepared.session.id,session:prepared.session,log:log2,phase:"pre-send"});';
-const RETENTION_CALL = 'const biliImages=await biliRetentionApply(wireBody,prepared.protocol,prepared.session,{phase:"pre-send",log:log2,attempt:biliImageAttempt});if(biliImages.changed){wireBody=biliImages.body;outboundCopyRewritten=true;invalidateSeparatorOwnership();try{log2("info","[image-retention] folded "+biliImages.folded+" shrunk "+biliImages.shrunk)}catch(err4){}}';
-if (text.includes(RETENTION_CALL)) {
-  console.log("image retention call: already patched");
-} else {
-  replaceOnce("image retention call", SHED_CALL, RETENTION_CALL + SHED_CALL);
-  console.log("image retention call: patched");
-}
-// ── 15. a look only counts once the request made it upstream ────────────────
-const FORWARD_ANCHOR = "function noteSuccessfulForward(inp){try{armInternal(inp)}";
-const FORWARD_PATCHED = "function noteSuccessfulForward(inp){try{biliRetentionCommit(inp&&inp.sessionId,inp&&inp.biliImageReceipt)}catch(err3){}try{armInternal(inp)}";
-if (text.includes(FORWARD_PATCHED)) {
-  console.log("image retention commit: already patched");
-} else {
-  replaceOnce("image retention commit", FORWARD_ANCHOR, FORWARD_PATCHED);
-  console.log("image retention commit: patched");
-}
-// ── 16. the new knobs are top-level config keys ─────────────────────────────
+// B12–B15 were removed on 2026-11-21 at the user's request. The image fold
+// pass, the host shrink step, the image convention paragraph and the
+// per-request image receipts no longer exist; only the DSH-native image budget
+// keys remain, registered in step 16 below.
+// ── 16. the DSH-native image budget knobs are top-level config keys ────
+// These five keys belong to the host's own pi-ai request projection, not to a
+// bili image transform. Registering them keeps startup from warning about a
+// supported setting; no other image key is added here.
 const CONFIG_KEYS_ANCHOR = ',"autoModeForge","imageRescale","guardrails","cacheKeepalive","egressTransforms"]);';
-const CONFIG_KEYS_PREVIOUS = ',"autoModeForge","imageRescale","imageRescaleMaxDim","imageRetention","imageRetentionKeepLastUser","imageRetentionMaxDim","imagePrompt","guardrails","cacheKeepalive","egressTransforms"]);';
-const CONFIG_KEYS_PATCHED = ',"autoModeForge","imageRescale","imageRescaleMaxDim","imageRetention","imageRetentionKeepLastUser","imageRetentionMaxDim","imagePrompt","maxRequestImages","imageOffloadCountQuantum","guardrails","cacheKeepalive","egressTransforms"]);';
-const CONFIG_KEYS_ANCHORS = [CONFIG_KEYS_ANCHOR, CONFIG_KEYS_PREVIOUS, CONFIG_KEYS_PATCHED];
-const configKeyCounts = CONFIG_KEYS_ANCHORS.map(anchor => text.split(anchor).length - 1);
-if (configKeyCounts.reduce((sum, count) => sum + count, 0) !== 1) {
-  throw new Error("image config keys: expected one original or patched anchor — re-derive the patch");
-}
-if (configKeyCounts[2] === 1) {
-  console.log("image config keys: already patched");
+const CONFIG_KEYS_PATCHED = ',"autoModeForge","imageRescale","maxRequestImages","imageOffloadCountQuantum","requestImageMaxBytes","requestImagePixelBudget","maxRequestImageBytes","guardrails","cacheKeepalive","egressTransforms"]);';
+if (text.includes(CONFIG_KEYS_PATCHED)) {
+  console.log("image budget config keys: already patched");
 } else {
-  text = text.replace(CONFIG_KEYS_ANCHORS[configKeyCounts.indexOf(1)], CONFIG_KEYS_PATCHED);
-  changed = true;
-  console.log("image config keys: patched");
+  replaceOnce("image budget config keys", CONFIG_KEYS_ANCHOR, CONFIG_KEYS_PATCHED);
+  console.log("image budget config keys: patched");
 }
-// ── 17. the image card in the config page ───────────────────────────────────
-// A picture leaves once, and these four keys are the ones people reach for
-// while watching a body grow. The config page already edits this exact file,
-// so the card edits the same draft the raw editor holds: one Save, one file,
-// and the keys stay visible there like any other. Each region sits between
-// sentinels so a later revision of the card replaces the old text in place
-// instead of being skipped as "already patched".
+// ── 17. the image budget card in the config page ──────────────────────────
+// Only the five DSH-native budget numbers remain. The card edits the same
+// config draft the raw editor holds: one Save, one file. Each region sits
+// between sentinels so a later revision of the card replaces the old text in
+// place instead of being skipped as "already patched".
 const CARD_MARKUP = readFileSync(join(here, "patches", "image-card.markup.block.js"), "utf8").replace(/\s+$/, "");
 const CARD_SCRIPT = readFileSync(join(here, "patches", "image-card.script.block.js"), "utf8").replace(/\s+$/, "");
 const CARD_LISTENERS = readFileSync(join(here, "patches", "image-card.listeners.block.js"), "utf8").replace(/\s+$/, "");
@@ -575,42 +477,36 @@ for (const [name, block] of [["markup", CARD_MARKUP], ["script", CARD_SCRIPT], [
 // page script uses is serialized out of it when a page renders, so adding the
 // keys there covers both the rendered markup and the script side.
 const IMAGE_CARD_COPY_ZH = {
-  "cfg.image": "图像",
-  "cfg.image_desc": "图片在会话里只上传一次：看过之后，后续请求把它换成一行占位说明，原图仍可用 acp_read_original_image 按引用取回；第一次上送时，超过上限就先压小。这几项写进同一个配置文件，保存后对下一条请求生效。",
-  "cfg.image_retention": "看过的图片不再重传",
-  "cfg.image_retention_hint": "关闭后，历史里的图片每轮都整张重传，请求体只增不减。",
-  "cfg.image_keep_last": "保留最新一条消息里的图片",
-  "cfg.image_keep_last_hint": "当轮还能直接看；工具结果里的截图不受这条影响。",
-  "cfg.image_max_dim": "上送时的最长边（像素）",
-  "cfg.image_max_dim_hint": "低于 128 会被拒绝；只缩不放，压不到原图八成以下就按原样发送。",
-  "cfg.image_dim_invalid": "请输入不小于 128 的整数",
+  "cfg.image": "图像预算",
+  "cfg.image_desc": "控制每次请求携带的图片体积、像素和数量。这些参数写入 DSH 原生设置，保存后对下一条请求生效，停用本插件后仍然保留。",
+  "cfg.image_request_kb": "每张图片请求目标（KiB）",
+  "cfg.image_request_kb_hint": "默认 150 KiB；DSH 会优先使用 JPEG 或 WebP 等更紧凑格式。",
+  "cfg.image_total_kb": "单次请求图片总上限（KiB）",
+  "cfg.image_total_kb_hint": "默认 2048 KiB；超出后宿主优先退役较早图片。",
+  "cfg.image_pixel_budget": "每张图片像素预算",
+  "cfg.image_pixel_budget_hint": "默认 1440000 像素，约等于 1200 像素长边级别；不会放大图片。",
   "cfg.image_max_request": "每条请求最多保留的图片数",
   "cfg.image_max_request_hint": "默认 20 张；超过后宿主会把最早的图片改成占位说明，避免原始请求体持续变大。",
   "cfg.image_offload_quantum": "每次退役的图片数",
   "cfg.image_offload_quantum_hint": "默认 10 张；达到上限时按这个数量逐批退役，不能大于图片上限。",
   "cfg.image_budget_invalid": "请输入正整数，且每次退役数量不能大于图片上限",
-  "cfg.image_prompt": "在系统提示里提醒模型少看图",
-  "cfg.image_prompt_hint": "追加一段图像使用约定：先问文字与数据，能不看图就不看，看过就把结论写下来。",
   "cfg.image_reset": "恢复默认",
   "cfg.image_restored": "已恢复默认值，记得保存"
 };
 const IMAGE_CARD_COPY_EN = {
-  "cfg.image": "Image",
-  "cfg.image_desc": "A picture is uploaded once per session: once it has been looked at, later requests carry a one-line note instead, and acp_read_original_image brings the original back by ref. Anything over the limit is shrunk before its first upload. These keys live in the same config file and apply to the next request after saving.",
-  "cfg.image_retention": "Do not resend images already seen",
-  "cfg.image_retention_hint": "Turned off, every historical image goes out in full on every turn and the request body only grows.",
-  "cfg.image_keep_last": "Keep the images in the latest message",
-  "cfg.image_keep_last_hint": "They stay visible for this turn; screenshots from tool results are not affected.",
-  "cfg.image_max_dim": "Longest side on upload (px)",
-  "cfg.image_max_dim_hint": "Values below 128 are rejected; it only shrinks, and sends the original when it cannot get under 80 percent.",
-  "cfg.image_dim_invalid": "Enter a whole number of at least 128",
+  "cfg.image": "Image budget",
+  "cfg.image_desc": "Controls how much image data each request carries: bytes, pixels and count. These keys live in DSH's native settings and apply to the next request after saving; they stay in effect when this plugin is disabled.",
+  "cfg.image_request_kb": "Per-image request target (KiB)",
+  "cfg.image_request_kb_hint": "Defaults to 150 KiB; DSH prefers compact JPEG or WebP output.",
+  "cfg.image_total_kb": "Total image cap per request (KiB)",
+  "cfg.image_total_kb_hint": "Defaults to 2048 KiB; older images are offloaded first when exceeded.",
+  "cfg.image_pixel_budget": "Pixels per image",
+  "cfg.image_pixel_budget_hint": "Defaults to 1440000 pixels, roughly a 1200 px long edge; images are never enlarged.",
   "cfg.image_max_request": "Maximum images kept per request",
   "cfg.image_max_request_hint": "Defaults to 20. Above the limit, the host replaces the oldest images with placeholders so the original request body cannot keep growing.",
   "cfg.image_offload_quantum": "Images retired per step",
   "cfg.image_offload_quantum_hint": "Defaults to 10. Images are retired in batches at the limit; this cannot exceed the image limit.",
   "cfg.image_budget_invalid": "Enter positive whole numbers; the retirement count cannot exceed the image limit",
-  "cfg.image_prompt": "Remind the model not to look at images",
-  "cfg.image_prompt_hint": "Appends an image convention: ask for text and data first, skip the picture when it can, and write the conclusion down once seen.",
   "cfg.image_reset": "Restore defaults",
   "cfg.image_restored": "Defaults restored; remember to save"
 };
@@ -996,23 +892,12 @@ editFunction("WS local admission and transport errors", "errorFrame", body => ed
   'function errorFrame(code,message,status=400){const info=status===413||status>=500?__biliStreamErrorInfo(message):{message};return JSON.stringify({type:"error",status,error:{type:"invalid_request_error",code,...info}})}'));
 console.log("Chinese stream, loop and WS error sinks: patched");
 
-// An opaque attempt belongs to this forward only. Apply before upstream shed;
-// Finalize against the final plaintext after every transform; commit the same
-// receipt only after an OK upstream response. Retries cannot borrow one another.
-const IMAGE_EGRESS_EDITS = [
-  ["image request ownership", "let wireBody=body;let compatRoles=", "let wireBody=body;const biliImageAttempt={};let biliImageReceipt;let compatRoles="],
-  ["image initial finalization", "applyResign(headers,wireBody)", "biliImageReceipt=prepared&&!prepared.sidePassthrough?biliRetentionFinalize(wireBody,prepared.protocol,prepared.session,biliImageAttempt):void 0;applyResign(headers,wireBody)"],
-  ["image successful initial forward", "noteSuccessfulForward({sessionId:prepared.session.id,protocol:", "noteSuccessfulForward({sessionId:prepared.session.id,biliImageReceipt,protocol:"],
-  ["loop image attempt", "let wireBodyStr=scrubLoneSurrogateEscapesOnJson(JSON.stringify(wireObj));let wireShedRewrote=false;", "let wireBodyStr=scrubLoneSurrogateEscapesOnJson(JSON.stringify(wireObj));let wireShedRewrote=false;const biliLoopImageAttempt={};if(ctx.protocol){const images=await biliRetentionApply(wireBodyStr,ctx.protocol,ctx.session,{phase:\"loop\",log:(level,msg)=>log(level,`[acp-loop] ${msg}`),attempt:biliLoopImageAttempt});if(images.changed){wireBodyStr=images.body;wireShedRewrote=true}}"],
-  ["loop image finalization", "requestOptions.resign?.(requestOptions.headers,wireBodyStr);const wireArr=", "const biliLoopImageReceipt=ctx.protocol?biliRetentionFinalize(wireBodyStr,ctx.protocol,ctx.session,biliLoopImageAttempt):void 0;requestOptions.resign?.(requestOptions.headers,wireBodyStr);const wireArr="],
-  ["loop image successful forward", "const upstreamSend=await throttledSend;noteUpstreamThrottleResolved(", "const upstreamSend=await throttledSend;biliRetentionCommit(ctx.session.id,biliLoopImageReceipt);noteUpstreamThrottleResolved("],
-];
-for (const [label, old, next] of IMAGE_EGRESS_EDITS) {
-  if (!text.includes(next)) replaceOnce(label, old, next);
-}
+// A retry reuses a fresh plaintext body. A prior attempt may have written its
+// compressed header onto the shared object, so recover the plaintext headers
+// before the transform runs; the signature still covers the actual bytes.
 const RETRY_OLD = 'const finalizeEgress=async variant=>{const transformed=await runEgress(variant,"retry",headers);applyResign(headers,transformed);return v1Wrap(transformed)};';
-const RETRY_NEW = 'const finalizeEgress=async variant=>{biliImageReceipt=void 0;headers=__biliPlaintextHeaders(headers);let finalBody=variant;if(prepared&&!prepared.sidePassthrough&&prepared.protocol&&typeof finalBody==="string"){const images=await biliRetentionApply(finalBody,prepared.protocol,prepared.session,{phase:"retry",log:log2,attempt:biliImageAttempt});finalBody=images.body;const shed=await shedEgressIfOverBudget(finalBody,prepared.protocol,{sessionId:prepared.session.id,session:prepared.session,log:log2,phase:"retry"});finalBody=shed.body;const cap=prepared.session.stats.imageCountCaps?.[normalizeUpstreamOrigin(upstreamUrl)];if(typeof cap==="number"&&cap>0)finalBody=(await shedWireImagesToCount(finalBody,prepared.protocol,cap-1,{resolveRef:(mt,b64)=>refForItemBytes(prepared.session,mt,b64)})).body;if(finalBody!==variant){outboundCopyRewritten=true;invalidateSeparatorOwnership()}}const transformed=await runEgress(finalBody,"retry",headers);if(transformed!==finalBody){outboundCopyRewritten=true;invalidateSeparatorOwnership()}if(prepared&&!prepared.sidePassthrough)biliImageReceipt=biliRetentionFinalize(transformed,prepared.protocol,prepared.session,biliImageAttempt);applyResign(headers,transformed);return v1Wrap(transformed)};';
-if (!text.includes(RETRY_NEW)) replaceOnce("retry image finalization", RETRY_OLD, RETRY_NEW);
+const RETRY_NEW = 'const finalizeEgress=async variant=>{headers=__biliPlaintextHeaders(headers);const transformed=await runEgress(variant,"retry",headers);applyResign(headers,transformed);return v1Wrap(transformed)};';
+if (!text.includes(RETRY_NEW)) replaceOnce("retry plaintext header ownership", RETRY_OLD, RETRY_NEW);
 // #5998 drops unsigned thinking after the original sign site. Move that step
 // ahead of shed/transforms/finalization so the signature covers actual bytes.
 const THINKING_START = 'if(prepared&&!prepared.sidePassthrough&&prepared.protocol==="anthropic"&&req.method!=="GET"&&req.method!=="HEAD"&&typeof wireBody==="string"&&thinkingPostureIsStrict(prepared.session)){';
@@ -1024,63 +909,7 @@ if (!text.includes(THINKING_MARK)) {
   const guarded = editInside("strict thinking provenance", moving, 'wireBody=dropped.body;log2(', 'wireBody=dropped.body;outboundCopyRewritten=true;invalidateSeparatorOwnership();log2(');
   replaceOnce("strict thinking before egress", THINKING_DEST, THINKING_MARK + guarded + THINKING_DEST);
 }
-console.log("image initial, retries and loop receipt seams: patched");
-
-// JSON loops, fake-completion hints, empty-turn continuations and the reasoning
-// guard are additional model sends. They share the same final-body accounting
-// without sharing pending receipts with the main forward or other requests.
-const AUX_IMAGE_BLOCK = readFileSync(join(here, "patches", "image-egress.block.js"), "utf8").trimEnd();
-if (/[^\x00-\x7e]/.test(AUX_IMAGE_BLOCK)) throw new Error("aux image egress must be ASCII escaped");
-cardUpsert("aux image egress", "// <bili-aux-image-egress begin>", "// <bili-aux-image-egress end>",
-  AUX_IMAGE_BLOCK, "async function compressLoopAnthropicJson(", false);
-
-for (const name of ["compressLoopAnthropicJson", "compressLoopResponsesJson"]) {
-  editFunction("JSON loop image accounting " + name, name, body => {
-    let next = editInside(name + " final body", body,
-      'if(requestOptions.egress)roundBody=await requestOptions.egress(roundBody);',
-      'requestOptions.headers=__biliPlaintextHeaders(requestOptions.headers);const biliJsonImages=await __biliPrepareAuxImageEgress(roundBody,ctx.protocol??(requestBody.messages?"anthropic":"responses"),ctx.session,{phase:"json-loop",log:(level,msg)=>ctx.log(`[${level}] ${msg}`),upstreamUrl:requestOptions.url,headers:requestOptions.headers,egress:requestOptions.egress});roundBody=biliJsonImages.body;');
-    next = editInside(name + " accepted body", next,
-      'try{current=await result.response.json()}',
-      'biliRetentionCommit(ctx.session.id,biliJsonImages.receipt);try{current=await result.response.json()}');
-    return next;
-  });
-}
-
-editFunction("fake completion image accounting", "resolveFakeCompletion", body => {
-  let next = editInside("fake image ownership", body,
-    'const wireHinted=opts.wrapBody?opts.wrapBody(hinted):hinted;',
-    'let wireHinted;let biliFakeImageReceipt;');
-  next = editInside("fake image final body", next,
-    'try{opts.resign?.(opts.reqHeaders,wireHinted);',
-    'try{opts.reqHeaders=__biliPlaintextHeaders(opts.reqHeaders);const biliFakeImages=await __biliPrepareAuxImageEgress(hinted,opts.protocol,opts.session,{phase:"fake-completion",log:opts.log,upstreamUrl:opts.upstreamUrl,headers:opts.reqHeaders,egress:opts.egress});biliFakeImageReceipt=biliFakeImages.receipt;wireHinted=opts.wrapBody?opts.wrapBody(biliFakeImages.body):biliFakeImages.body;opts.resign?.(opts.reqHeaders,wireHinted);');
-  next = editInside("fake accepted images", next,
-    'buffer=await readStreamToBuffer(r.response.body,fakeBufCap())',
-    'biliRetentionCommit(opts.session.id,biliFakeImageReceipt);buffer=await readStreamToBuffer(r.response.body,fakeBufCap())');
-  return next;
-});
-
-editFunction("continuation image accounting", "makeContinuationRefetch", body => {
-  let next = editInside("continuation image ownership", body,
-    'const wireRetryBody=opts.wrapBody?opts.wrapBody(retryBody):retryBody;',
-    'let wireRetryBody;let biliContinuationImageReceipt;');
-  next = editInside("continuation image final body", next,
-    'opts.resign?.(opts.reqHeaders,wireRetryBody);',
-    'opts.reqHeaders=__biliPlaintextHeaders(opts.reqHeaders);const biliContinuationImages=await __biliPrepareAuxImageEgress(retryBody,opts.protocol,opts.session,{phase:"continuation",log:opts.log,upstreamUrl:opts.upstreamUrl,headers:opts.reqHeaders,egress:opts.egress});biliContinuationImageReceipt=biliContinuationImages.receipt;wireRetryBody=opts.wrapBody?opts.wrapBody(biliContinuationImages.body):biliContinuationImages.body;opts.resign?.(opts.reqHeaders,wireRetryBody);');
-  next = editInside("continuation accepted images", next,
-    'const body=r.response.body;',
-    'biliRetentionCommit(opts.session?.id,biliContinuationImageReceipt);const body=r.response.body;');
-  return next;
-});
-
-editFunction("reasoning continuation image accounting", "runReasoningGuard", body => {
-  let next = editInside("reasoning image final body", body,
-    'const roundBodyStr=scrubLoneSurrogatesOnWire(JSON.stringify(nextBody));let roundRes;p2.resign?.(p2.reqHeaders,roundBodyStr);try{',
-    'let roundBodyStr=scrubLoneSurrogatesOnWire(JSON.stringify(nextBody));let roundRes;let biliReasoningImageReceipt;try{p2.reqHeaders=__biliPlaintextHeaders(p2.reqHeaders);const biliReasoningImages=await __biliPrepareAuxImageEgress(roundBodyStr,"responses",p2.session,{phase:"reasoning-continuation",log:(level,msg)=>p2.log(`[${level}] ${msg}`),upstreamUrl:p2.upstreamUrl,headers:p2.reqHeaders,egress:p2.egress});roundBodyStr=biliReasoningImages.body;biliReasoningImageReceipt=biliReasoningImages.receipt;p2.resign?.(p2.reqHeaders,roundBodyStr);');
-  next = editInside("reasoning accepted images", next,
-    'const contBody=roundRes.response.body;',
-    'if(roundRes.response.ok)biliRetentionCommit(p2.session?.id,biliReasoningImageReceipt);const contBody=roundRes.response.body;');
-  return next;
-});
+console.log("retry plaintext header ownership: patched");
 
 editFunction("additional forward send context", "forwardCaptured", body => {
   let next = body;
@@ -1101,22 +930,6 @@ editFunction("additional forward send context", "forwardCaptured", body => {
     if (next.split(oldHeaders).length - 1 !== 8) throw new Error("aux forward headers: expected eight sends");
     next = next.split(oldHeaders).join(newHeaders);
   }
-  if (!next.includes('makeContinuationRefetch({session:')) {
-    let count = 0;
-    next = next.replace(/makeContinuationRefetch\(\{protocol:([^,]+),body,model:/g, (_, protocol) => {
-      count++;
-      return 'makeContinuationRefetch({session:prepared&&!prepared.sidePassthrough?prepared.session:void 0,egress:(b,h)=>runEgress(b,"retry",h),protocol:' + protocol + ',body:wireBody,model:';
-    });
-    if (count !== 5) throw new Error("continuation context: expected five sends, found " + count);
-  }
-  if (!next.includes('resolveFakeCompletion(pluginBody,{egress:')) {
-    next = editInside("plugin fake egress", next, 'resolveFakeCompletion(pluginBody,{protocol:',
-      'resolveFakeCompletion(pluginBody,{egress:(b,h)=>runEgress(b,"retry",h),protocol:');
-    next = editInside("proxy fake egress", next, 'resolveFakeCompletion(upstream.body,{protocol:',
-      'resolveFakeCompletion(upstream.body,{egress:(b,h)=>runEgress(b,"retry",h),protocol:');
-  }
-  next = editInside("reasoning egress context", next, 'runReasoningGuard({firstResponse:',
-    'runReasoningGuard({session:prepared.session,egress:(b,h)=>runEgress(b,"loop",h),firstResponse:');
   for (const name of ["reqHeaders", "requestHeaders", "anthropicReqHeaders"]) {
     next = editInside("loop header projection " + name, next, 'const ' + name + '=buildForwardHeaders(headers);',
       'const ' + name + '=__biliPlaintextHeaders(headers,buildForwardHeaders(headers));');
@@ -1134,7 +947,7 @@ if (!text.includes(LOOP_HEADERS_NEW)) replaceOnce("loop plaintext headers", LOOP
 const LOOP_TRANSFORM_OLD = 'requestOptions.egress(wireBodyStr)';
 const LOOP_TRANSFORM_NEW = 'requestOptions.egress(wireBodyStr,requestOptions.headers)';
 if (!text.includes(LOOP_TRANSFORM_NEW)) replaceOnce("loop transform header copy", LOOP_TRANSFORM_OLD, LOOP_TRANSFORM_NEW);
-console.log("all auxiliary image send and header seams: patched");
+console.log("auxiliary plaintext header ownership: patched");
 
 // Preserve the 413/code/stage contract while keeping English fuse diagnostics
 // separate from the model-visible Chinese message.

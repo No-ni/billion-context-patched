@@ -15,7 +15,6 @@ import { gzipSync } from "node:zlib";
 import { startGateway } from "./fixtures/e2e-mock/gateway.mjs";
 import { LocalWebSocket } from "./fixtures/e2e-mock/websocket.mjs";
 import { seedLegacyState, database, readKv, assertLegacyUnchanged } from "./fixtures/e2e-mock/storage.mjs";
-import { imageUrl, historicalImageMessages } from "./fixtures/e2e-mock/images.mjs";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
 const arguments_ = process.argv.slice(2);
@@ -403,50 +402,6 @@ messages.push({ role: "user", content: "PARENT_INITIAL: acknowledge the complete
 const parentCid = "e2e-parent", childCid = "e2e-child";
 let parentSnap, childSnap, blockId, firstRef, firstRaw, parentRequest, forkRequest, normalBody, currentParentMessages = messages, currentChildMessages, coveredLabels;
 const nativeCheckName = "candidate native WS awaits real fork preparation and refuses stale identity, model and origin (mock host metadata)";
-const imageTransformConfiguration = () => ({ ...baseConfiguration, egressTransforms: [{ module: join(repo, "scripts/fixtures/e2e-mock/egress-images.mjs"), match: { provider: gateway.origin } }] });
-async function imageOutboundChecks() {
-  await check("image receipts follow the final transformed and gzipped outbound body", async () => {
-    const cid = "e2e-image-egress-initial", pixels = imageUrl([180, 20, 130]), history = historicalImageMessages(pixels, "IMAGE_EGRESS_FINAL_BODY"), rid = randomUUID();
-    await applyConfiguration(imageTransformConfiguration());
-    try {
-      const removed = await chat(cid, history, "gzip", rid); assert.equal(removed.status, 200, removed.text);
-      const first = gateway.http.at(-1); assert.equal(first.headers["x-e2e-transform-stage"], "initial"); assert.equal(first.headers["content-encoding"], "gzip"); assert(!first.decoded.includes(pixels)); assert(first.decoded.includes("E2E_OUTBOUND_IMAGE_REMOVED"));
-      const records = await json(active.port, "/__bili/encode-stats?rid=" + rid); assert.equal(records.status, 200, records.text); assert.equal(records.body.records.length, 1); assert.equal(records.body.records[0].origBytes, first.decoded.length); assert.equal(records.body.records[0].wireBytes, first.wire.length);
-      await applyConfiguration(baseConfiguration);
-      const unseen = await chat(cid, history); assert.equal(unseen.status, 200, unseen.text); assert(gateway.http.at(-1).decoded.includes(pixels), "pixels absent from the earlier final body must still be unseen on their first real send");
-      const continued = await chat(cid, [...history, { role: "assistant", content: "MOCK_IMAGE_EGRESS_ACK" }, { role: "user", content: "IMAGE_EGRESS_CONTINUE" }]); assert.equal(continued.status, 200, continued.text); const final = gateway.http.at(-1).decoded.toString(); assert(!final.includes(pixels)); assert.match(final, /已看过/);
-    } finally { await applyConfiguration(baseConfiguration); }
-  });
-  await check("real compression-loop sends credit successful pixels and keep failed pixels unseen", async () => {
-    for (const failed of [false, true]) {
-      const variant = failed ? "failed" : "success", cid = "e2e-image-loop-" + variant, path = "/image-loop-" + variant + "/v1/chat/completions", pixels = imageUrl(failed ? [40, 110, 210] : [130, 210, 40]);
-      const prefix = [];
-      for (let i = 0; i < 2; i++) prefix.push({ role: "user", content: `IMAGE_LOOP_ORIGINAL_USER_${i}: ` + "The local loop fixture records finished work before displaying a new image. ".repeat(8) }, { role: "assistant", content: `IMAGE_LOOP_ORIGINAL_ASSISTANT_${i}: ` + "The work was verified and can be summarized independently of the later image. ".repeat(8) });
-      const setup = await chat(cid, [...prefix, { role: "user", content: "IMAGE_LOOP_SETUP_TAIL" }]); assert.equal(setup.status, 200, setup.text); const before = await snapshot(cid), refs = before.orderedMessages.filter(message => message.ref); assert(refs.length >= 4);
-      const summary = `E2E_IMAGE_LOOP_SUMMARY_${variant}: the first four passages describe verified completed work; continue with the newer image and current task.`;
-      const history = [...prefix, { role: "user", content: [{ type: "text", text: "IMAGE_LOOP_FIRST_IMAGE_" + variant }, { type: "image_url", image_url: { url: pixels } }] }, { role: "assistant", content: "MOCK_IMAGE_LOOP_HISTORY_ACK" }, { role: "user", content: "IMAGE_LOOP_STREAMED_TURN_" + variant }];
-      // Exhaust the declared three-attempt replay budget in the failed case;
-      // an unplanned later mock reply would correctly count as a successful send.
-      const plan = gateway.planPath(path, [{ kind: "compress", args: { content: JSON.stringify([{ startId: refs[0].ref, endId: refs[3].ref, summary }]) } }, ...Array.from({ length: failed ? 3 : 1 }, () => ({ kind: failed ? "reset" : "reply" }))]);
-      await applyConfiguration(imageTransformConfiguration()); const start = gateway.http.length;
-      try {
-        // A bound plugin session retains its mode without live headers. Ask for
-        // the supported proxy compression channel while keeping its identity.
-        const streamed = await chat(cid, history, "off", randomUUID(), { path, stream: true, proxyMode: true }); assert.equal(streamed.status, 200, streamed.text);
-        const sends = gateway.http.slice(start).filter(record => record.path === path); assert.equal(sends.length, failed ? 4 : 2, "the real loop must send once initially, rebuild once and exhaust only the declared replay budget; remaining=" + plan.remaining() + "; tools=" + JSON.stringify(sends[0]?.body.tools?.map(tool => tool.function?.name)) + "; response=" + streamed.text.slice(0, 1600)); assert.equal(plan.remaining(), 0);
-        assert.equal(sends[0].headers["x-e2e-transform-stage"], "initial"); assert(!sends[0].decoded.includes(pixels)); assert(sends[0].decoded.includes("E2E_OUTBOUND_IMAGE_REMOVED"));
-        for (const send of sends.slice(1)) { assert.equal(send.headers["x-e2e-transform-stage"], "loop"); assert(send.decoded.includes(pixels), "every loop replay must send pixels absent from the initial final body"); assert(send.decoded.includes(summary), "the real wire tool call must fold the earlier prefix before the follow-up sends"); assert(send.decoded.equals(sends[1].decoded), "bounded network replays must retain the same final rebuilt body"); }
-        if (failed) {
-          const events = streamed.text.split(/\r?\n/).filter(line => line.startsWith("data: ")).flatMap(line => { try { return [JSON.parse(line.slice(6))]; } catch { return []; } }); const errors = events.filter(event => event.error || event.type === "error"); assert(errors.length > 0, "a failed loop fetch must expose a protocol error event: " + streamed.text); assert.match((errors[0].error ?? errors[0]).message, /[\u4e00-\u9fff]/, "a real failed compression-loop send must retain the Chinese failure message");
-        } else assert.match(streamed.text, /MOCK_REPLY_/);
-      } finally { plan.cancel(); await applyConfiguration(baseConfiguration); }
-      const retried = await chat(cid, [...history, { role: "assistant", content: "MOCK_IMAGE_LOOP_CONTINUATION_ACK" }, { role: "user", content: "IMAGE_LOOP_CONTINUE_" + variant }]); assert.equal(retried.status, 200, retried.text); const final = gateway.http.at(-1).decoded.toString();
-      if (failed) assert(final.includes(pixels), "pixels from the failed loop send must stay raw until their own successful retry");
-      else { assert(!final.includes(pixels), "pixels from a successful loop send must be credited for the next client turn"); assert.match(final, /已看过/); }
-      assert.equal((await detail(before.sessionId)).blockDetails.filter(block => block.active && block.summary?.includes(summary)).length, 1, "the single model-triggered compression rebuild must create exactly one actual block");
-    }
-  });
-}
 async function nativeWsChecks() {
   const nativeParent = "e2e-native-parent", nativeChild = "e2e-native-child", nativeSummary = "E2E_NATIVE_WS_SUMMARY: the earlier native history has been verified locally and the fork must inherit this finished work.";
   const nativeHistory = [];
@@ -748,26 +703,6 @@ try {
     assert.equal(afterRequests, before.count + 1, "re-preparation must not count a second persisted model request");
     await startProxy();
   });
-  if (candidate.includes("biliRetentionApply")) await check("concurrent slow success credits its own image while failed-image and text-only requests cannot overwrite the receipt", async () => {
-    const aUrl = imageUrl([210, 30, 20]), bUrl = imageUrl([20, 30, 210]), cUrl = imageUrl([20, 180, 60]);
-    for (const [cid, successImage, failedImage] of [["e2e-image-race-fail", aUrl, bUrl], ["e2e-image-race-text", cUrl, undefined]]) {
-      const path = "/hold-" + cid + "/v1/chat/completions", held = gateway.holdPath(path), count = gateway.http.length;
-      const successfulMessages = historicalImageMessages(successImage, "SLOW_IMAGE_" + cid), slow = chat(cid, successfulMessages, "off", randomUUID(), { path }).then(result => ({ result }), error => ({ error }));
-      let other;
-      try {
-        await eventually(() => gateway.http.slice(count).some(record => record.path === path), "slow image request reached the actual gateway");
-        other = failedImage
-          ? await chat(cid, historicalImageMessages(failedImage, "FAILED_IMAGE_" + cid), "off", randomUUID(), { path: "/fail-reset/v1/chat/completions" })
-          : await chat(cid, [{ role: "user", content: "TEXT_ONLY_INTERLEAVED: an independent text-only request while the image reply is held." }]);
-        assert.equal(other.status, failedImage ? 502 : 200, other.text);
-      } finally { held.release(); }
-      const completed = await slow; if (completed.error) throw completed.error; assert.equal(completed.result.status, 200, completed.result.text);
-      if (failedImage) { const retry = await chat(cid, historicalImageMessages(failedImage, "FAILED_IMAGE_" + cid)); assert.equal(retry.status, 200, retry.text); assert(gateway.http.at(-1).decoded.includes(failedImage), "a failed request's image must remain unseen until its own healthy retry succeeds"); }
-      const continued = await chat(cid, [...successfulMessages, { role: "assistant", content: "MOCK_IMAGE_RACE_ACK" }, { role: "user", content: "IMAGE_RACE_CONTINUE" }]); assert.equal(continued.status, 200, continued.text);
-      const wire = gateway.http.at(-1).decoded.toString(); assert(!wire.includes(successImage), "the slow successful request's image must be credited despite a concurrent request"); assert.match(wire, /已看过/, "continuation must carry a recoverable image placeholder");
-    }
-  }); else skip("concurrent image retention receipts", "candidate has no custom image-retention pass");
-  if (candidate.includes("biliRetentionApply")) await imageOutboundChecks(); else skip("final-body and real loop image receipts", "candidate has no custom image-retention pass");
   await check("repeated connection failures remain Chinese 502 and healthy retry succeeds", async () => {
     for (let i = 0; i < 4; i++) {
       const result = await chat("e2e-failure", [{ role: "user", content: "local reset retry " + i }], "off", randomUUID(), { path: "/fail-reset/v1/chat/completions" });

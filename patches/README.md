@@ -5,8 +5,7 @@
 - `outbound-encoding.block.js`：B1，请求体 gzip/br、指令头与回执接口。
 - `view-safety.block.js`：B10，完整前缀、摘要有效性与跳过块的尾部覆盖校验。
 - `fork-timestamps.block.js`：B7，实际继承前缀、子消息首次出现及低于父高水位的可见时间证明；克隆和持久化入口由步骤 7 修改。
-- `image-retention.block.js`、`image-convention.block.js`、`image-card.*.block.js`：B12–B17，图片折叠、编码、约定与配置页。
-- `image-egress.block.js`：B15，工具/JSON 后续发送的实际图片回执、独立明文请求头及变换后重签。
+- `image-card.*.block.js`：B17，配置页里的 DSH 原生图片预算卡（仅五项数字；B12–B15 已于 0.7.5 删除）。
 - `stream-errors.block.js`：B21，真实流、循环与 WebSocket sink 的中文错误及独立诊断详情。
 - `native-ws-headers.block.js`：native agent 的 WS 权威会话请求头，以 case-insensitive set 覆盖旧标记；由 `patch-bili-agent.mjs` 解析完整 factory 后施加。
 - `preflight.block.js`：B22 的有界快照恢复，以及 B19/B21 的预检错误输出；步骤 22 支持按哨兵替换已有块。
@@ -20,8 +19,8 @@ node scripts/patch-bili-build.mjs /path/to/new-bili/dist/index.js
 node scripts/patch-bili-agent.mjs /path/to/new-bili/dist/agent/dsh-native.js
 node --check /path/to/new-bili/dist/index.js
 node scripts/check-views.mjs /path/to/new-bili/dist/index.js
-node scripts/check-image-retention.mjs /path/to/new-bili/dist/index.js
 node scripts/check-image-card.mjs /path/to/new-bili/dist/index.js
+node scripts/check-image-budget.mjs
 node scripts/check-upstream-ux.mjs /path/to/new-bili/dist/index.js
 node scripts/check-preflight.mjs /path/to/new-bili/dist/index.js
 node scripts/smoke.mjs /path/to/new-bili/dist/index.js
