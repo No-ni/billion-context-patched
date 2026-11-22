@@ -201,6 +201,21 @@ function mount(draft, options = {}) {
   check("defaults: budget input describes its hint", byId(card.box, "image-max-request").attributes["aria-describedby"] === "image-max-request-hint");
   check("defaults: retention toggle absent", byId(card.box, "image-retention") === null);
   check("defaults: prompt toggle absent", byId(card.box, "image-prompt") === null);
+  check("defaults: host offload restore is on", byId(card.box, "image-restore-host").checked === true);
+}
+// the host-offload restore switch defaults on and records only the off choice
+{
+  const card = mount({});
+  const toggle = byId(card.box, "image-restore-host");
+  check("restore: default writes no key", card.parsed().imageRestoreHostOffload === undefined, card.editor.value);
+  toggle.checked = false;
+  toggle.listeners.change();
+  check("restore: off is stored", card.parsed().imageRestoreHostOffload === false);
+  toggle.checked = true;
+  toggle.listeners.change();
+  check("restore: on drops the key", card.parsed().imageRestoreHostOffload === undefined);
+  const stored = mount({ imageRestoreHostOffload: false });
+  check("restore: stored off stays off", byId(stored.box, "image-restore-host").checked === false);
 }
 // budget relationships: request <= total, retirement step <= image cap
 {
@@ -267,7 +282,7 @@ check("parseError: disabled", byId(mount({}, { parseError: true }).box, "image-r
   const card = mount({
     imageRetention: false, imageRetentionKeepLastUser: false, imageRetentionMaxDim: 640,
     imagePrompt: false, imageRescaleMaxDim: 900,
-    maxRequestImages: 32, imageOffloadCountQuantum: 8, debug: 2,
+    maxRequestImages: 32, imageOffloadCountQuantum: 8, imageRestoreHostOffload: false, debug: 2,
   });
   const save = new Element("button");
   const reset = new Element("button");
@@ -301,7 +316,7 @@ check("parseError: disabled", byId(mount({}, { parseError: true }).box, "image-r
   const draft = JSON.parse(card.editor.value);
   check(
     "reset: retired image keys removed",
-    ["imageRetention", "imageRetentionKeepLastUser", "imageRetentionMaxDim", "imagePrompt", "imageRescaleMaxDim"].every((key) => !(key in draft)),
+    ["imageRetention", "imageRetentionKeepLastUser", "imageRetentionMaxDim", "imagePrompt", "imageRescaleMaxDim", "imageRestoreHostOffload"].every((key) => !(key in draft)),
     JSON.stringify(draft),
   );
   check("reset: image budget returns to defaults", draft.maxRequestImages === 20 && draft.imageOffloadCountQuantum === 10 &&

@@ -904,3 +904,33 @@ B1 现将缺失、空和未知指令统一收敛为 `off`。显式 `gzip` / `br`
 
 `check-image-budget.mjs` 增加三条单元检查（未配置 catalog 路由不写入、坏 profile 失败关闭、PI 默认值需要档案）并把集成场景改为同命名空间五条 provider 路由：模拟 `describe()` 返回快照、`mutate` 对过期 revision 抛 `SETTINGS_CONFLICT`、每次写入使 revision +1。换回旧 `flush` 时该场景以真机同款报错超时失败，修复后 16 项全部通过。完整证据见[PI 图片预算路由冲突审计](audits/2026-11-22-image-budget-route-conflict.md)。
 
+## 36. 2026-11-22：宿主退役占位还原与上传超限兜底（IMG-12 / IMG-13）
+
+用户要求代理不再被 DSH 宿主的图片退役牵连：占位出现在什么位置、原图是什么，代理本来就知道，把出站字节换回退役前的样子不改变语义，缓存前缀也不会重建；随后允许放开 0.7.5 时“插件不再解析或改写占位文本”的限制，并要求上游以请求体体积为由返回 413 时先压缩一次再重发。
+
+宿主侧的退役发生在请求组装阶段：`llm-pi-ai` 在发出 HTTP 之前抛 `IMAGE_OFFLOAD_REQUIRED`（`context.ts` / `adapter.ts`），`llm-deepseek` 走 `images.ts` 的 `assertImagesFit`；占位文本由 `llm/src/content.ts` 的 `offloadedImageText` 生成，形如 `[image omitted to fit request image limits; sha256:…]`。同一文件的 `requestImageHandleText` 是图片前那段 `Image sha256:…; request preview WxHpx.`，`userContent` 总是「说明文本 part + 图片 part」成对推入。因此只要记住退役前真正发出去的这两个 JSON 对象，就能原样塞回，出站前缀与退役前逐字节一致。
+
+新增 `patches/image-restore.block.js`（哨兵 `<bili-image-restore>`，纯 ASCII），由步骤 22 插进代理构建，并在初次发送前与 `finalizeEgress` 重试路径各调用一次。它先做子串快速判定，命中后遍历所有数组：把「说明文本 + 相邻图片 part」按 `协议|sha256` 存进模块级会话缓存（96 张 / 64 MiB / 64 会话），再把占位文本 part 换回这两段。只处理 `fit request image limits` 变体，`text-only` 占位不动；取不到字节时保留占位并记 debug，解析异常只 warn。开关 `imageRestoreHostOffload` 默认开启，环境变量 `BILI_IMAGE_RESTORE` 可覆盖，图像预算卡提供复选框，勾选时从配置文件删除该键。
+
+413 兜底插在 `overflowRefold` 分支链的图片数量墙与上下文溢出之后：仅当 413 文本指向上传或请求体体积（`upload limit`、`upload size`、`payload too large` 等）且不是溢出时才进入。目标窗口取「请求体字节 / 4、`stats.lastInputTokens`、模型窗口」的最小值乘 0.6，第二轮乘 0.35，下限 1024 并强制小于模型窗口；折叠结果交给 `overflowRefold` 重跑准备管线，成功后重签并用同一上游重发，日志记 `[upload-413] … folded once to ~N tokens`；失败则把原 413 透传。按用户要求不学习、不记录任何上传软上限。
+
+验证：`check-e2e-mock.mjs` 三条实进程场景（还原后 `content` 与首次 `deepEqual`、开关关闭时占位留在线上且无图片段、上传 413 后同路径至少两次发送且后一次更小），本地网关为此支持 `{kind:"status"}` 计划步骤并对预检总结请求返回可用长摘要；`check-image-card.mjs` 覆盖开关默认值、只记录关闭、恢复默认删除（55 项通过）；`check-upstream-ux.mjs` 把新键计入 IMAGE_CONFIG_KEYS 并覆盖旧五项注册表迁移。完整证据见[宿主退役占位还原与上传超限兜底审计](audits/2026-11-22-host-offload-restore.md)。
+
+边界：只能还原本会话出站流量里见过的字节，重启后缓存为空，已退役的占位保持占位；还原会让请求体变大，因此与 IMG-13 联动。按用户要求在离线测试通过后把 0.7.5 安装到本机 DSH profile，但不重启正在运行的实例；本轮不提交、不推送。
+## 37. 2026-11-22：失效预算备份清理与卸载保护（IMG-10a）
+
+用户在模型设置页发现四个自己从未配置过的 provider：`amazon-bedrock`、`ant-ling`、`anthropic`、`azure`。核对后确认它们是 0.7.5 修复前那版构建留下的空档案：`flush()` 每次只读一次 `settings.describe()`，同命名空间下第一条写入成功后其余全部 `SETTINGS_CONFLICT`，整轮放弃，于是每次设置事件只推进一个 provider；骨架按 catalog 字母序前进，正好是这四个。档案里只有插件写入的三项预算键，没有 `apiKeyEnv`、`baseURL` 或 `models`，但 DSH 的模型设置页把“user 层存在该 provider 路径”判成已配置（`packages/client/ui-settings-models/src/client/store.ts:253`），所以它们显示成已配置的 provider。
+
+用户删除这些档案后，插件暴露了第二个问题：`billion-context.json.image-budget-backup.json` 里仍保留已删除 provider 的条目。插件启动时把它读进 `applied`，下一轮 `flush()` 又把整张表写回文件，于是死路径永远留在备份里；`restore()` 只会跳过它，不会清理。
+
+第三个问题是宿主的销毁顺序：DSH 先销毁 settings 服务，再执行插件卸载钩子。`restore()` 直接 `scope.get("settings").describe()`，在关闭时拿到 `undefined` 并抛 `TypeError: Cannot read properties of undefined (reading 'describe')`，每次关机都会在 `desktop-next.log` 记一条 error；热卸载时不会复现，所以只影响关机与“服务不可用时回滚”的语义。
+
+修法（均在 `lib/defaults.js`）：
+
+1. `flush()` 在每轮开始时用 `prunePiImageBackups(applied, rows)` 对照当前 settings 快照，删除已不存在的 provider 的备份条目，再写回文件；只在确实有变化时落盘。
+2. `restore()` 先取 `scope.get("settings")`，为空直接返回；外层加一层 `try/catch` 只警告一次，不把销毁异常抛给 Cordis。服务仍可用时行为不变：只回滚插件写入且期间未被用户改动的字段。
+
+验证：`scripts/check-image-budget.mjs` 从 16 项扩到 19 项。第一条在临时目录预置一条 `ghost` provider 的备份，断言首轮写入后文件里不再有它；第二个场景先给 `keep`/`gone` 两个 profile 写预算，删除 `gone` 后触发 `settings/document-updated`，断言备份只剩 `keep`；随后删除 mock 的 settings 服务再执行销毁，断言既不抛错也不产生 warning，且备份文件保留。反向验证：去掉 `prunePiImageBackups` 调用后检查以 `a dead backup entry must be pruned` 失败；去掉 `if (!settings) return;` 后以 `teardown must not report an error once the settings service is gone` 失败。
+
+边界：清理只作用于插件自己的备份表，不动 settings 里的 provider 档案本身；被用户删除的 profile 不会因为插件而重建（IMG-10a 的“只填写已建档 profile”仍然成立）。关机时跳过恢复不会回滚已写入的预算值，这是宿主销毁顺序决定的，不是新增副作用。
+

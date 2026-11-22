@@ -15,6 +15,7 @@ import { gzipSync } from "node:zlib";
 import { startGateway } from "./fixtures/e2e-mock/gateway.mjs";
 import { LocalWebSocket } from "./fixtures/e2e-mock/websocket.mjs";
 import { seedLegacyState, database, readKv, assertLegacyUnchanged } from "./fixtures/e2e-mock/storage.mjs";
+import { imageUrl } from "./fixtures/e2e-mock/images.mjs";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
 const arguments_ = process.argv.slice(2);
@@ -206,6 +207,56 @@ async function assertStorageMode(mode) {
   const response = await json(active.port, "/__bili/status"); assert.equal(response.status, 200, response.text);
   assert.equal(response.body.storage.requested, mode); assert.equal(response.body.storage.effective, mode); assert.equal(response.body.storage.degraded, false);
 }
+async function imageRestoreChecks() {
+  const imageToken = (seed) => "sha256:" + createHash("sha256").update(seed).digest("hex");
+  const imageHandle = (id) => "Image " + id + "; request preview 1x1px. It may be resized or re-encoded; source dimensions, format, and byte size may differ.";
+  const offloadText = (id) => "[image omitted to fit request image limits; " + id + ". No local normalized image path is available; ask the user to attach it again if needed.]";
+  const markerMessage = (marker) => gateway.http.at(-1).body.messages.find(message => JSON.stringify(message).includes(marker));
+  const liveImageMessages = (id, marker) => [
+    { role: "system", content: "You are the isolated local image-restore mock assistant." },
+    { role: "user", content: [{ type: "text", text: marker + ": the earlier screenshot." }, { type: "text", text: imageHandle(id) }, { type: "image_url", image_url: { url: imageUrl([12, 34, 56]) } }] },
+    { role: "assistant", content: "The earlier screenshot is in history." },
+  ];
+  await check("a DSH host image offload keeps the previous wire bytes for the provider prefix", async () => {
+    await applyConfiguration({ ...baseConfiguration, imageRestoreHostOffload: true });
+    const cid = "e2e-image-restore", id = imageToken(cid), messages = liveImageMessages(id, "E2E_IMAGE_RESTORE_MARKER");
+    const first = await chat(cid, messages); assert.equal(first.status, 200, first.text);
+    const before = markerMessage("E2E_IMAGE_RESTORE_MARKER");
+    assert(Array.isArray(before.content) && before.content.some(part => part.type === "image_url"), "the first send must carry the image: " + JSON.stringify(before));
+    const offloaded = [messages[0], { role: "user", content: [{ type: "text", text: "E2E_IMAGE_RESTORE_MARKER: the earlier screenshot." }, { type: "text", text: offloadText(id) }] }, messages[2], { role: "user", content: "E2E_IMAGE_RESTORE_CONTINUE: continue with the earlier screenshot." }];
+    const second = await chat(cid, offloaded); assert.equal(second.status, 200, second.text);
+    const after = markerMessage("E2E_IMAGE_RESTORE_MARKER");
+    assert.deepEqual(after.content, before.content, "the offloaded request must be re-sent with the exact previous text+image parts");
+    assert.match(proxyLog(), /\[image-restore\] put 1 host-offloaded image/);
+  });
+  await check("with the restore switch off the host placeholder stays on the wire", async () => {
+    await applyConfiguration({ ...baseConfiguration, imageRestoreHostOffload: false });
+    const cid = "e2e-image-restore-off", id = imageToken(cid), messages = liveImageMessages(id, "E2E_IMAGE_RESTORE_OFF_MARKER");
+    const first = await chat(cid, messages); assert.equal(first.status, 200, first.text);
+    const offloaded = [messages[0], { role: "user", content: [{ type: "text", text: "E2E_IMAGE_RESTORE_OFF_MARKER: the earlier screenshot." }, { type: "text", text: offloadText(id) }] }, messages[2], { role: "user", content: "E2E_IMAGE_RESTORE_OFF_CONTINUE: continue without pixels." }];
+    const second = await chat(cid, offloaded); assert.equal(second.status, 200, second.text);
+    const wire = JSON.stringify(markerMessage("E2E_IMAGE_RESTORE_OFF_MARKER").content);
+    assert(wire.includes("image omitted to fit request image limits"), "the placeholder must stay on the wire when the switch is off: " + wire);
+    assert(!wire.includes("image_url"), "no image part may be re-added when the switch is off");
+    await applyConfiguration(baseConfiguration);
+  });
+  await check("an upload-limit 413 that is not a context overflow folds once and re-sends", async () => {
+    const cid = "e2e-upload-413", path = "/v1/chat/completions", history = [];
+    for (let i = 0; i < 10; i++) history.push({ role: i % 2 === 0 ? "user" : "assistant", content: "E2E_UPLOAD_413_" + i + ": " + "foldable local history body. ".repeat(80) });
+    history.push({ role: "user", content: "E2E_UPLOAD_413_FINAL: answer after the transport refusal." });
+    const plan = gateway.planPath(path, [{ kind: "status", status: 413, body: JSON.stringify({ error: { message: "Request body exceeds the upload size limit", type: "upload_limit" } }) }]);
+    const start = gateway.http.length;
+    let result;
+    try { result = await chat(cid, history, "off", randomUUID()); } finally { plan.cancel(); }
+    assert.equal(result.status, 200, result.text);
+    const sends = gateway.http.slice(start).filter(record => record.path === path);
+    assert(sends.length >= 2, "the refusal must be followed by a re-send: " + JSON.stringify(gateway.http.slice(start).map(record => record.path)));
+    assert(sends[0].decoded.includes("E2E_UPLOAD_413_0"), "the rejected attempt must carry the whole history");
+    assert(sends.at(-1).decoded.length < sends[0].decoded.length, "the re-sent body must be smaller than the rejected one");
+    assert.match(proxyLog(), /\[upload-413\].*folded once/);
+  });
+}
+
 async function ingressChecks() {
   await check("completed gzip decode and text ingest limits return Chinese 413 before any gateway send", async () => {
     const previousContext = active.context; await stopProxy(active, true);
@@ -729,6 +780,7 @@ try {
     assert.equal(gateway.http.length, start, "side-request rejection must add no model sends");
     console.log(`  side request evidence: no tools, max_tokens=128, estimate=${original[1]}, effective window=${original[2]}, HTTP413 and zero model sends`);
   });
+  await imageRestoreChecks();
   await ingressChecks();
   await wsIngressChecks();
   if (hasKvMigration) await storageChecks(); else skip("isolated legacy, shadow and full storage mode fallbacks", "candidate predates the unified KV carriers");

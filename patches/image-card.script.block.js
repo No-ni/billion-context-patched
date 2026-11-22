@@ -69,6 +69,30 @@
             });
             return input;
         }
+        function toggleRow(id, key, value, onChange) {
+            const w = document.createElement("div");
+            w.style.cssText = "display:flex;gap:8px;align-items:center;flex-wrap:wrap";
+            const input = document.createElement("input");
+            input.type = "checkbox";
+            input.id = id;
+            input.checked = value;
+            const label = document.createElement("label");
+            label.htmlFor = id;
+            label.textContent = t(key);
+            const hint = document.createElement("span");
+            hint.className = "dim small";
+            hint.textContent = t(key + "_hint");
+            w.appendChild(input);
+            w.appendChild(label);
+            w.appendChild(hint);
+            box.appendChild(w);
+            iCtrls.push(input);
+            input.addEventListener("change", () => {
+                if (!onChange(input.checked)) input.checked = value;
+                else value = input.checked;
+            });
+            return input;
+        }
         const number = (value, min, fallback) => Number.isSafeInteger(value) && value >= min ? value : fallback;
         const kib = (value, fallback) => Number.isSafeInteger(value) && value >= 1024
             ? Math.max(1, Math.round(value / 1024)) : fallback;
@@ -108,6 +132,12 @@
             return budget(max, n);
         });
         batchInput.max = String(max);
+        // The restore switch is the proxy's own key (not a DSH setting): remove it
+        // when on so the config file only records the non-default choice.
+        toggleRow("image-restore-host", "cfg.image_restore", draft.imageRestoreHostOffload !== false, on => {
+            commit(d => { if (on) delete d.imageRestoreHostOffload; else d.imageRestoreHostOffload = false; });
+            return true;
+        });
         if (cfg && cfg.parseError) iCtrls.forEach((el) => { el.disabled = true; });
     }
     // <bili-image-card:js end>

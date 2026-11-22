@@ -53,7 +53,7 @@ const classSource = (text, name) => {
   return uniqueBlockSpan(text, name, matches[0][0]).block;
 };
 
-const IMAGE_CONFIG_KEYS = ["maxRequestImages", "imageOffloadCountQuantum", "requestImageMaxBytes", "requestImagePixelBudget", "maxRequestImageBytes"];
+const IMAGE_CONFIG_KEYS = ["maxRequestImages", "imageOffloadCountQuantum", "imageRestoreHostOffload", "requestImageMaxBytes", "requestImagePixelBudget", "maxRequestImageBytes"];
 
 const assertImageConfigKeys = (text, what) => {
   const matches = [...text.matchAll(/\bKNOWN_TOP_LEVEL_KEYS=new Set\((\[[^\]]*\])\)/g)];

@@ -453,9 +453,13 @@ for (const [before, after] of cacheUiChanges) {
 // bili image transform. Registering them keeps startup from warning about a
 // supported setting; no other image key is added here.
 const CONFIG_KEYS_ANCHOR = ',"autoModeForge","imageRescale","guardrails","cacheKeepalive","egressTransforms"]);';
-const CONFIG_KEYS_PATCHED = ',"autoModeForge","imageRescale","maxRequestImages","imageOffloadCountQuantum","requestImageMaxBytes","requestImagePixelBudget","maxRequestImageBytes","guardrails","cacheKeepalive","egressTransforms"]);';
+const CONFIG_KEYS_LEGACY = ',"autoModeForge","imageRescale","maxRequestImages","imageOffloadCountQuantum","requestImageMaxBytes","requestImagePixelBudget","maxRequestImageBytes","guardrails","cacheKeepalive","egressTransforms"]);';
+const CONFIG_KEYS_PATCHED = ',"autoModeForge","imageRescale","maxRequestImages","imageOffloadCountQuantum","imageRestoreHostOffload","requestImageMaxBytes","requestImagePixelBudget","maxRequestImageBytes","guardrails","cacheKeepalive","egressTransforms"]);';
 if (text.includes(CONFIG_KEYS_PATCHED)) {
   console.log("image budget config keys: already patched");
+} else if (text.includes(CONFIG_KEYS_LEGACY)) {
+  replaceOnce("image budget config keys", CONFIG_KEYS_LEGACY, CONFIG_KEYS_PATCHED);
+  console.log("image budget config keys: patched (image restore switch)");
 } else {
   replaceOnce("image budget config keys", CONFIG_KEYS_ANCHOR, CONFIG_KEYS_PATCHED);
   console.log("image budget config keys: patched");
@@ -489,6 +493,8 @@ const IMAGE_CARD_COPY_ZH = {
   "cfg.image_max_request_hint": "默认 20 张；超过后宿主会把最早的图片改成占位说明，避免原始请求体持续变大。",
   "cfg.image_offload_quantum": "每次退役的图片数",
   "cfg.image_offload_quantum_hint": "默认 10 张；达到上限时按这个数量逐批退役，不能大于图片上限。",
+  "cfg.image_restore": "还原宿主退役的图片",
+  "cfg.image_restore_hint": "默认开启。宿主把超过上限的图片换成占位说明后，代理在发送前把占位换回退役前的原始图片，上游前缀因此保持不变、缓存继续命中；取不到原始字节时保留占位。",
   "cfg.image_budget_invalid": "请输入正整数，且每次退役数量不能大于图片上限",
   "cfg.image_reset": "恢复默认",
   "cfg.image_restored": "已恢复默认值，记得保存"
@@ -506,6 +512,8 @@ const IMAGE_CARD_COPY_EN = {
   "cfg.image_max_request_hint": "Defaults to 20. Above the limit, the host replaces the oldest images with placeholders so the original request body cannot keep growing.",
   "cfg.image_offload_quantum": "Images retired per step",
   "cfg.image_offload_quantum_hint": "Defaults to 10. Images are retired in batches at the limit; this cannot exceed the image limit.",
+  "cfg.image_restore": "Restore images retired by the host",
+  "cfg.image_restore_hint": "On by default. When DSH replaces over-limit images with placeholders, the proxy puts the original pre-offload images back before sending, so the upstream prefix stays unchanged and the prompt cache keeps hitting; placeholders stay when the bytes are unknown.",
   "cfg.image_budget_invalid": "Enter positive whole numbers; the retirement count cannot exceed the image limit",
   "cfg.image_reset": "Restore defaults",
   "cfg.image_restored": "Defaults restored; remember to save"
@@ -897,7 +905,8 @@ console.log("Chinese stream, loop and WS error sinks: patched");
 // before the transform runs; the signature still covers the actual bytes.
 const RETRY_OLD = 'const finalizeEgress=async variant=>{const transformed=await runEgress(variant,"retry",headers);applyResign(headers,transformed);return v1Wrap(transformed)};';
 const RETRY_NEW = 'const finalizeEgress=async variant=>{headers=__biliPlaintextHeaders(headers);const transformed=await runEgress(variant,"retry",headers);applyResign(headers,transformed);return v1Wrap(transformed)};';
-if (!text.includes(RETRY_NEW)) replaceOnce("retry plaintext header ownership", RETRY_OLD, RETRY_NEW);
+const RETRY_RESTORED = 'const finalizeEgress=async variant=>{headers=__biliPlaintextHeaders(headers);const transformed=__biliRestoreHostOffloads(await runEgress(variant,"retry",headers),prepared,log2);applyResign(headers,transformed);return v1Wrap(transformed)};';
+if (!text.includes(RETRY_NEW) && !text.includes(RETRY_RESTORED)) replaceOnce("retry plaintext header ownership", RETRY_OLD, RETRY_NEW);
 // #5998 drops unsigned thinking after the original sign site. Move that step
 // ahead of shed/transforms/finalization so the signature covers actual bytes.
 const THINKING_START = 'if(prepared&&!prepared.sidePassthrough&&prepared.protocol==="anthropic"&&req.method!=="GET"&&req.method!=="HEAD"&&typeof wireBody==="string"&&thinkingPostureIsStrict(prepared.session)){';
@@ -987,6 +996,80 @@ editFunction("SQLite WAL header", "dbFileIsAlreadyWal", body => editInside("SQLi
   'function dbFileIsAlreadyWal(dbPath){try{const head=readFileSync7(dbPath);return head.length>=100&&head[18]===0&&head[19]===2}catch{return false}}',
   'function dbFileIsAlreadyWal(dbPath){const fs=require("node:fs");let fd;try{fd=fs.openSync(dbPath,"r");const head=Buffer.alloc(100);return fs.readSync(fd,head,0,100,0)===100&&head[18]===2&&head[19]===2}catch{return false}finally{if(fd!==void 0)try{fs.closeSync(fd)}catch{}}}'));
 
+// ── 22. host image offloads keep the wire prefix, an upload-limit 413 folds once ──
+// DSH retires images inside dsh-compaction-image-offload before the adapter opens
+// a socket: the request leaves with "[image omitted to fit request image limits; ...]"
+// and every provider prefix starting at that image is rebuilt, so the prompt cache
+// misses on the whole tail. The bytes of the pre-offload request version are still on
+// the wire of earlier requests; remembering them lets the proxy put the exact same
+// text+image parts back, which keeps the prefix byte-identical without touching the
+// stored history. A provider-side 413 that names an upload size limit is not a
+// context overflow, so it also gets one bounded compression round before giving up.
+const IMAGE_RESTORE_BLOCK = readFileSync(join(here, "patches", "image-restore.block.js"), "latin1").replace(/\s+$/, "");
+const IMAGE_RESTORE_BEGIN = "// <bili-image-restore>";
+const IMAGE_RESTORE_END = "// </bili-image-restore>";
+if (/[^\x00-\x7e]/.test(IMAGE_RESTORE_BLOCK)) throw new Error("image restore block: non-ASCII bytes would be mangled by the latin1 write; keep them escaped");
+if (text.includes(IMAGE_RESTORE_BEGIN)) {
+  const start = text.indexOf(IMAGE_RESTORE_BEGIN);
+  const end = text.indexOf(IMAGE_RESTORE_END);
+  if (end <= start) throw new Error("image restore block: markers are out of order");
+  const current = text.slice(start, end + IMAGE_RESTORE_END.length);
+  if (current === IMAGE_RESTORE_BLOCK) {
+    console.log("image restore block: already patched");
+  } else {
+    text = text.slice(0, start) + IMAGE_RESTORE_BLOCK + text.slice(end + IMAGE_RESTORE_END.length);
+    changed = true;
+    console.log("image restore block: updated");
+  }
+} else {
+  replaceOnce("image restore block", FETCH_ANCHOR, IMAGE_RESTORE_BLOCK + "\n" + FETCH_ANCHOR);
+  console.log("image restore block: patched");
+}
+const RESTORE_SEND_OLD = 'typeof wireBody==="string"){const shed=await shedEgressIfOverBudget(';
+const RESTORE_SEND_NEW = 'typeof wireBody==="string"){const restoredBody=__biliRestoreHostOffloads(wireBody,prepared,log2);if(restoredBody!==wireBody){outboundCopyRewritten=true;invalidateSeparatorOwnership();wireBody=restoredBody}const shed=await shedEgressIfOverBudget(';
+if (text.includes(RESTORE_SEND_NEW)) {
+  console.log("image restore send: already patched");
+} else {
+  replaceOnce("image restore send", RESTORE_SEND_OLD, RESTORE_SEND_NEW);
+  console.log("image restore send: patched");
+}
+const RESTORE_RETRY_OLD = 'const finalizeEgress=async variant=>{headers=__biliPlaintextHeaders(headers);const transformed=await runEgress(variant,"retry",headers);applyResign(headers,transformed);return v1Wrap(transformed)};';
+const RESTORE_RETRY_NEW = 'const finalizeEgress=async variant=>{headers=__biliPlaintextHeaders(headers);const transformed=__biliRestoreHostOffloads(await runEgress(variant,"retry",headers),prepared,log2);applyResign(headers,transformed);return v1Wrap(transformed)};';
+if (text.includes(RESTORE_RETRY_NEW)) {
+  console.log("image restore retry send: already patched");
+} else {
+  replaceOnce("image restore retry send", RESTORE_RETRY_OLD, RESTORE_RETRY_NEW);
+  console.log("image restore retry send: patched");
+}
+const UPLOAD_413_ANCHOR = "else if(overflowInfo.isOverflow){";
+const UPLOAD_413_BRANCH = [
+  'else if(overflowInfo.imageCountCap===void 0&&!overflowInfo.isOverflow&&__biliUploadLimitReject(upstreamResult.response.status,overflowText)&&typeof wireBody==="string"&&prepared.protocol){',
+  'const uploadSession=prepared.session;upstreamResult.clearTimer();let recovered=null;',
+  'for(const uploadRatio of [.6,.35]){',
+  'const uploadWindow=config&&Number.isFinite(config.modelContextLimit)?config.modelContextLimit:0;',
+  'const uploadTarget=__biliUploadRefoldTarget(wireBody,uploadWindow,uploadSession.stats&&uploadSession.stats.lastInputTokens,uploadRatio);',
+  'let uploadRefolded=null;',
+  'try{uploadRefolded=await overflowRefold(uploadTarget)}catch(error){log2("warn",`[${uploadSession.id}] [upload-413] the forced compression round failed: ${error&&error.message?error.message:String(error)}`);break}',
+  'if(!uploadRefolded){log2("warn",`[${uploadSession.id}] [upload-413] upstream rejected the request body as too large (HTTP 413) but a forced compression to ~${uploadTarget} tokens produced no smaller body; passing the rejection through`);break}',
+  'let uploadRetried=null;',
+  'try{uploadRetried=await fetchWithTimeout(upstreamUrl,{...init,body:await finalizeEgress(uploadRefolded.body),headers},void 0,clientAbort.signal)}catch{uploadRetried=null}',
+  'if(uploadRetried===null)break;',
+  'if(uploadRetried.response.ok){recovered={body:uploadRefolded.body,prepared:uploadRefolded.prepared,result:uploadRetried,target:uploadTarget};break}',
+  'let uploadText="";',
+  'try{uploadText=uploadRetried.response.body?await readStreamToBuffer(uploadRetried.response.body).then(chunk=>chunk.toString("utf8"),()=>""):""}catch{uploadText=""}',
+  'upstreamResult={response:new Response(uploadText,{status:uploadRetried.response.status,statusText:uploadRetried.response.statusText,headers:new Headers(uploadRetried.response.headers)}),clearTimer:uploadRetried.clearTimer,stopIdleTimer:uploadRetried.stopIdleTimer};',
+  'if(!(uploadRetried.response.status===413&&__biliUploadLimitReject(413,uploadText)))break;',
+  '}',
+  'if(recovered){wireBody=recovered.body;if(recovered.prepared)prepared=recovered.prepared;upstreamResult=recovered.result;',
+  'log2("info",`[${uploadSession.id}] [upload-413] upstream rejected the request body as too large (HTTP 413, not a context overflow); folded once to ~${recovered.target} tokens and re-sent within the same request, upstream accepted`)}',
+  '}',
+].join("");
+if (text.includes(UPLOAD_413_BRANCH)) {
+  console.log("upload-limit 413 refold: already patched");
+} else {
+  replaceOnce("upload-limit 413 refold", UPLOAD_413_ANCHOR, UPLOAD_413_BRANCH + UPLOAD_413_ANCHOR);
+  console.log("upload-limit 413 refold: patched");
+}
 if (changed) {
   // The harness loads this build as a module, and a script-mode check is not the
   // same grammar: an anchor that leaves an extra brace can pass one and fail the

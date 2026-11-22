@@ -17,10 +17,12 @@ export async function startGateway() {
       const gate = gates.get(req.url); if (gate) await gate.promise;
       const step = plans.get(req.url)?.shift();
       if (step?.kind === "reset") { req.socket.destroy(); return; }
+      if (step?.kind === "status") { res.writeHead(step.status, { "content-type": "application/json" }); res.end(step.body ?? "{}"); return; }
       if (req.url.includes("fail-429")) { res.writeHead(429, { "content-type": "application/json", "retry-after": "1" }); res.end('{"error":{"message":"mock upstream rate limit","type":"rate_limit_error"}}'); return; }
       if (req.url.includes("fail-401")) { res.writeHead(401, { "content-type": "application/json" }); res.end('{"error":{"message":"mock upstream unauthorized","type":"authentication_error"}}'); return; }
       const number = ++sequence;
-      const text = `MOCK_REPLY_${number}`;
+      const summarizer = !body.stream && Array.isArray(body.messages) && JSON.stringify(body.messages).includes("TASK: The conversation segment below");
+      const text = summarizer ? "MOCK_SUMMARY " + "condensed history chunk. ".repeat(24) : `MOCK_REPLY_${number}`;
       const tracksNudgeUsage = Array.isArray(body.messages) && body.messages.some(message => JSON.stringify(message).includes("NUDGE_GATE_USAGE_BASELINE"));
       const inputTokens = tracksNudgeUsage ? Math.max(256, Math.ceil(decoded.length / 4)) : 256;
       const cachedTokens = tracksNudgeUsage ? Math.floor(inputTokens / 2) : 128;

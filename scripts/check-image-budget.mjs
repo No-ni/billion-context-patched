@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Check that image limits are persisted on the native DeepSeek routes.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { imageBudgetOps, installImageBudgetDefaults } from "../lib/defaults.js";
@@ -122,6 +122,14 @@ const home = mkdtempSync(join(tmpdir(), "bili-image-budget-"));
 try {
   const configPath = join(home, "billion-context.json");
   writeFileSync(configPath, "{}");
+  // Bookkeeping can outlive the profile it describes — the user deleted that
+  // provider. The next pass must drop the record, not rewrite the dead path.
+  const backupPath = configPath + ".image-budget-backup.json";
+  writeFileSync(backupPath, JSON.stringify({ version: 1, entries: [
+    { key: "llm-pi-ai|providers|ghost", ns: "llm-pi-ai", path: ["providers", "ghost"], fields: [
+      { hadValue: false, applied: 2097152 },
+    ] },
+  ] }));
   // Every PI route shares one namespace, and each accepted write advances the
   // revision the next route was read at — the conflict the real settings
   // service raises, which must not cost the pass the profiles after it.
@@ -198,6 +206,9 @@ try {
     profile(name).requestImagePixelBudget === 1440000 && profile(name).maxRequestImageBytes === 2097152);
   await eventually(() => rows.slice(0, 2).every(target => target.user.maxImagesPerRequest === 20 && target.user.imageOffloadCountQuantum === 10) && budgeted());
   assert.equal(writes, 2 + profiles.length);
+  assert.ok(!readFileSync(backupPath, "utf8").includes("ghost"), "a dead backup entry must be pruned");
+  console.log("  OK a backup entry for a provider that no longer exists is pruned");
+  checks++;
   for (const name of profiles) {
     assert.deepEqual(profile(name), {
       api: "openai-completions",
@@ -218,6 +229,99 @@ try {
   }
   console.log("  OK every configured PI profile is budgeted, and persisted host values survive disposal");
   checks++;
+
+  // Second pass: a removed profile loses its record on the next settings event,
+  // and teardown must survive the shutdown order where the host has already
+  // disposed the settings service.
+  const home2 = mkdtempSync(join(tmpdir(), "bili-image-budget-teardown-"));
+  try {
+    const configPath2 = join(home2, "billion-context.json");
+    writeFileSync(configPath2, "{}");
+    const declared2 = () => ({
+      keep: { api: "openai-completions", baseURL: "https://keep.test/v1" },
+      gone: { api: "openai-completions", baseURL: "https://gone.test/v1" },
+    });
+    const rows2 = [row("llm-pi-ai", { providers: declared2() }, { providers: declared2() })];
+    const routes2 = [pi("keep"), pi("gone")];
+    const services2 = {
+      settings: {
+        describe: () => rows2.map(descriptor => ({ ...descriptor })),
+        mutate: async (ns, ops, revision) => {
+          const target = rows2.find(candidate => candidate.ns === ns);
+          if (target.revision !== revision) {
+            const error = new Error(`settings namespace "${ns}" changed since it was read (expected revision ${revision}, now ${target.revision})`);
+            error.code = "SETTINGS_CONFLICT";
+            throw error;
+          }
+          for (const op of ops) {
+            let value = target.value;
+            let user = target.user;
+            for (const segment of op.path.slice(0, -1)) {
+              value = value[segment] ??= {};
+              user = user[segment] ??= {};
+            }
+            const key = op.path.at(-1);
+            if (op.op === "unset") {
+              delete value[key];
+              delete user[key];
+            } else {
+              value[key] = op.value;
+              user[key] = op.value;
+            }
+          }
+          target.revision++;
+        },
+      },
+      llm: { listConfigurableProviders: () => routes2 },
+    };
+    const listeners2 = new Map();
+    let dispose2;
+    installImageBudgetDefaults({
+      inject: (dependencies, callback) => callback({
+        get: name => services2[name],
+        effect: effect => { dispose2 = effect(); },
+        on: (event, callback2) => listeners2.set(event, callback2),
+      }),
+    }, {
+      ready: Promise.resolve(true),
+      configPath: () => configPath2,
+      readConfig: path => JSON.parse(readFileSync(path, "utf8")),
+    });
+    const backupPath2 = configPath2 + ".image-budget-backup.json";
+    await eventually(() => ["keep", "gone"].every(name =>
+      rows2[0].user.providers[name].requestImageMaxBytes === 153600));
+    assert.ok(readFileSync(backupPath2, "utf8").includes("gone"));
+    delete rows2[0].user.providers.gone;
+    delete rows2[0].value.providers.gone;
+    listeners2.get("settings/document-updated")();
+    const pruned = () => {
+      const text = readFileSync(backupPath2, "utf8");
+      return !text.includes("gone") && text.includes("keep");
+    };
+    const end2 = Date.now() + 5000;
+    while (!pruned()) {
+      if (Date.now() > end2) throw new Error("timed out while pruning a removed provider profile");
+      await pause(10);
+    }
+    console.log("  OK a removed provider profile drops its backup record on the next pass");
+    checks++;
+
+    const warnings = [];
+    const warn = console.warn;
+    console.warn = (...args) => { warnings.push(args.join(" ")); };
+    try {
+      delete services2.settings;
+      await dispose2();
+    } finally {
+      console.warn = warn;
+    }
+    assert.deepEqual(warnings, [], "teardown must not report an error once the settings service is gone");
+    assert.ok(existsSync(backupPath2), "teardown without a settings service must keep the backup file");
+    console.log("  OK teardown does not throw when the host already disposed the settings service");
+    checks++;
+  } finally {
+    rmSync(home2, { recursive: true, force: true });
+  }
 } finally {
   rmSync(home, { recursive: true, force: true });
 }

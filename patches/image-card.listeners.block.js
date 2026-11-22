@@ -35,6 +35,7 @@
              delete draft.imageRetentionMaxDim;
              delete draft.imagePrompt;
              delete draft.imageRescaleMaxDim;
+             delete draft.imageRestoreHostOffload;
              draft.maxRequestImages = 20;
              draft.imageOffloadCountQuantum = 10;
              draft.requestImageMaxBytes = 150 * 1024;
