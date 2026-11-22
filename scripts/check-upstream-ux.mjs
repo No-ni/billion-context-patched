@@ -64,7 +64,7 @@ const assertImageConfigKeys = (text, what) => {
     COMPRESS_SETTING_FIELDS: new Set(), INERT_REMOVED_COMPRESS_KEYS: [],
     log: (level, message) => warnings.push({ level, message }),
   });
-  warn(Object.freeze({ maxRequestImages: 20, imageOffloadCountQuantum: 10,
+  warn(Object.freeze({ maxRequestImages: 20, imageOffloadCountQuantum: 10, imageRestoreHostOffload: true,
     requestImageMaxBytes: 153600, requestImagePixelBudget: 1440000, maxRequestImageBytes: 2097152 }));
   assert.equal(warnings.length, 0, what + " must accept all image budget keys without warnings");
   warn({ imageRetentoin: false });

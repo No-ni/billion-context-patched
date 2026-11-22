@@ -1042,9 +1042,17 @@ if (text.includes(RESTORE_RETRY_NEW)) {
   console.log("image restore retry send: patched");
 }
 const UPLOAD_413_ANCHOR = "else if(overflowInfo.isOverflow){";
+const OVERFLOW_REFOLD_RESET_ANCHOR = "pendingForward.prepared=next.prepared;return next}:void 0;";
+const OVERFLOW_REFOLD_RESET = "if(overflowRefold)overflowRefold.reset=(body,nextPrepared)=>{pendingForward.body=body;pendingForward.prepared=nextPrepared};";
+if (text.includes(OVERFLOW_REFOLD_RESET)) {
+  console.log("upload-limit 413 rollback hook: already patched");
+} else {
+  replaceOnce("upload-limit 413 rollback hook", OVERFLOW_REFOLD_RESET_ANCHOR, OVERFLOW_REFOLD_RESET_ANCHOR + OVERFLOW_REFOLD_RESET);
+  console.log("upload-limit 413 rollback hook: patched");
+}
 const UPLOAD_413_BRANCH = [
-  'else if(overflowInfo.imageCountCap===void 0&&!overflowInfo.isOverflow&&__biliUploadLimitReject(upstreamResult.response.status,overflowText)&&typeof wireBody==="string"&&prepared.protocol){',
-  'const uploadSession=prepared.session;upstreamResult.clearTimer();let recovered=null;',
+  'else if(overflowInfo.imageCountCap===void 0&&(__biliUploadLimitReject(upstreamResult.response.status,overflowText)||(overflowInfo.isOverflow===true&&overflowInfo.window===void 0&&/request_too_large/i.test(overflowText)))&&typeof wireBody==="string"&&prepared.protocol){',
+  'const uploadSession=prepared.session;upstreamResult.clearTimer();let recovered=null;const uploadOriginalBody=wireBody,uploadOriginalPrepared=prepared,uploadRequests=uploadSession.stats.requests;',
   'for(const uploadRatio of [.6,.35]){',
   'const uploadWindow=config&&Number.isFinite(config.modelContextLimit)?config.modelContextLimit:0;',
   'const uploadTarget=__biliUploadRefoldTarget(wireBody,uploadWindow,uploadSession.stats&&uploadSession.stats.lastInputTokens,uploadRatio);',
@@ -1061,11 +1069,23 @@ const UPLOAD_413_BRANCH = [
   'if(!(uploadRetried.response.status===413&&__biliUploadLimitReject(413,uploadText)))break;',
   '}',
   'if(recovered){wireBody=recovered.body;if(recovered.prepared)prepared=recovered.prepared;upstreamResult=recovered.result;',
-  'log2("info",`[${uploadSession.id}] [upload-413] upstream rejected the request body as too large (HTTP 413, not a context overflow); folded once to ~${recovered.target} tokens and re-sent within the same request, upstream accepted`)}',
+  'log2("info",`[${uploadSession.id}] [upload-413] upstream rejected the request body as too large (HTTP 413, not a context overflow); folded once to ~${recovered.target} tokens and re-sent within the same request, upstream accepted`)}else{',
+  'if(uploadSession.stats.requests!==uploadRequests){uploadSession.stats.requests=uploadRequests;markDirty(uploadSession)}',
+  'if(overflowRefold&&overflowRefold.reset)overflowRefold.reset(uploadOriginalBody,uploadOriginalPrepared)',
+  '}',
   '}',
 ].join("");
+const UPLOAD_413_OLD_START = 'else if(overflowInfo.imageCountCap===void 0&&!overflowInfo.isOverflow&&__biliUploadLimitReject(';
 if (text.includes(UPLOAD_413_BRANCH)) {
   console.log("upload-limit 413 refold: already patched");
+} else if (text.includes(UPLOAD_413_OLD_START)) {
+  const start = text.indexOf(UPLOAD_413_OLD_START);
+  if (text.indexOf(UPLOAD_413_OLD_START, start + 1) !== -1) throw new Error("upload-limit 413 refold: duplicate legacy branch");
+  const end = text.indexOf(UPLOAD_413_ANCHOR, start);
+  if (end < 0) throw new Error("upload-limit 413 refold: legacy branch end moved");
+  text = text.slice(0, start) + UPLOAD_413_BRANCH + text.slice(end);
+  changed = true;
+  console.log("upload-limit 413 refold: migrated from the pre-rollback branch");
 } else {
   replaceOnce("upload-limit 413 refold", UPLOAD_413_ANCHOR, UPLOAD_413_BRANCH + UPLOAD_413_ANCHOR);
   console.log("upload-limit 413 refold: patched");

@@ -229,6 +229,29 @@ async function imageRestoreChecks() {
     assert.deepEqual(after.content, before.content, "the offloaded request must be re-sent with the exact previous text+image parts");
     assert.match(proxyLog(), /\[image-restore\] put 1 host-offloaded image/);
   });
+  await check("a joined-string host message restores only when its surrounding text matches", async () => {
+    await applyConfiguration({ ...baseConfiguration, imageRestoreHostOffload: true });
+    const cid = "e2e-image-restore-string", id = imageToken(cid), messages = liveImageMessages(id, "E2E_IMAGE_RESTORE_STRING_MARKER");
+    const first = await chat(cid, messages); assert.equal(first.status, 200, first.text);
+    const before = markerMessage("E2E_IMAGE_RESTORE_STRING_MARKER");
+    assert(Array.isArray(before.content) && before.content.some(part => part.type === "image_url"), "the first send must carry the image");
+    // The OpenAI Chat path joins every text block of an offloaded message into
+    // one string before the request leaves the host; this is the form the real
+    // desktop client sends after an image is retired.
+    const joined = "E2E_IMAGE_RESTORE_STRING_MARKER: the earlier screenshot." + offloadText(id);
+    const offloaded = [messages[0], { role: "user", content: joined }, messages[2],
+      { role: "user", content: "E2E_IMAGE_RESTORE_STRING_CONTINUE: continue with the earlier screenshot." }];
+    const second = await chat(cid, offloaded); assert.equal(second.status, 200, second.text);
+    const after = markerMessage("E2E_IMAGE_RESTORE_STRING_MARKER");
+    // A changed message gets a fresh accelerator ref, so compare the visible
+    // text and image structure with the per-message refs ignored.
+    const visible = content => Array.isArray(content)
+      ? content.map(part => part?.type === "text" ? part.text.replace(/<acp\b[^>]*>[\s\S]*?<\/acp>\s*/g, "") : part?.type).join("|")
+      : content;
+    assert.equal(visible(after.content), visible(before.content), "the joined string must regain the cached text and image parts; before=" + JSON.stringify(before.content) + " after=" + JSON.stringify(after.content));
+    assert(Array.isArray(after.content) && after.content.some(part => part?.type === "image_url"), "the restored message must carry the image again");
+    assert.match(proxyLog(), /\[image-restore\] put 1 host-offloaded image/);
+  });
   await check("with the restore switch off the host placeholder stays on the wire", async () => {
     await applyConfiguration({ ...baseConfiguration, imageRestoreHostOffload: false });
     const cid = "e2e-image-restore-off", id = imageToken(cid), messages = liveImageMessages(id, "E2E_IMAGE_RESTORE_OFF_MARKER");
@@ -240,21 +263,27 @@ async function imageRestoreChecks() {
     assert(!wire.includes("image_url"), "no image part may be re-added when the switch is off");
     await applyConfiguration(baseConfiguration);
   });
-  await check("an upload-limit 413 that is not a context overflow folds once and re-sends", async () => {
-    const cid = "e2e-upload-413", path = "/v1/chat/completions", history = [];
-    for (let i = 0; i < 10; i++) history.push({ role: i % 2 === 0 ? "user" : "assistant", content: "E2E_UPLOAD_413_" + i + ": " + "foldable local history body. ".repeat(80) });
-    history.push({ role: "user", content: "E2E_UPLOAD_413_FINAL: answer after the transport refusal." });
-    const plan = gateway.planPath(path, [{ kind: "status", status: 413, body: JSON.stringify({ error: { message: "Request body exceeds the upload size limit", type: "upload_limit" } }) }]);
+  const upload413Case = async (cid, refusal) => {
+    const path = "/v1/chat/completions", history = [], marker = cid.toUpperCase().replaceAll("-", "_") + "_0";
+    for (let i = 0; i < 10; i++) history.push({ role: i % 2 === 0 ? "user" : "assistant", content: marker + "_" + i + ": " + "foldable local history body. ".repeat(80) });
+    history.push({ role: "user", content: marker + "_FINAL: answer after the transport refusal." });
+    const plan = gateway.planPath(path, [{ kind: "status", status: 413, body: JSON.stringify(refusal) }]);
     const start = gateway.http.length;
     let result;
     try { result = await chat(cid, history, "off", randomUUID()); } finally { plan.cancel(); }
     assert.equal(result.status, 200, result.text);
     const sends = gateway.http.slice(start).filter(record => record.path === path);
     assert(sends.length >= 2, "the refusal must be followed by a re-send: " + JSON.stringify(gateway.http.slice(start).map(record => record.path)));
-    assert(sends[0].decoded.includes("E2E_UPLOAD_413_0"), "the rejected attempt must carry the whole history");
+    assert(sends[0].decoded.includes(marker), "the rejected attempt must carry the whole history");
     assert(sends.at(-1).decoded.length < sends[0].decoded.length, "the re-sent body must be smaller than the rejected one");
     assert.match(proxyLog(), /\[upload-413\].*folded once/);
-  });
+  };
+  await check("an upload-limit 413 that is not a context overflow folds once and re-sends", () =>
+    upload413Case("e2e-upload-413", { error: { message: "Request body exceeds the upload size limit", type: "upload_limit" } }));
+  await check("a generic request_too_large 413 with no context window folds once", () =>
+    upload413Case("e2e-upload-413-generic", { error: { message: "request_too_large: the request body is too large for this endpoint", type: "request_too_large" } }));
+  await check("a Chinese request-body-too-large 413 folds once", () =>
+    upload413Case("e2e-upload-413-zh", { error: { message: "请求体过大，超过了上传限制", type: "upload_limit" } }));
 }
 
 async function ingressChecks() {

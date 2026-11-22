@@ -58,3 +58,28 @@ TypeError: Cannot read properties of undefined (reading 'describe')
 - 备份清理不删除 settings 档案；四个空档案由用户在设置页删除。
 - 关机时跳过恢复不会回滚已写入的预算值——这是宿主销毁顺序决定的，不是新行为。
 - 本轮仍为 0.7.5，不升版；离线验证后安装到本机 DSH profile，重启由用户执行。
+
+## 追加复核：备份字段名与关闭期读取（2026-11-22 15:20）
+
+按“再检查是否还有没考虑全面的情况”逐项复核写入路径时，发现并修复了两个问题。
+
+### 1. 备份记录没有字段名，重启后无法恢复
+
+`writePiImageBackups` 序列化字段时只写 `{hadValue, previous, applied}`，没有 `name`；`readPiImageBackups` 却按 `field.name` 建 Map。同一进程内 `applied` 保存在内存里，键是正确的，所以原有场景（写入后立即销毁）全部通过；一旦重启，读回的三个字段全部落到 `undefined` 键，`restore` 里 `profile[undefined] !== applied` 使所有字段被跳过，于是停用或卸载插件时三项预算不会被回滚，备份文件也永远保留这些无法恢复的记录。
+
+修复：写入时输出 `({ name, ...field })`；读取时对没有名字的旧记录做无损迁移——字段数等于 `PI_IMAGE_KEYS.length` 时按固定写入顺序补名，之后按名字恢复；无法对应的残缺记录丢弃并立即规范化文件。这样本机已存在的 `ylinkimi`、`test` 两个三字段记录仍能在重启后回滚，四个已删除 provider 的单字段记录随清理消失。
+
+### 2. 关闭阶段仍可能读取已销毁的服务
+
+`flush` 在 `await settings.mutate(...)` 之后无条件调用 `settings.describe()`。宿主关闭时如果这一轮正卡在写入上，恢复钩子先把服务销毁，await 返回后就会抛错并记一条 `could not apply DeepSeek image budget`。修复：每轮开始先取 `settings` 与 `llm`，任一不可用即结束本轮；每次写入完成后检查 `closed` 再读快照。
+
+### 验证
+
+`check-image-budget.mjs` 从 19 项扩到 21 项：
+
+| 场景 | 断言 |
+| --- | --- |
+| 运行中新增 provider | 触发 `settings/document-updated` 后三项预算自动写入，备份记录含 `"name":"requestImageMaxBytes"` |
+| 跨重启恢复 | 实例 A 写入后，实例 B 从同一文件启动并销毁，三项键被回滚、备份文件被删除 |
+
+用真实备份文件副本（6 条记录，其中 4 条是已删除 provider 的单字段残片）验证迁移：启动后文件只剩 `ylinkimi`、`test` 两条，各带三个字段名；随后销毁实例，`ylinkimi` 的三项键被清空，`test` 的 `maxRequestImageBytes` 回到退役前记录的 `33554432`。

@@ -934,3 +934,41 @@ B1 现将缺失、空和未知指令统一收敛为 `off`。显式 `gzip` / `br`
 
 边界：清理只作用于插件自己的备份表，不动 settings 里的 provider 档案本身；被用户删除的 profile 不会因为插件而重建（IMG-10a 的“只填写已建档 profile”仍然成立）。关机时跳过恢复不会回滚已写入的预算值，这是宿主销毁顺序决定的，不是新增副作用。
 
+### 追加复核（同日）：备份记录的字段名与关闭期读取
+
+逐项复核这些写入路径时发现两个问题：
+
+1. **备份记录没有字段名**。`writePiImageBackups` 序列化时只写 `{hadValue, previous, applied}`，而 `readPiImageBackups` 按 `field.name` 建 Map。同一进程内 `applied` 在内存里带正确名字，测试和日常卸载都正常；一旦重启，读回来的字段全部落到 `undefined` 键，`restore` 因 `profile[undefined] !== applied` 全部跳过，卸载或停用插件时三项预算不会被回滚，备份文件还会永久保留这些无法恢复的记录。修复：写入时补上 `name`；读取时对没有名字的旧记录做迁移——三个字段齐全时按 `PI_IMAGE_KEYS` 的固定写入顺序补名，无法对应的残缺记录丢弃，并立即把规范化结果写回。
+2. **关闭阶段仍可能读服务**。`flush` 在 `await settings.mutate(...)` 之后直接 `settings.describe()`；如果此时插件已销毁、服务已被宿主拿走，就会抛错并记一条 `could not apply DeepSeek image budget`。修复：每轮开始先取 `settings` 与 `llm`，任一不可用即结束本轮；写完后若 `closed` 为真直接退出。
+
+验证：`scripts/check-image-budget.mjs` 从 19 项扩到 21 项。新增“运行中新增 provider”场景——运行后向快照和路由表加入 `late` 并触发 `settings/document-updated`，断言三项预算自动写入且备份记录带字段名；新增“跨重启恢复”场景——第一个实例写入后，第二个实例从同一配置文件与备份启动，销毁第二个实例时断言三项键被回滚、备份文件被删除。反向验证：把写入端的 `({ name, ...field })` 改成 `({ ...field })` 后，跨重启用例以“the backup must name each field so a later process can restore it”失败（exit 1）；恢复后 21 项通过。
+
+## 38. 2026-11-22：重启后异常路径复核（IMG-10a / IMG-12 / IMG-13）
+
+用户重启后要求继续排查“没考虑到的场景或边界”，三路只读审计分别覆盖图片还原、预算写入和真实日志，发现的问题都在本轮修复。
+
+### IMG-12：宿主合并字符串与缓存全局上限
+
+宿主 `llm-pi-ai/src/context.ts:96` 在整条消息只剩文本时用 `join("")` 把文本块拼成一个字符串；如果图片已退役，这个字符串里是“说明文本 + 占位”，原来的数组遍历永远看不到 `{type:"text"}` 的容器，所以字符串请求不会还原。新增 `__biliWalkObjects` 与 `__biliRestoreStringContent`：先按占位切分字符串、用 sha256 找到缓存条目，再按占位位置重建 `text + handle + image` 数组。真实加速器会给文本块加 `<acp …>m00001</acp>` 引用，消息内容变化后引用也会变，因此校验时忽略这类引用，重建时保留当前引用，只放回 handle 与 image；没有这个放宽，现存 e2e 的字符串场景会以“1 host image placeholder(s) had no captured wire bytes”失败。
+
+缓存原本只有每会话 64 MiB 与 64 个会话两个上限，最坏可占 4 GiB；增加 `__BILI_IMAGE_RESTORE_TOTAL_BYTES = 256 MiB` 的全局上限，超限时从最久未使用的会话开始整组淘汰，访问会话时刷新淘汰顺序。缓存条目同时保存捕获时的整条 content 快照（浅拷贝），字符串重建才能拿到 handle 和 image。
+
+### IMG-13：泛化 request_too_large、中文文案与失败回滚
+
+旧条件要求 `!overflowInfo.isOverflow`，而 `request_too_large` 已被 `CONTEXT_OVERFLOW_PATTERNS` 标成溢出；同时上传正则没有中文。现在分支接受“具体上传/体积措辞”或“`request_too_large` 且解析不到上下文窗口”，并给正则补上 `request_too_large` 以外的中文“请求体过大/上传大小超限/超过上传大小”。真正带窗口的上下文溢出仍先被 `overflowInfo.isOverflow` 分支处理。
+
+`overflowRefold` 每次调用都会让 `runPreparedPipeline` 执行一次准备并增加 `stats.requests`；旧实现两次重发失败后仍把计数留在 +1/+2，且 `pendingForward.prepared` 已被替换，后续 `rememberPluginMessages` 保存的是折叠后的视图。新增 `overflowRefold.reset` 钩子记录原始 `pendingForward.body/prepared`，分支进入时保存原始 body/prepared/requests，未恢复时全部回滚并按原值 `markDirty`。重发成功则保留这次真实请求的计数。
+
+### IMG-10a：预算写入的异常、并发与卸载
+
+1. `readConfig` 抛错时旧 `flush` 整轮中止，坏配置永久停写；现在按内建默认值继续并只告警一次，文件修复后 watcher 自动恢复。
+2. 任一非 `SETTINGS_CONFLICT` 错误会从路由循环抛出并结束整轮，后面的 provider 全部饿死；现在每条路由 `try/catch`，失败只记录该路由，其他路由继续。
+3. 销毁发生在 `settings.mutate` 在途时，旧实现先置 `closed` 再直接 `restore`，在途写入完成后没有备份，预算值泄漏；现在 effect 先等待 `running` 的 flush 结束（`idleWaiters`），再执行恢复。
+4. 备份文件读不出来时静默从空表开始，下一次写入会覆盖证据；现在改名 `.corrupt-<时间戳>` 并告警。写入改为“读现存条目 → 合并本进程记录 → 用 `pid+时间戳` 唯一临时文件 rename”，删除只删明确 removed 的键，避免同机两个进程互相覆盖；写失败只告警，不阻断已生效的预算写入，`unlink` 失败不会变成未处理的 rejected promise。
+
+`scripts/patch-bili-agent.mjs` 的 native 注册表补上 `imageRestoreHostOffload`，并把旧版五项 patched 串作为 legacy anchor 迁移，避免安装时拒绝上一版构建；`check-upstream-ux.mjs` 的配置样例同步六键。
+
+### 验证与边界
+
+`check-image-budget.mjs` 从 21 项扩到 24 项：坏配置回退并在修复后恢复、单路由失败不阻断后续路由、在途写入时销毁仍恢复并删除备份。`check-e2e-mock.mjs` 从 26 项扩到 29 项：字符串合并内容还原、泛化 `request_too_large`、中文“请求体过大”三种 413。`check-upstream-ux.mjs` 迁移用例覆盖六键。反向验证（均 exit 1）：把 `__biliRestoreStringMessages` 改成直接返回零结果后，e2e 在第 17 项以 `the joined string must regain the cached text and image parts` 失败；把 effect 的 idle 等待改成直接 `return restore()` 后，预算检查以 `the in-flight profile must be recorded and restored, not leaked` 失败；把逐路由 catch 改成重新抛出后，预算检查以 `timed out while applying native image budget` 失败（后续路由不再写入）。Responses WebSocket 路径不经过 `__biliRestoreHostOffloads`，本轮未改；宿主先还原后按 10 MiB 总量重新换占位的顺序也未改（仅在超大请求出现）。真实 DNS、双实例共用 864 MiB 会话库属于上游/运行拓扑，不在本补丁范围。
+

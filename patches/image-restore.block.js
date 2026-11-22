@@ -9,6 +9,7 @@
 const __BILI_IMAGE_RESTORE_PARTS = 96;
 const __BILI_IMAGE_RESTORE_BYTES = 64 * 1024 * 1024;
 const __BILI_IMAGE_RESTORE_SESSIONS = 64;
+const __BILI_IMAGE_RESTORE_TOTAL_BYTES = 256 * 1024 * 1024;
 const __BILI_IMAGE_OFFLOAD_MARK = "image omitted to fit request image limits;";
 const __BILI_IMAGE_HANDLE_MARK = "; request preview ";
 const __biliImageRestoreCaches = new Map();
@@ -23,9 +24,15 @@ function __biliImageRestoreEnabled() {
 }
 
 function __biliImageRestoreCache(sessionId) {
-  let cache = __biliImageRestoreCaches.get(sessionId);
-  if (cache !== void 0) return cache;
-  cache = { parts: new Map(), order: [], bytes: 0, announced: false };
+  const existing = __biliImageRestoreCaches.get(sessionId);
+  if (existing !== void 0) {
+    // Refresh the eviction order: the session used right now is the last one a
+    // global byte-budget trim may drop.
+    __biliImageRestoreCaches.delete(sessionId);
+    __biliImageRestoreCaches.set(sessionId, existing);
+    return existing;
+  }
+  const cache = { parts: new Map(), order: [], bytes: 0, announced: false };
   __biliImageRestoreCaches.set(sessionId, cache);
   while (__biliImageRestoreCaches.size > __BILI_IMAGE_RESTORE_SESSIONS) {
     const oldest = __biliImageRestoreCaches.keys().next();
@@ -47,21 +54,36 @@ function __biliDropRestorePart(cache, key) {
   if (cache.bytes < 0) cache.bytes = 0;
 }
 
-function __biliRememberRestorePart(cache, key, handle, image) {
+function __biliRememberRestorePart(cache, key, handle, image, content) {
   const bytes = __biliImagePartBytes(image);
   const known = cache.parts.get(key);
   if (known !== void 0) {
     cache.bytes += bytes - known.bytes;
-    cache.parts.set(key, { handle: handle, image: image, bytes: bytes });
+    cache.parts.set(key, { handle: handle, image: image, content: content, bytes: bytes });
     return;
   }
-  cache.parts.set(key, { handle: handle, image: image, bytes: bytes });
+  cache.parts.set(key, { handle: handle, image: image, content: content, bytes: bytes });
   cache.order.push(key);
   cache.bytes += bytes;
   while (cache.order.length > __BILI_IMAGE_RESTORE_PARTS || cache.bytes > __BILI_IMAGE_RESTORE_BYTES) {
     const oldest = cache.order.shift();
     if (oldest === void 0) break;
     __biliDropRestorePart(cache, oldest);
+  }
+  __biliTrimRestoreCaches();
+}
+
+function __biliRestoreCacheBytes() {
+  let total = 0;
+  for (const cache of __biliImageRestoreCaches.values()) total += cache.bytes;
+  return total;
+}
+
+function __biliTrimRestoreCaches() {
+  while (__biliRestoreCacheBytes() > __BILI_IMAGE_RESTORE_TOTAL_BYTES) {
+    const oldest = __biliImageRestoreCaches.keys().next();
+    if (oldest.done) break;
+    __biliImageRestoreCaches.delete(oldest.value);
   }
 }
 
@@ -98,6 +120,95 @@ function __biliWalkArrays(root, visit) {
   }
 }
 
+function __biliWalkObjects(root, visit) {
+  const stack = [root];
+  let nodes = 0;
+  while (stack.length > 0) {
+    if (++nodes > 200000) return;
+    const node = stack.pop();
+    if (node === null || typeof node !== "object") continue;
+    if (Array.isArray(node)) {
+      for (const item of node) if (item !== null && typeof item === "object") stack.push(item);
+      continue;
+    }
+    visit(node);
+    for (const key in node) {
+      const value = node[key];
+      if (value !== null && typeof value === "object") stack.push(value);
+    }
+  }
+}
+
+// The OpenAI Chat path joins all-text message content into one string before
+// the host offloads an image. A placeholder inside that string can only be
+// restored when the surrounding text proves it is the same message the cached
+// array came from; otherwise the placeholder stays untouched.
+function __biliStripAcpTags(text) {
+  // The accelerator prefixes text blocks with per-message ACP refs. A message
+  // whose content changed gets a fresh ref, so the refs are not part of the
+  // image identity and are ignored when matching the surrounding text.
+  return text.replace(/<acp\b[^>]*>[\s\S]*?<\/acp>\s*/g, "");
+}
+
+function __biliRestoreStringContent(cache, protocol, text) {
+  const pattern = /\[image omitted to fit request image limits;[^\]]*?sha256:([0-9a-f]{64})[^\]]*\]/g;
+  const matches = [];
+  let match;
+  while ((match = pattern.exec(text)) !== null) matches.push({ text: match[0], token: match[1] });
+  if (matches.length === 0) return null;
+  if (text.split(__BILI_IMAGE_OFFLOAD_MARK).length - 1 !== matches.length) return null;
+  let content = null;
+  const handles = new Set();
+  const entries = [];
+  for (const item of matches) {
+    const entry = cache.parts.get(protocol + "|" + item.token);
+    if (entry === void 0 || !Array.isArray(entry.content)) return null;
+    if (content === null) content = entry.content;
+    else if (content !== entry.content) return null;
+    entries.push(entry);
+    if (entry.handle !== null && typeof entry.handle === "object" && typeof entry.handle.text === "string") handles.add(entry.handle.text);
+  }
+  let plain = text;
+  for (const item of matches) plain = plain.replace(item.text, "");
+  const textParts = [];
+  let images = 0;
+  for (const part of content) {
+    if (part === null || typeof part !== "object") continue;
+    if (typeof part.text === "string") textParts.push(part.text);
+    if (__biliIsRequestImagePart(part)) images += 1;
+  }
+  if (images !== matches.length) return null;
+  if (__biliStripAcpTags(plain) !== __biliStripAcpTags(textParts.filter(part => !handles.has(part)).join(""))) return null;
+  // Rebuild around the placeholder positions so the current surrounding text
+  // (including a fresh ACP ref) stays in place; only the retired image and its
+  // handle are put back from the captured array.
+  const rebuilt = [];
+  let rest = text;
+  for (let i = 0; i < matches.length; i++) {
+    const at = rest.indexOf(matches[i].text);
+    if (at < 0) return null;
+    const before = rest.slice(0, at);
+    if (before.length > 0) rebuilt.push({ type: "text", text: before });
+    rebuilt.push(entries[i].handle, entries[i].image);
+    rest = rest.slice(at + matches[i].text.length);
+  }
+  if (rest.length > 0) rebuilt.push({ type: "text", text: rest });
+  return rebuilt;
+}
+
+function __biliRestoreStringMessages(parsed, cache, protocol) {
+  let restored = 0;
+  let missing = 0;
+  __biliWalkObjects(parsed, function (node) {
+    if (typeof node.content !== "string" || node.content.indexOf(__BILI_IMAGE_OFFLOAD_MARK) === -1) return;
+    const content = __biliRestoreStringContent(cache, protocol, node.content);
+    if (content === null) { missing += 1; return }
+    node.content = content.slice();
+    for (const part of content) if (__biliIsRequestImagePart(part)) restored += 1;
+  });
+  return { restored: restored, missing: missing };
+}
+
 function __biliCaptureRequestImages(parsed, protocol, sessionId) {
   const cache = __biliImageRestoreCache(sessionId);
   __biliWalkArrays(parsed, function (array2) {
@@ -109,7 +220,7 @@ function __biliCaptureRequestImages(parsed, protocol, sessionId) {
       if (token === null) continue;
       const image = __biliIsRequestImagePart(array2[i + 1]) ? array2[i + 1] : __biliIsRequestImagePart(array2[i - 1]) ? array2[i - 1] : null;
       if (image === null) continue;
-      __biliRememberRestorePart(cache, protocol + "|" + token, part, image);
+      __biliRememberRestorePart(cache, protocol + "|" + token, part, image, array2.slice());
     }
   });
 }
@@ -132,6 +243,9 @@ function __biliRestoreRequestImages(parsed, protocol, sessionId) {
       restored += 1;
     }
   });
+  const strings = __biliRestoreStringMessages(parsed, cache, protocol);
+  restored += strings.restored;
+  missing += strings.missing;
   return { restored: restored, missing: missing };
 }
 
@@ -167,7 +281,7 @@ function __biliRestoreHostOffloads(body, prepared, log) {
 
 function __biliUploadLimitReject(status, bodyText) {
   if (status !== 413 || typeof bodyText !== "string" || bodyText.length === 0) return false;
-  return /(?:upload[_\s-]?limit|upload size|entity too large|payload too large|request body (?:is )?too large|body too large|content too large|maximum upload|exceeds the (?:maximum )?(?:upload|body|request) (?:size|limit))/i.test(bodyText);
+  return /(?:upload[_\s-]?limit|upload size|entity too large|payload too large|request body (?:is )?too large|body too large|content too large|maximum upload|exceeds the (?:maximum )?(?:upload|body|request) (?:size|limit)|\u8bf7\u6c42\u4f53[^\uff0c\u3002\uff1b,;]{0,12}(?:\u8fc7\u5927|\u8d85\u9650|\u8d85\u8fc7|\u592a\u957f)|\u4e0a\u4f20[^\uff0c\u3002\uff1b,;]{0,12}(?:\u5927\u5c0f|\u9650\u5236|\u8d85\u9650|\u8fc7\u5927)|\u8d85\u8fc7[^\uff0c\u3002\uff1b,;]{0,12}(?:\u4e0a\u4f20|\u8bf7\u6c42\u4f53)(?:\u5927\u5c0f|\u9650\u5236)?)/i.test(bodyText);
 }
 
 function __biliUploadRefoldTarget(body, window, lastInputTokens, ratio) {

@@ -306,6 +306,21 @@ try {
     console.log("  OK a removed provider profile drops its backup record on the next pass");
     checks++;
 
+    // A provider configured while the plugin is already running must be picked
+    // up by the settings event, not only on the next startup.
+    rows2[0].user.providers.late = { api: "openai-completions", baseURL: "https://late.test/v1" };
+    rows2[0].value.providers.late = { api: "openai-completions", baseURL: "https://late.test/v1" };
+    routes2.push(pi("late"));
+    listeners2.get("settings/document-updated")();
+    await eventually(() => rows2[0].user.providers.late.requestImageMaxBytes === 153600 &&
+      rows2[0].user.providers.late.requestImagePixelBudget === 1440000 &&
+      rows2[0].user.providers.late.maxRequestImageBytes === 2097152);
+    const lateBackup = readFileSync(backupPath2, "utf8");
+    assert.ok(lateBackup.includes("late"), "a newly configured provider must be recorded for restore");
+    assert.ok(lateBackup.includes("\"name\":\"requestImageMaxBytes\""), "a backup record must name the field it captured");
+    console.log("  OK a provider configured while running is budgeted on the next settings event");
+    checks++;
+
     const warnings = [];
     const warn = console.warn;
     console.warn = (...args) => { warnings.push(args.join(" ")); };
@@ -321,6 +336,273 @@ try {
     checks++;
   } finally {
     rmSync(home2, { recursive: true, force: true });
+  }
+
+  // A restart loads the backup file written by the previous process. Records
+  // must carry the field names the next process needs, or the restore on
+  // uninstall silently skips a field it cannot name.
+  const home3 = mkdtempSync(join(tmpdir(), "bili-image-budget-restart-"));
+  try {
+    const configPath3 = join(home3, "billion-context.json");
+    writeFileSync(configPath3, "{}");
+    const declared3 = () => ({ fresh: { api: "openai-completions", baseURL: "https://fresh.test/v1" } });
+    const rows3 = [row("llm-pi-ai", { providers: declared3() }, { providers: declared3() })];
+    const services3 = {
+      settings: {
+        describe: () => rows3.map(descriptor => ({ ...descriptor })),
+        mutate: async (ns, ops, revision) => {
+          const target = rows3.find(candidate => candidate.ns === ns);
+          if (target.revision !== revision) {
+            const error = new Error("settings namespace \"" + ns + "\" changed since it was read (expected revision " + revision + ", now " + target.revision + ")");
+            error.code = "SETTINGS_CONFLICT";
+            throw error;
+          }
+          for (const op of ops) {
+            let value = target.value;
+            let user = target.user;
+            for (const segment of op.path.slice(0, -1)) {
+              value = value[segment] ??= {};
+              user = user[segment] ??= {};
+            }
+            const key = op.path.at(-1);
+            if (op.op === "unset") { delete value[key]; delete user[key]; }
+            else { value[key] = op.value; user[key] = op.value; }
+          }
+          target.revision++;
+        },
+      },
+      llm: { listConfigurableProviders: () => [pi("fresh")] },
+    };
+    const boot = () => {
+      const listeners = new Map();
+      let dispose;
+      installImageBudgetDefaults({
+        inject: (dependencies, callback) => callback({
+          get: name => services3[name],
+          effect: effect => { dispose = effect(); },
+          on: (event, callback2) => listeners.set(event, callback2),
+        }),
+      }, {
+        ready: Promise.resolve(true),
+        configPath: () => configPath3,
+        readConfig: path => JSON.parse(readFileSync(path, "utf8")),
+      });
+      return { listeners, dispose: () => dispose() };
+    };
+    const backupPath3 = configPath3 + ".image-budget-backup.json";
+    const first = boot();
+    await eventually(() => rows3[0].user.providers.fresh.requestImageMaxBytes === 153600);
+    assert.ok(readFileSync(backupPath3, "utf8").includes("\"name\":\"requestImageMaxBytes\""), "the backup must name each field so a later process can restore it");
+    // A file written by the previous release has no field names; a full set is
+    // still restorable because the capture order is PI_IMAGE_KEYS order.
+    const legacy = JSON.parse(readFileSync(backupPath3, "utf8"));
+    for (const entry of legacy.entries) for (const field of entry.fields) delete field.name;
+    writeFileSync(backupPath3, JSON.stringify(legacy));
+    const second = boot();
+    await pause(50);
+    await second.dispose();
+    assert.deepEqual(rows3[0].user.providers.fresh, { api: "openai-completions", baseURL: "https://fresh.test/v1" }, "a fresh process must restore the fields the previous process recorded");
+    await first.dispose();
+    assert.ok(!existsSync(backupPath3), "restoring every recorded field must remove the backup file");
+    console.log("  OK a restart restores the fields recorded by the previous process");
+    checks++;
+  } finally {
+    rmSync(home3, { recursive: true, force: true });
+  }
+
+  // A malformed config is not a reason to leave images unbudgeted forever: the
+  // pass uses the built-in defaults and a later file repair is picked up by the
+  // watcher without a restart.
+  const home4 = mkdtempSync(join(tmpdir(), "bili-image-budget-config-"));
+  try {
+    const configPath4 = join(home4, "billion-context.json");
+    writeFileSync(configPath4, "{ not json");
+    const rows4 = [row("llm-deepseek-api-key")];
+    const settings4 = {
+      describe: () => rows4.map(descriptor => ({ ...descriptor })),
+      mutate: async (ns, ops, revision) => {
+        const target = rows4.find(candidate => candidate.ns === ns);
+        if (target.revision !== revision) {
+          const error = new Error("conflict");
+          error.code = "SETTINGS_CONFLICT";
+          throw error;
+        }
+        for (const op of ops) {
+          target.value[op.path.at(-1)] = op.value;
+          target.user[op.path.at(-1)] = op.value;
+        }
+        target.revision++;
+      },
+    };
+    const listeners4 = new Map();
+    let dispose4;
+    const warnings4 = [];
+    const warn4 = console.warn;
+    console.warn = (...args) => { warnings4.push(args.join(" ")); };
+    try {
+      installImageBudgetDefaults({
+        inject: (dependencies, callback) => callback({
+          get: name => name === "settings" ? settings4 : { listConfigurableProviders: () => [deepseekApiKey] },
+          effect: effect => { dispose4 = effect(); },
+          on: (event, callback2) => listeners4.set(event, callback2),
+        }),
+      }, {
+        ready: Promise.resolve(true),
+        configPath: () => configPath4,
+        readConfig: path => JSON.parse(readFileSync(path, "utf8")),
+      });
+      await eventually(() => rows4[0].user.maxImagesPerRequest === 20);
+      assert.ok(warnings4.some(line => line.includes("could not read the image configuration")),
+        "a malformed config must be reported once, not silently ignored");
+      assert.equal(rows4[0].user.imageOffloadCountQuantum, 10, "the built-in budget must still apply to a malformed config");
+      writeFileSync(configPath4, JSON.stringify({ maxRequestImages: 34, imageOffloadCountQuantum: 7 }));
+      listeners4.get("settings/document-updated")();
+      await eventually(() => rows4[0].user.maxImagesPerRequest === 34 && rows4[0].user.imageOffloadCountQuantum === 7);
+    } finally {
+      console.warn = warn4;
+      if (dispose4) await dispose4();
+    }
+    console.log("  OK a malformed config falls back to defaults and recovers when the file is repaired");
+    checks++;
+  } finally {
+    rmSync(home4, { recursive: true, force: true });
+  }
+
+  // One provider rejecting a budget must not starve every route after it.
+  const home5 = mkdtempSync(join(tmpdir(), "bili-image-budget-route-"));
+  try {
+    const configPath5 = join(home5, "billion-context.json");
+    writeFileSync(configPath5, "{}");
+    const declared5 = () => ({ bad: { api: "openai-completions", baseURL: "https://bad.test/v1" },
+      good: { api: "openai-completions", baseURL: "https://good.test/v1" } });
+    const rows5 = [row("llm-pi-ai", { providers: declared5() }, { providers: declared5() })];
+    const settings5 = {
+      describe: () => rows5.map(descriptor => ({ ...descriptor })),
+      mutate: async (ns, ops, revision) => {
+        const target = rows5.find(candidate => candidate.ns === ns);
+        if (target.revision !== revision) {
+          const error = new Error("conflict");
+          error.code = "SETTINGS_CONFLICT";
+          throw error;
+        }
+        if (ops.some(op => op.path.includes("bad"))) {
+          const error = new Error("provider profile is read only");
+          error.code = "SETTINGS_READ_ONLY";
+          throw error;
+        }
+        for (const op of ops) {
+          let value = target.value;
+          let user = target.user;
+          for (const segment of op.path.slice(0, -1)) {
+            value = value[segment] ??= {};
+            user = user[segment] ??= {};
+          }
+          const key = op.path.at(-1);
+          if (op.op === "unset") { delete value[key]; delete user[key]; }
+          else { value[key] = op.value; user[key] = op.value; }
+        }
+        target.revision++;
+      },
+    };
+    const listeners5 = new Map();
+    let dispose5;
+    const warnings5 = [];
+    const warn5 = console.warn;
+    console.warn = (...args) => { warnings5.push(args.join(" ")); };
+    try {
+      installImageBudgetDefaults({
+        inject: (dependencies, callback) => callback({
+          get: name => name === "settings" ? settings5 : { listConfigurableProviders: () => [pi("bad"), pi("good")] },
+          effect: effect => { dispose5 = effect(); },
+          on: (event, callback2) => listeners5.set(event, callback2),
+        }),
+      }, {
+        ready: Promise.resolve(true),
+        configPath: () => configPath5,
+        readConfig: path => JSON.parse(readFileSync(path, "utf8")),
+      });
+      await eventually(() => rows5[0].user.providers.good.requestImageMaxBytes === 153600);
+      assert.equal(rows5[0].user.providers.bad.requestImageMaxBytes, undefined);
+      assert.ok(warnings5.some(line => line.includes("providers.bad") && line.includes("read only")),
+        "the rejected route must be reported without aborting the pass");
+    } finally {
+      console.warn = warn5;
+      if (dispose5) await dispose5();
+    }
+    assert.equal(rows5[0].user.providers.good.requestImageMaxBytes, undefined, "teardown must still undo the route that succeeded");
+    assert.equal(rows5[0].user.providers.bad.requestImageMaxBytes, undefined);
+    console.log("  OK one rejected provider route does not starve later routes");
+    checks++;
+  } finally {
+    rmSync(home5, { recursive: true, force: true });
+  }
+
+  // Disposing while a write is in flight must wait for it, record it, and undo
+  // it; otherwise the late write leaves an unowned budget behind forever.
+  const home6 = mkdtempSync(join(tmpdir(), "bili-image-budget-inflight-"));
+  try {
+    const configPath6 = join(home6, "billion-context.json");
+    writeFileSync(configPath6, "{}");
+    const declared6 = () => ({
+      slow: { api: "openai-completions", baseURL: "https://slow.test/v1" },
+      inflight: { api: "openai-completions", baseURL: "https://inflight.test/v1" },
+    });
+    const rows6 = [row("llm-pi-ai", { providers: declared6() }, { providers: declared6() })];
+    let release;
+    let started = false;
+    const settings6 = {
+      describe: () => rows6.map(descriptor => ({ ...descriptor })),
+      mutate: async (ns, ops, revision) => {
+        const target = rows6.find(candidate => candidate.ns === ns);
+        if (target.revision !== revision) {
+          const error = new Error("conflict");
+          error.code = "SETTINGS_CONFLICT";
+          throw error;
+        }
+        if (!started && ops.some(op => op.path.includes("inflight"))) {
+          started = true;
+          await new Promise(resolve => { release = resolve; });
+        }
+        for (const op of ops) {
+          let value = target.value;
+          let user = target.user;
+          for (const segment of op.path.slice(0, -1)) {
+            value = value[segment] ??= {};
+            user = user[segment] ??= {};
+          }
+          const key = op.path.at(-1);
+          if (op.op === "unset") { delete value[key]; delete user[key]; }
+          else { value[key] = op.value; user[key] = op.value; }
+        }
+        target.revision++;
+      },
+    };
+    let dispose6;
+    installImageBudgetDefaults({
+      inject: (dependencies, callback) => callback({
+        get: name => name === "settings" ? settings6 : { listConfigurableProviders: () => [pi("slow"), pi("inflight")] },
+        effect: effect => { dispose6 = effect(); },
+        on: () => {},
+      }),
+    }, {
+      ready: Promise.resolve(true),
+      configPath: () => configPath6,
+      readConfig: path => JSON.parse(readFileSync(path, "utf8")),
+    });
+    await eventually(() => started && rows6[0].user.providers.slow.requestImageMaxBytes === 153600);
+    const done = dispose6();
+    release();
+    await done;
+    const clean = name => rows6[0].user.providers[name].requestImageMaxBytes === undefined &&
+      rows6[0].user.providers[name].requestImagePixelBudget === undefined &&
+      rows6[0].user.providers[name].maxRequestImageBytes === undefined;
+    assert.ok(clean("slow"), "the already written profile must be restored");
+    assert.ok(clean("inflight"), "the in-flight profile must be recorded and restored, not leaked");
+    assert.ok(!existsSync(configPath6 + ".image-budget-backup.json"), "restoring every field must remove the backup");
+    console.log("  OK disposing during an in-flight write restores the late provider");
+    checks++;
+  } finally {
+    rmSync(home6, { recursive: true, force: true });
   }
 } finally {
   rmSync(home, { recursive: true, force: true });
