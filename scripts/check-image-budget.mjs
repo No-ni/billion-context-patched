@@ -705,6 +705,44 @@ try {
   } finally {
     rmSync(home8, { recursive: true, force: true });
   }
+  // IMG-10a: a failed delete ("no records left" against a read-only directory)
+  // must not become an unhandled rejection — the pass simply keeps the file.
+  const home9 = mkdtempSync(join(tmpdir(), "bili-image-budget-delfail-"));
+  try {
+    const configPath9 = join(home9, "billion-context.json");
+    writeFileSync(configPath9, "{}");
+    const backupPath9 = configPath9 + ".image-budget-backup.json";
+    writeFileSync(backupPath9, JSON.stringify({ version: 1, entries: [
+      { key: "llm-pi-ai|providers|ghost", ns: "llm-pi-ai", path: ["providers", "ghost"], fields: [{ name: "requestImageMaxBytes", hadValue: false, applied: 153600 }] },
+    ] }));
+    const rows9 = [row("llm-pi-ai", {}, {})];
+    const services9 = {
+      settings: { describe: () => rows9.map(descriptor => ({ ...descriptor })), mutate: async () => {} },
+      llm: { listConfigurableProviders: () => [] },
+    };
+    const rejections = [], onRejection = reason => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    const previousMode9 = statSync(home9).mode & 0o777;
+    let dispose9;
+    try {
+      chmodSync(home9, 0o555);
+      installImageBudgetDefaults({
+        inject: (dependencies, callback) => callback({ get: name => services9[name], effect: effect => { dispose9 = effect(); }, on: () => {} }),
+      }, { ready: Promise.resolve(true), configPath: () => configPath9, readConfig: path => JSON.parse(readFileSync(path, "utf8")) });
+      await pause(150);
+      assert.deepEqual(rejections, [], "a failed backup delete must not become an unhandled rejection");
+      assert(existsSync(backupPath9), "a backup that cannot be deleted must stay in place");
+      console.log("  OK a failed backup delete is swallowed, not an unhandled rejection");
+      checks++;
+    } finally {
+      chmodSync(home9, previousMode9);
+      process.removeListener("unhandledRejection", onRejection);
+    }
+    await pause(20);
+    if (typeof dispose9 === "function") dispose9();
+  } finally {
+    rmSync(home9, { recursive: true, force: true });
+  }
 } finally {
   rmSync(home, { recursive: true, force: true });
 }
