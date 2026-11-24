@@ -1120,6 +1120,56 @@ if (text.includes(STREAM_TRACE_MARK)) {
   replaceOnce("stream-trace", STREAM_TRACE_ANCHOR, STREAM_TRACE_HELPER + STREAM_TRACE_ANCHOR);
   console.log("stream-trace: patched");
 }
+// 24. client-close truthfulness (B25; upstream master 3afa91562 still records
+// every such close as an abort — see docs/SELF-FIXES.md). The DSH client closes
+// the response socket the moment it holds the terminal frame; that close aborts
+// the upstream read, so the catch saw res.destroyed on replies that had already
+// finished and re-anchored the nudge reference (noteAbortedTurn) for them. The
+// terminal event decides whether the turn completed — #5293 keeps applying to
+// real aborts — and the close itself stays traceable through the B24 trace.
+const ABORT_SITE = 'log2?.("client aborted mid-stream");if(session)noteAbortedTurn(session);';
+const ABORT_SITE_PATCHED = 'if(sawTerminal){log("debug","client closed after terminal");}else{log2?.("client aborted mid-stream");if(session)noteAbortedTurn(session);}';
+const ABORT_LOG_ONLY = 'log2?.("client aborted mid-stream");return}';
+const ABORT_LOG_ONLY_PATCHED = 'if(sawTerminal){log("debug","client closed after terminal");}else{log2?.("client aborted mid-stream");}return}';
+if (text.includes(ABORT_SITE_PATCHED)) {
+  console.log("client-close truthfulness: already patched");
+} else {
+  const bookkeeping = text.split(ABORT_SITE).length - 1;
+  const logOnly = text.split(ABORT_LOG_ONLY).length - 1;
+  if (bookkeeping !== 2 || logOnly !== 1) {
+    throw new Error("client-close truthfulness: expected two abort bookkeeping sites and one log-only site, found " + bookkeeping + " and " + logOnly);
+  }
+  text = text.split(ABORT_SITE).join(ABORT_SITE_PATCHED).split(ABORT_LOG_ONLY).join(ABORT_LOG_ONLY_PATCHED);
+  changed = true;
+  console.log("client-close truthfulness: patched");
+}
+// 25. failure-arm estimate in tokens (B26). outboundPayloadBreakdown priced its
+// arm estimate with estimateCoreMessagesUpper, which returns a CHARACTER count,
+// so a 217K-token session armed a 660K-token emergency shrink after one network
+// failure. The char mass stays the bound, converted to token space: ~3
+// chars/token is the densest non-CJK agent traffic, while CJK is priced exactly
+// by defaultCountTokens and already carried by textEstimate.
+const ARM_SITE = "const armEstimate=Math.max(textEstimate,estimateCoreMessagesUpper(msgs))+overheadEstimate+imageTokens;";
+const ARM_SITE_PATCHED = "const armEstimate=Math.max(textEstimate,Math.ceil(estimateCoreMessagesUpper(msgs)/3))+overheadEstimate+imageTokens;";
+if (text.includes(ARM_SITE_PATCHED)) {
+  console.log("failure-arm estimate: already patched");
+} else {
+  replaceOnce("failure-arm estimate", ARM_SITE, ARM_SITE_PATCHED);
+  console.log("failure-arm estimate: patched");
+}
+// 26. an OpenAI-style finish_reason is a terminal event (B25, second half).
+// sawTerminal was only raised by [DONE], message_stop or a Google finishReason,
+// so a chat.completions stream whose finish_reason chunk arrived without a
+// following [DONE] — the frame DSH actually hangs up on — still looked open to
+// both the truncation check and the client-close catch.
+const OPENAI_TERMINAL_SITE = 'if(ch&&typeof ch["finish_reason"]==="string"&&ch["finish_reason"]!==""){finalFinishReason=ch["finish_reason"];isTerminal=true}';
+const OPENAI_TERMINAL_PATCHED = 'if(ch&&typeof ch["finish_reason"]==="string"&&ch["finish_reason"]!==""){finalFinishReason=ch["finish_reason"];isTerminal=true;sawTerminal=true}';
+if (text.includes(OPENAI_TERMINAL_PATCHED)) {
+  console.log("openai terminal marker: already patched");
+} else {
+  replaceOnce("openai terminal marker", OPENAI_TERMINAL_SITE, OPENAI_TERMINAL_PATCHED);
+  console.log("openai terminal marker: patched");
+}
 if (changed) {
   // The harness loads this build as a module, and a script-mode check is not the
   // same grammar: an anchor that leaves an extra brace can pass one and fail the

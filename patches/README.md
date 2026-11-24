@@ -9,8 +9,10 @@
 - `stream-errors.block.js`：B21，真实流、循环与 WebSocket sink 的中文错误及独立诊断详情。
 - `native-ws-headers.block.js`：native agent 的 WS 权威会话请求头，以 case-insensitive set 覆盖旧标记；由 `patch-bili-agent.mjs` 解析完整 factory 后施加。
 - `preflight.block.js`：B22 的有界快照恢复，以及 B19/B21 的预检错误输出；步骤 22 支持按哨兵替换已有块。
-- B2–B9、B11、B18、B19、B21 在 `scripts/patch-bili-build.mjs` 定点修改原函数；B20 是客户端 bundle 的改动，在 `scripts/patch-bili-client.mjs`，由 `install.mjs` 合并时施加（幂等）。B4/B8 的最终函数体由 B10 替换。按 B1–B22 完整核对，不能只抄旧版本的某一段。
+- B2–B9、B11、B18、B19、B21 在 `scripts/patch-bili-build.mjs` 定点修改原函数；B20 是客户端 bundle 的改动，在 `scripts/patch-bili-client.mjs`，由 `install.mjs` 合并时施加（幂等）。B4/B8 的最终函数体由 B10 替换。按 B1–B26 完整核对，不能只抄旧版本的某一段。
 - B24（流写入轨迹，只写日志）在 `scripts/patch-bili-build.mjs` 步骤 23 内联，不单独成块。
+- B25（客户端关闭按终止事件分类）在步骤 24 与步骤 26 内联：catch 先看 `sawTerminal`，OpenAI 的 `finish_reason` 帧与 Google 一样建立终止证据；上游状态见 [SELF-FIXES.md](../docs/SELF-FIXES.md) 的 SF-01。
+- B26（失败 arm 估算按 token 计）在步骤 25 内联：字符上界以 `Math.ceil(chars/3)` 换算成 token 后再比较；见 SF-02。
 - `accelerator-ledger.block.js` 与 `accelerator-ledger.legacy.js`：加速器账本兼容补丁及精确旧片段，由 `scripts/patch-accelerator.mjs` 应用；用 `check-ledger-runtime.mjs` 验证资源生命周期。
 
 对选定上游的新构建执行：

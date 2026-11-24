@@ -6,9 +6,9 @@
 
 - 上游：<https://github.com/ranxianglei/billion-context>（MIT，Copyright (c) 2026 ranxianglei）
 - 当前固定基线：上游 `0d94a8a2`（上游版本号仍是 0.1.213，kernel 0.0.196）；从旧 `406193b2` 的迁移见第 28 节，第 15 节保存当时的来源历史。
-- 我们的改动不是一份 diff：bili 构建上的二十三组补丁由 `scripts/patch-bili-build.mjs`（B20 在 `scripts/patch-bili-client.mjs`）按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
+- 我们的改动不是一份 diff：bili 构建上的二十六组补丁由 `scripts/patch-bili-build.mjs`（B20 在 `scripts/patch-bili-client.mjs`）按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
 
-项目需求及验收以 [SPEC.md](SPEC.md) 为准。当前维护分为 bili 构建 B1–B24、包装包 W1–W7、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
+项目需求及验收以 [SPEC.md](SPEC.md) 为准。当前维护分为 bili 构建 B1–B26、包装包 W1–W7、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
 
 ## 0. 一页看完（改了什么、下次怎么核对）
 
@@ -25,7 +25,7 @@
 
 当前仍保留指定中转主机渠道的压缩缺省值规则（仅补缺失键）。`promptCache.routing=enabled` 默认值已在 0.5.4 恢复并纳入第 11 组补丁，见第 7、19 节；显式配置优先。
 
-### 0.2 我们对 bili 构建的二十三组补丁
+### 0.2 我们对 bili 构建的二十六组补丁
 
 代理补丁由 `scripts/patch-bili-build.mjs` 按顺序重打；B20 在 client 补丁器，native 的 WS 头在 agent 补丁器。新插入位置要求唯一命中，步骤 6/7 缺锚点已改为失败；helper 标记不能代替源一致性和最终行为检查。下表的旧锚点是历史定位，0.6.8 对新上游的实际锚点及相邻发送路径以脚本和第 28 节为准。
 
@@ -972,3 +972,35 @@ B1 现将缺失、空和未知指令统一收敛为 `off`。显式 `gzip` / `br`
 
 `check-image-budget.mjs` 从 21 项扩到 24 项：坏配置回退并在修复后恢复、单路由失败不阻断后续路由、在途写入时销毁仍恢复并删除备份。`check-e2e-mock.mjs` 从 26 项扩到 29 项：字符串合并内容还原、泛化 `request_too_large`、中文“请求体过大”三种 413。`check-upstream-ux.mjs` 迁移用例覆盖六键。反向验证（均 exit 1）：把 `__biliRestoreStringMessages` 改成直接返回零结果后，e2e 在第 17 项以 `the joined string must regain the cached text and image parts` 失败；把 effect 的 idle 等待改成直接 `return restore()` 后，预算检查以 `the in-flight profile must be recorded and restored, not leaked` 失败；把逐路由 catch 改成重新抛出后，预算检查以 `timed out while applying native image budget` 失败（后续路由不再写入）。Responses WebSocket 路径不经过 `__biliRestoreHostOffloads`，本轮未改；宿主先还原后按 10 MiB 总量重新换占位的顺序也未改（仅在超大请求出现）。真实 DNS、双实例共用 864 MiB 会话库属于上游/运行拓扑，不在本补丁范围。
 
+## 39. 2026-11-24：客户端关闭语义与失败 arm 估算（B25 / B26）
+
+两个问题都是上游自己的判定口径错误，不是本仓库此前引入的偏差；用户要求先查上游，未修则自修并登记，版本保持 0.8.0。上游状态与合并复核方法见 [SELF-FIXES.md](SELF-FIXES.md)，实测证据见 [自修复审计](audits/2026-11-24-self-fix-abort-arm.md)。
+
+### 39.1 终止帧后的关闭被记成 abort（B25）
+
+DSH 客户端读到终止帧就断开；代理的 `res.on("close")` 会 `clientAbort.abort()`，上游读随即失败并进入 catch。catch 原来只用连接状态判断：
+
+```js
+if (res.destroyed || res.writableEnded) {
+  log2?.("client aborted mid-stream");
+  if (session) noteAbortedTurn(session);
+  if (sawTerminal && !sawReplyError) reply?.save();
+  return;
+}
+```
+
+于是「已经收全、客户端正常挂断」与「中途断流」共用同一条日志和同一条记账路径。`noteAbortedTurn` 记下的锚点会被下一轮的 `absorbAbortedTurnGrowth` 抬到最新 meter，nudge 的 growth 参考点被推着走。首跑 e2e 还暴露了第二层原因：OpenAI 风格 SSE 只在 `[DONE]` 置 `sawTerminal`，`finish_reason` 帧只置 `isTerminal`；`processGoogle` 则在 `finishReason` 处同时置两个标记。客户端恰好在 `finish_reason` 帧后挂断时，终止证据根本还没建立。
+
+修法分两半：步骤 24 让两处记账点与一处只记日志的 commandcode 路径都先看 `sawTerminal`，有终止证据时只记 `debug` 的 `client closed after terminal`；步骤 26 让 `processOpenai` 在 `finish_reason` 非空时与 Google 路径一样置 `sawTerminal`。#5293/#5415 的真 abort 行为保持不变。
+
+### 39.2 失败 arm 的估算按字符计数（B26）
+
+`outboundPayloadBreakdown` 里失败 arm 的估算取 `Math.max(textEstimate, estimateCoreMessagesUpper(msgs))`，而 `estimateCoreMessagesUpper` 返回的是字符数——它被另一个用途当作「字符质量上界」使用。实际效果是 token 数被放大到约 3 倍：本机 19:16 的日志里 `armed emergency shrink with local estimate 659983 tokens`，同时段真实上下文约 217K。这个假基线会写进 `lastInputTokens`（source=estimate），直到下一次真实 usage 到达才被清除，期间 `acp_status` 与预检都按不可能的值工作。
+
+修法是步骤 25：把字符质量换算成 token 上界（`Math.ceil(chars/3)`）再参与 `Math.max`。CJK 已由 `defaultCountTokens` 精确计价并承载在 `textEstimate` 里，不会被重复放大；非 CJK 的密集 agent 文本最密约 3 chars/token，除以 3 是保守上界。不采用更激进的估算，避免在真实 token 密度较高时低估而漏掉真正的超窗。
+
+### 39.3 验证
+
+`scripts/fixtures/e2e-mock/gateway.mjs` 新增 `hold` plan（在终止帧或非终止 delta 之后保持连接），`scripts/check-e2e-mock.mjs` 新增 `clientCloseChecks()` 三项：终止帧后关闭不记 abort、不触发 growth 吸收且轨迹仍在；终止帧前关闭仍记 abort 且不记终止；连续 500 的失败 arm 日志落在 token 空间（实测 171,017 字符 → 60,092 tokens）。补丁产物与干净产物重打的字节一致（md5 `24457ebf…` → `eb848331…`），二次运行幂等；`check-e2e-mock.mjs` 35 项全部通过。
+
+未覆盖：真实 DSH 客户端的挂断时序只用本地 mock 复现；native/WS 路径未改；`/3` 是保守上界而非精确 tokenizer。

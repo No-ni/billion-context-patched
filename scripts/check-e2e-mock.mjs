@@ -404,6 +404,77 @@ async function wsIngressChecks() {
     await startProxy(previousContext);
   });
 }
+async function clientCloseChecks() {
+  // B25/B26 (self-fixes, see docs/SELF-FIXES.md): the DSH client closes the
+  // response socket the instant it holds the terminal frame, so the abort
+  // classification has to follow the terminal event; and the failure-arm
+  // estimate has to stay in token space.
+  const hangUpAfter = (cid, content, marker) => new Promise(resolve => {
+    const payload = Buffer.from(JSON.stringify({ model: "mock-model", max_tokens: 4096, stream: true, messages: [{ role: "user", content }] }));
+    const req = request({ hostname: "127.0.0.1", port: active.port, path: `/bili/${gateway.origin}/v1/chat/completions`, method: "POST", agent: false, headers: { connection: "close", "content-type": "application/json", "content-length": payload.length, ...pluginHeaders(cid) } }, res => {
+      let seen = "";
+      const finish = hungUp => resolve({ hungUp, seen });
+      res.on("data", chunk => { seen += chunk.toString("utf8"); if (seen.includes(marker)) { req.destroy(); finish(true); } });
+      res.once("end", () => finish(false));
+      res.once("error", () => finish(seen.includes(marker)));
+      res.once("aborted", () => finish(seen.includes(marker)));
+    });
+    req.once("error", () => {});
+    req.end(payload);
+  });
+  const closeLines = mark => proxyLog().slice(mark).split(/\r?\n/).filter(line => /client (?:closed after terminal|aborted mid-stream)/.test(line));
+
+  await check("a client close after the terminal frame is not a mid-stream abort (B25)", async () => {
+    const cid = "e2e-close-after-terminal";
+    const plan = gateway.planPath("/v1/chat/completions", [{ kind: "hold", ms: 1500 }]);
+    const mark = proxyLog().length;
+    try {
+      const closed = await hangUpAfter(cid, "E2E_CLOSE_AFTER_TERMINAL", '"finish_reason":"stop"');
+      assert(closed.hungUp, "the test client must hold the terminal frame before hanging up: " + closed.seen.slice(-400));
+      const lines = await eventually(() => { const found = closeLines(mark); return found.length ? found : false; }, "client close classification");
+      assert(lines.some(line => line.includes("client closed after terminal")), "a close after the terminal frame belongs to the terminal event:\n" + lines.join("\n"));
+      assert(!lines.some(line => line.includes("client aborted mid-stream")), "a finished reply must not be recorded as an abort:\n" + lines.join("\n"));
+      assert(!proxyLog().slice(mark).includes("aborted-turn growth absorbed"), "a finished reply must not re-anchor the nudge reference");
+      assert(proxyLog().slice(mark).split(/\r?\n/).some(line => line.includes("[stream-trace]") && line.includes("closed after")), "the B24 trace must still record the close");
+    } finally { plan.cancel(); }
+  });
+
+  // The negative control for B25. Growth absorption (#5415) is not asserted
+  // here: it needs a usage-sourced meter above the anchor, while this fixture
+  // prices usage at 4 chars/token — effectiveTokenCount then sees the char mass
+  // as an impossible anchor and answers in estimate space, which absorb rejects
+  // by design. Upstream covers that path in tests/issue5415-absorb-debt.test.ts.
+  await check("a client close before the terminal frame still records the abort (B25)", async () => {
+    const cid = "e2e-close-before-terminal";
+    const seed = await chat(cid, [{ role: "user", content: "E2E_ABORT_SEED NUDGE_GATE_USAGE_BASELINE" }]);
+    assert.equal(seed.status, 200, seed.text);
+    const plan = gateway.planPath("/v1/chat/completions", [{ kind: "hold", beforeTerminal: true, ms: 1500 }]);
+    const mark = proxyLog().length;
+    try {
+      const closed = await hangUpAfter(cid, "E2E_CLOSE_BEFORE_TERMINAL", "MOCK_HELD_DELTA");
+      assert(closed.hungUp, "the test client must receive the non-terminal delta before hanging up");
+      const lines = await eventually(() => { const found = closeLines(mark); return found.length ? found : false; }, "abort classification");
+      assert(lines.some(line => line.includes("client aborted mid-stream")), "a close before the terminal frame is a real abort:\n" + lines.join("\n"));
+      assert(!lines.some(line => line.includes("client closed after terminal")), "an unfinished reply must not be recorded as terminal:\n" + lines.join("\n"));
+    } finally { plan.cancel(); }
+  });
+
+  await check("the failure-arm estimate is quoted in tokens, not characters (B26)", async () => {
+    const cid = "e2e-arm-estimate";
+    const plan = gateway.planPath("/v1/chat/completions", [{ kind: "status", status: 500, body: '{"error":{"message":"mock upstream failure"}}' }, { kind: "status", status: 500, body: '{"error":{"message":"mock upstream failure"}}' }, { kind: "status", status: 500, body: '{"error":{"message":"mock upstream failure"}}' }]);
+    const mark = proxyLog().length;
+    const content = "E2E_ARM_ESTIMATE " + "dense payload text ".repeat(9000);
+    try {
+      await chat(cid, [{ role: "user", content }]);
+      const line = await eventually(() => proxyLog().slice(mark).split(/\r?\n/).find(entry => entry.includes("[" + cid + "]") && entry.includes("armed emergency shrink with local estimate")), "failure-arm log");
+      const estimate = Number(/local estimate (\d+) tokens/.exec(line)?.[1]);
+      assert(Number.isFinite(estimate) && estimate > 0, line);
+      assert(estimate < content.length / 2, `the arm estimate must be in token space: ${estimate} tokens for ${content.length} characters\n` + line);
+      assert(estimate >= Math.ceil(content.length / 3), "the arm estimate must still bound the payload from above: " + line);
+      console.log(`  arm estimate evidence: ${content.length} core characters -> ${estimate} tokens`);
+    } finally { plan.cancel(); }
+  });
+}
 async function storageChecks() {
   await stopProxy(active, true);
   await check("default SQLite-only storage survives cold restart without JSON envelopes", async () => {
@@ -918,6 +989,7 @@ try {
   await imageRestoreChecks();
   await ingressChecks();
   await wsIngressChecks();
+  await clientCloseChecks();
   if (hasKvMigration) await storageChecks(); else skip("isolated legacy, shadow and full storage mode fallbacks", "candidate predates the unified KV carriers");
   }
   // A skipped block is a check that did not run: the suite asserts it covered

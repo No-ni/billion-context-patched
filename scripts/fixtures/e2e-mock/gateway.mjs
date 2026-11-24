@@ -30,6 +30,20 @@ export async function startGateway() {
       const inputTokens = tracksNudgeUsage ? Math.max(256, Math.ceil(decoded.length / 4)) : 256;
       const cachedTokens = tracksNudgeUsage ? Math.floor(inputTokens / 2) : 128;
       const usage = { prompt_tokens: inputTokens, completion_tokens: 8, total_tokens: inputTokens + 8, prompt_tokens_details: { cached_tokens: cachedTokens } };
+      // A held stream recreates the real close race: the terminal frame (and its
+      // usage) is already on the wire, the upstream keeps the socket open, and
+      // the test client hangs up first. beforeTerminal holds a non-terminal
+      // delta instead, which is a genuine mid-stream abort.
+      if (step?.kind === "hold") {
+        if (!body.stream) throw new Error("the local hold plan requires an actual streaming request");
+        const terminal = step.beforeTerminal !== true;
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        const event = { id: `chat_mock_${number}`, object: "chat.completion.chunk", model: body.model, choices: [{ index: 0, delta: { content: terminal ? "MOCK_HELD_REPLY" : "MOCK_HELD_DELTA" }, finish_reason: terminal ? "stop" : null }], ...(terminal ? { usage } : {}) };
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+        await new Promise(resolve => { const timer = setTimeout(resolve, step.ms ?? 1500); res.once("close", () => { clearTimeout(timer); resolve(); }); });
+        if (!res.writableEnded) res.end();
+        return;
+      }
       if (step?.kind === "compress") {
         if (!body.stream) throw new Error("the local compression-loop plan requires an actual streaming request");
         res.writeHead(200, { "content-type": "text/event-stream" });
