@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- 修复 DSH 0.2.2-rc.5 加载 0.8.0 插件时 `preset-ptc` 消失的问题：新版 Cordis 在未注入服务的上下文里读取 `agentPresets` 会抛错，导致压缩闸门未提供 `biliBasicCompactionPolicy`，四个 preset 一起 pending；现在该可选运行时覆盖在服务不可注入时安全跳过，闸门和 PTC preset 仍能正常启动。
 - 修复会话频繁被记成中途断开的问题：DSH 客户端在收到终止帧后断开时，代理不再把已完成的回合写成 `client aborted mid-stream`，压缩提醒的增长基准不再被误抬高；OpenAI 风格的 `finish_reason` 帧现在与 Google、Anthropic 的终止事件同等对待。
 - 修复上游失败时应急缩窗的本地估算按字符计的问题：估算改为 token 上界口径，不再把 217K 的会话算成 660K；真实用量到达后仍按原逻辑清除临时基线。
 

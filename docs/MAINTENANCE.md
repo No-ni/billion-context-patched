@@ -2,7 +2,7 @@
 
 独立修改及验收要求的唯一清单是 [SPEC.md](SPEC.md)。本文只记录来源、环境、实现与检查映射及维护操作；实现理由和历史见 [PATCHES.md](PATCHES.md)，用户变化见 [CHANGELOG.md](../CHANGELOG.md)，交付步骤见 [RELEASING.md](RELEASING.md)。代码偏离 SPEC 时须修复偏差，不能只改说明。
 
-全部路径和命令相对于本仓库根目录；不依赖外层工作区、旧检出或聊天记录。
+全部路径和命令相对于本仓库根目录；不依赖外层工作区、旧检出或聊天记录。`scripts/patch-bili-compaction-gate.mjs` 会在安装时保护可选的 `agentPresets` 运行时查找，兼容 DSH 0.2.2-rc.5 的 inject-only 上下文；查找不可用时仍提供 `biliBasicCompactionPolicy`，不阻塞 `preset-ptc`。
 
 ## 1. 两个来源分别锁定
 
@@ -119,6 +119,14 @@ IMG-01–IMG-09、IMG-11 已随 B12–B15/B17 的行为删除（0.7.5）；保�
 
 需要 Git 和 Node.js（精确支持范围见根 `package.json#engines`）；维护脚本使用 Node 标准库及仓库自带解析器，无需安装根 npm 依赖。GitHub 推送需要相应凭据，查看/发布使用已登录用户自己的 `gh`，CI 使用仓库令牌，不把凭据写进 Git。首次提交前在该电脑配置 Git 的 user.name/user.email，可用 GitHub 提供的 noreply 地址；不把特定电脑的账户配置作为项目依赖。
 
+### 上游支持声明与本项目验证范围
+
+上游 `ranxianglei/billion-context` 的 manifest 只声明 Node `>=20`，并未声明最低、最高或固定的 DSH Desktop/host 版本，也没有 `peerDependencies` 形式的 DSH 版本约束。上游文档把 DSH 列为 native plugin 客户端，说明安装方式和 transport，但不能据此推导具体 DSH 版本矩阵。
+
+本插件根 `package.json#engines` 要求 Node `^22.19.0 || >=24.0.0`。当前自动 host 门禁实际验证的是 `@deepseek-ai/dsh@0.2.2-rc.5`，同时使用其对应的 Cordis 4.1.0 运行时。该版本是本项目当前的推荐验证基线，不是上游声明的唯一支持版本。其他 DSH 版本不会被普通安装流程按此门禁拒绝，但没有当前审计同等强度的验证证据。
+
+`check-all.mjs --host` 的版本检查只保护维护者误用旧缓存或错误宿主模块，服务于审计和 CI，不参与插件商店安装或 `scripts/install.mjs` 的普通安装路径。
+
 首次接手：
 
 ```sh
@@ -141,7 +149,7 @@ node scripts/check-all.mjs --offline
 | 入口 | 范围 | 环境要求 |
 | --- | --- | --- |
 | `node scripts/check-all.mjs --offline` / `npm run check` | 15 个入口：文档/条款、版本、views、图片及宿主退役兜底、图像卡与宿主预算、UX、preflight、storage、smoke、outbound-encoding、restart、wrapper、完整 mock E2E | 无用户 profile/真实模型/外网访问；会开本机端口、临时 SQLite/配置和模拟 HTTP/SSE/WS 网关，并使用系统编码器 |
-| `node scripts/check-all.mjs --host --host-modules /path/to/dsh/node_modules` | runtime、ledger-runtime | 真实 DSH 的 Cordis/Loader/Settings/Storage/atomic-write 等模块；Node `registerHooks` 所需版本见 engines；缺模块是未运行或失败，不是通过 |
+| `node scripts/check-all.mjs --host --host-modules /path/to/dsh/node_modules` | runtime、ledger-runtime | 固定使用 `@deepseek-ai/dsh@0.2.2-rc.5`；入口会先核对 `@deepseek-ai/dsh/package.json`，版本不符会立即报错；真实 DSH 的 Cordis/Loader/Settings/Storage/atomic-write 等模块；Node `registerHooks` 所需版本见 engines；缺模块是未运行或失败，不是通过 |
 | 真实 DSH | UI、整机重载、冷加载/切模型、模型/网关与缓存 | 单独授权和记录；不作为离线自动检查的隐含结论 |
 
 macOS 图片编码用 `/usr/bin/sips`；Windows 用 PowerShell `System.Drawing`；其他平台按 PATH 探测 ImageMagick。没有后端可跳过压缩，但有后端而编码失败必须报失败。CI 在 Ubuntu 的 Node 22/24、Windows/macOS 的 Node 24 检查最终构建，源码统一 LF。

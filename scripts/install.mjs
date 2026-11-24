@@ -40,6 +40,7 @@ import { relayChannelsFromProfile, rewriteUpstreamPatch } from "../lib/profile.j
 import { patchAcceleratorSources } from "./patch-accelerator.mjs";
 import { patchBiliClientBundle } from "./patch-bili-client.mjs";
 import { patchBiliAgentBundle } from "./patch-bili-agent.mjs";
+import { patchBiliCompactionGate } from "./patch-bili-compaction-gate.mjs";
 import { assertAgentUpstreamUx } from "./check-upstream-ux.mjs";
 
 const WRAPPER = "bili-context-patch";
@@ -206,6 +207,7 @@ const pendingBuild = existsSync(repoBuild)
 const candidateBuild = pendingBuild ?? (existsSync(installedBuild) ? installedBuild : null);
 let stagedBuild = null;
 let patchedBiliAgent;
+let patchedCompactionGate;
 if (!dryRun && candidateBuild) {
   const stage = mkdtempSync(join(tmpdir(), "bili-install-"));
   process.on("exit", () => {
@@ -219,6 +221,7 @@ if (!dryRun && candidateBuild) {
     env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
   });
   patchedBiliAgent = patchBiliAgentBundle(readFileSync(join(target, "dist/agent/dsh-native.js"), "utf8"));
+  patchedCompactionGate = patchBiliCompactionGate(readFileSync(join(target, "dist/agent/dsh-compaction-gate.js"), "utf8"));
   const stagedAgent = join(stage, "dsh-native.mjs");
   writeFileSync(stagedAgent, patchedBiliAgent.text);
   execFileSync(process.execPath, ["--check", stagedAgent], { stdio: ["ignore", "ignore", "inherit"], timeout: 10000 });
@@ -386,6 +389,7 @@ const BILI_FILES = [
 if (resolve(target) !== resolve(vendorBili)) copyInto(target, vendorBili, BILI_FILES);
 else say("billion-context: already vendored at " + vendorBili);
 if (!dryRun && patchedBiliAgent) writeFileSync(join(vendorBili, "dist/agent/dsh-native.js"), patchedBiliAgent.text);
+if (!dryRun && patchedCompactionGate) writeFileSync(join(vendorBili, "dist/agent/dsh-compaction-gate.js"), patchedCompactionGate.text);
 
 // The accelerator is a plain ES module package: its manifest plus lib/.
 const acceleratorFiles = (from) => [
