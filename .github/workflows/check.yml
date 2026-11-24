@@ -33,3 +33,26 @@ jobs:
       - run: node scripts/install.mjs --build
       - run: git diff --exit-code
       - run: node scripts/check-all.mjs --offline
+  host:
+    name: host integration (published DSH)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node scripts/install.mjs --build
+      # The host checks need the real DSH runtime (cordis services, settings and
+      # the atomic writer). Pin the published package instead of a developer
+      # machine: the pinned version is the API surface this plugin claims.
+      - name: Install the published DSH host modules
+        run: |
+          mkdir -p "$RUNNER_TEMP/dsh-host"
+          cd "$RUNNER_TEMP/dsh-host"
+          npm init -y >/dev/null
+          npm i --no-audit --no-fund --no-fund @deepseek-ai/dsh@0.2.2-rc.5
+      - run: node scripts/check-all.mjs --host --host-modules "$RUNNER_TEMP/dsh-host/node_modules"

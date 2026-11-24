@@ -67,12 +67,12 @@
 - `node scripts/install.mjs --build`：exit 0，smoke 全绿（views/preflight/storage/outbound-encoding/image-card/image-budget/upstream-ux/smoke）。
 - `node scripts/check-all.mjs --offline`：**offline checks passed (14 scripts)**；其中 mock E2E 31 项、skipped=0（把"跳过"改为断言后不再允许静默跳过）；新增 `check-image-restore.mjs` 执行产物内的还原缓存上限。
 - 检查工具链改动：`check-views.mjs` 与 `check-preflight.mjs` 的 vm 上下文补齐上游新增 helper（`moduleKnobs`、`measuredOutbound`/`responsesPreflightMeter`、`NON_MODEL_TOP_LEVEL_KEYS`、SSE 行结束 helper）；缺 helper 时直接报错而不是"缺测试变量"。
-- 未运行：`check-runtime.mjs`、`check-ledger-runtime.mjs` 需要 `--host-modules`。本机尝试用 `/Applications/DSH NEXT.app/Contents/Resources/app.asar.unpacked/node_modules` 运行 `check-runtime.mjs --host-modules`，失败于 `ENOENT … @deepseek-ai/cordis/package.json`（该目录只有 native 附件，没有 DSH 包），因此这两项仍未运行；真实 DSH、真实模型与真实网关同样未验证。
+- 宿主检查已运行并通过：`npm i @deepseek-ai/dsh@0.2.2-rc.5` 到临时目录后，`node scripts/check-runtime.mjs --host-modules <dir>/node_modules` 输出 "host runtime checks passed"，`node scripts/check-ledger-runtime.mjs --host-modules <dir>/node_modules` 输出 "ledger runtime checks passed"（真实 cordis/DSH 运行时、真实 Loader/SettingsForms/atomic writer/accelerator）。先前用 `/Applications/DSH NEXT.app/Contents/Resources/app.asar.unpacked/node_modules` 运行失败于 `ENOENT … @deepseek-ai/cordis/package.json`（该目录只有 native 附件）。真实模型与真实网关仍未验证。
 
 ## 未覆盖项 / 待修复偏差
 
 1. 已补齐：PCK-02 三模式（e2e）、IMG-13 折叠失败回滚（e2e 断言 `stats.requests` 恢复、无残留 block、诊断日志）、IMG-12 的 96 片/64 MiB/64 会话/256 MiB 全局上限与开关（`check-image-restore.mjs`）、IMG-10a 的 `.corrupt-<时间戳>` 改名与"继续本轮"行为（`check-image-budget.mjs` 新增用例，25 项）。
-2. 仍未断言：B10 的 shadow lane 定向用例（需真实 DSH 宿主，见 MAINTENANCE 的 B2/B10 边界）；CI 仍只跑 `--offline`，host 检查依赖外部提供 `--host-modules`。IMG-10a 的坏备份改名、写失败与删除失败已在 `check-image-budget.mjs`（27 项）覆盖。
-3. `.github/workflows/check.yml` 与 `release.yml` 只跑 `--offline`，host 检查在 CI 从不执行；`check-all.mjs` 只看退出码、子进程无 timeout。
+2. 仍未断言：B10 的 shadow lane 定向用例（需真实 DSH 宿主，见 MAINTENANCE 的 B2/B10 边界）。IMG-10a 的坏备份改名、写失败与删除失败已在 `check-image-budget.mjs`（27 项）覆盖。
+3. `.github/workflows/check.yml` 已新增 `host` job：安装固定版本 `@deepseek-ai/dsh@0.2.2-rc.5` 后运行 `check-all.mjs --host`；`release.yml` 仍只跑 offline。`check-all.mjs` 每个子进程有 20 分钟硬超时并点名失败脚本。
 4. `check-views.mjs` 的默认 80k 仍以 4 条 `source.includes` 为主证据；`split(...).length-1` 式调用点计数仍在两处。
 5. 真实页面横幅、真实 DSH 退避、真实网关重试次数均需人工/集成验证。
