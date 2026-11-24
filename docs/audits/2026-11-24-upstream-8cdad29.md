@@ -71,8 +71,8 @@
 
 ## 未覆盖项 / 待修复偏差
 
-1. 已补齐（本轮）：PCK-02 三模式（e2e）、IMG-13 折叠失败回滚（e2e 断言 `stats.requests` 恢复、无残留 block、诊断日志）、IMG-12 的 96 片/64 MiB/64 会话/256 MiB 全局上限与开关（`check-image-restore.mjs`）。
-2. 仍未断言：IMG-10a 的 `.corrupt-<时间戳>` 备份改名与写失败/删除失败分支；B10 的 shadow lane 定向用例。
+1. 已补齐：PCK-02 三模式（e2e）、IMG-13 折叠失败回滚（e2e 断言 `stats.requests` 恢复、无残留 block、诊断日志）、IMG-12 的 96 片/64 MiB/64 会话/256 MiB 全局上限与开关（`check-image-restore.mjs`）、IMG-10a 的 `.corrupt-<时间戳>` 改名与"继续本轮"行为（`check-image-budget.mjs` 新增用例，25 项）。
+2. 仍未断言：IMG-10a 的写失败（只读目录）与删除失败分支；B10 的 shadow lane 定向用例。
 3. `.github/workflows/check.yml` 与 `release.yml` 只跑 `--offline`，host 检查在 CI 从不执行；`check-all.mjs` 只看退出码、子进程无 timeout。
 4. `check-views.mjs` 的默认 80k 仍以 4 条 `source.includes` 为主证据；`split(...).length-1` 式调用点计数仍在两处。
 5. 真实页面横幅、真实 DSH 退避、真实网关重试次数均需人工/集成验证。

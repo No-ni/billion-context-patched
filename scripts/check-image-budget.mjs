@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Check that image limits are persisted on the native DeepSeek routes.
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { imageBudgetOps, installImageBudgetDefaults } from "../lib/defaults.js";
@@ -603,6 +603,107 @@ try {
     checks++;
   } finally {
     rmSync(home6, { recursive: true, force: true });
+  }
+  // IMG-10a: a backup that cannot be parsed is never silently overwritten. One
+  // warning is reported, the bytes are moved aside as .corrupt-<timestamp>, and
+  // the pass continues without restore records.
+  const home7 = mkdtempSync(join(tmpdir(), "bili-image-budget-corrupt-"));
+  try {
+    const configPath7 = join(home7, "billion-context.json");
+    writeFileSync(configPath7, "{}");
+    const declared7 = () => ({ corrupt: { api: "openai-completions", baseURL: "https://corrupt.test/v1" } });
+    const rows7 = [row("llm-pi-ai", { providers: declared7() }, { providers: declared7() })];
+    const services7 = {
+      settings: {
+        describe: () => rows7.map(descriptor => ({ ...descriptor })),
+        mutate: async (ns, ops, revision) => {
+          const target = rows7.find(candidate => candidate.ns === ns);
+          assert.equal(target.revision, revision, "the corrupt-backup pass must write at the revision it read");
+          for (const op of ops) {
+            let value = target.value, user = target.user;
+            for (const segment of op.path.slice(0, -1)) { value = value[segment] ??= {}; user = user[segment] ??= {}; }
+            const key = op.path.at(-1);
+            if (op.op === "unset") { delete value[key]; delete user[key]; }
+            else { value[key] = op.value; user[key] = op.value; }
+          }
+          target.revision++;
+        },
+      },
+      llm: { listConfigurableProviders: () => [pi("corrupt")] },
+    };
+    const backupPath7 = configPath7 + ".image-budget-backup.json";
+    writeFileSync(backupPath7, "{not-json");
+    const warnings = [], warn = console.warn;
+    console.warn = message => warnings.push(String(message));
+    let dispose7;
+    try {
+      installImageBudgetDefaults({
+        inject: (dependencies, callback) => callback({ get: name => services7[name], effect: effect => { dispose7 = effect(); }, on: () => {} }),
+      }, { ready: Promise.resolve(true), configPath: () => configPath7, readConfig: path => JSON.parse(readFileSync(path, "utf8")) });
+      await eventually(() => warnings.some(message => message.includes("could not read " + backupPath7)));
+      const asideName = () => readdirSync(home7).find(name => name.startsWith("billion-context.json.image-budget-backup.json.corrupt-"));
+      await eventually(asideName, "the unreadable backup must be kept as .corrupt-<timestamp>");
+      const aside = asideName();
+      assert.equal(readFileSync(join(home7, aside), "utf8"), "{not-json", "the aside file must keep the original bytes");
+      assert(warnings.some(message => message.includes("moved the unreadable image budget backup to")), "the move must be reported");
+      await eventually(() => rows7[0].user.providers.corrupt.requestImageMaxBytes === 153600);
+      console.log("  OK an unparsable image budget backup is kept aside and the pass continues");
+      checks++;
+    } finally { console.warn = warn; }
+    await pause(20);
+    if (typeof dispose7 === "function") dispose7();
+  } finally {
+    rmSync(home7, { recursive: true, force: true });
+  }
+  // IMG-10a: a backup that cannot be written must not stop the budget pass. A
+  // read-only directory makes the atomic temp+rename fail; the fields still land
+  // on the provider and the failure is reported once.
+  const home8 = mkdtempSync(join(tmpdir(), "bili-image-budget-writefail-"));
+  try {
+    const configPath8 = join(home8, "billion-context.json");
+    writeFileSync(configPath8, "{}");
+    const declared8 = () => ({ readonly: { api: "openai-completions", baseURL: "https://readonly.test/v1" } });
+    const rows8 = [row("llm-pi-ai", { providers: declared8() }, { providers: declared8() })];
+    const services8 = {
+      settings: {
+        describe: () => rows8.map(descriptor => ({ ...descriptor })),
+        mutate: async (ns, ops, revision) => {
+          const target = rows8.find(candidate => candidate.ns === ns);
+          assert.equal(target.revision, revision);
+          for (const op of ops) {
+            let value = target.value, user = target.user;
+            for (const segment of op.path.slice(0, -1)) { value = value[segment] ??= {}; user = user[segment] ??= {}; }
+            const key = op.path.at(-1);
+            if (op.op === "unset") { delete value[key]; delete user[key]; }
+            else { value[key] = op.value; user[key] = op.value; }
+          }
+          target.revision++;
+        },
+      },
+      llm: { listConfigurableProviders: () => [pi("readonly")] },
+    };
+    const warnings = [], warn = console.warn;
+    console.warn = message => warnings.push(String(message));
+    const previousMode = statSync(home8).mode & 0o777;
+    let dispose8;
+    try {
+      chmodSync(home8, 0o555);
+      installImageBudgetDefaults({
+        inject: (dependencies, callback) => callback({ get: name => services8[name], effect: effect => { dispose8 = effect(); }, on: () => {} }),
+      }, { ready: Promise.resolve(true), configPath: () => configPath8, readConfig: path => JSON.parse(readFileSync(path, "utf8")) });
+      await eventually(() => rows8[0].user.providers.readonly.requestImageMaxBytes === 153600);
+      assert(warnings.some(message => message.includes("could not write the image budget backup at " + configPath8)), "a failed backup write must be reported");
+      assert(!existsSync(configPath8 + ".image-budget-backup.json"), "a failed backup write must not leave a partial file");
+      console.log("  OK a read-only profile still gets its budget and a failed backup write is reported");
+      checks++;
+    } finally {
+      chmodSync(home8, previousMode);
+      console.warn = warn;
+    }
+    await pause(20);
+    if (typeof dispose8 === "function") dispose8();
+  } finally {
+    rmSync(home8, { recursive: true, force: true });
   }
 } finally {
   rmSync(home, { recursive: true, force: true });
