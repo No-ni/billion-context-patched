@@ -757,6 +757,37 @@ try {
     const afterMarkers = (parentRequest.decoded.toString().match(/ORIGINAL_(?:USER|ASSISTANT)_\d+/g) ?? []).length;
     assert(afterMarkers < beforeMarkers, `covered originals must leave the wire view (${beforeMarkers} -> ${afterMarkers}; bytes ${normalBody.length} -> ${parentRequest.decoded.length})`); parentSnap = await snapshot(parentCid);
   });
+
+  await check("B10 the shadow lane watches the live session and can be switched off", async () => {
+    // The shadow lane rebuilds the view next to the legacy outbound path and
+    // only reports mechanical mismatches. It is the fallback when the live
+    // snapshotRender feature is off, and it only engages once the session has an
+    // active block, so this runs after the continuation turn above with the
+    // live render explicitly off.
+    const offRollout = { ...baseConfiguration.rollout, features: { ...(baseConfiguration.rollout?.features ?? {}), snapshotRender: false } };
+    await applyConfiguration({ ...baseConfiguration, snapshot: { shadow: true }, rollout: offRollout });
+    const watchedTurn = await chat(parentCid, messages);
+    assert.equal(watchedTurn.status, 200, watchedTurn.text);
+    const status = await json(active.port, "/__bili/status");
+    assert.equal(status.status, 200, status.text);
+    assert.equal(status.body.snapshotShadow.enabled, true, "the shadow lane is on by default");
+    const watched = await eventually(async () => {
+      const polled = await json(active.port, "/__bili/status");
+      return polled.body.snapshotShadow.watching >= 1 && polled.body.snapshotShadow.errors === 0 ? polled.body.snapshotShadow : undefined;
+    }, "the shadow lane must watch the live session without mismatches");
+    assert.equal(watched.errors, 0, "the shadow lane must not report mismatches: " + JSON.stringify(watched));
+    assert(!proxyLog().includes("[snapshot-shadow]"), "no shadow warning may appear in the log");
+    await applyConfiguration({ ...baseConfiguration, snapshot: { shadow: false }, rollout: offRollout });
+    const turned = await chat("e2e-shadow-off", [{ role: "user", content: "SHADOW_LANE_OFF" }]);
+    assert.equal(turned.status, 200, turned.text);
+    const off = await json(active.port, "/__bili/status");
+    assert.equal(off.body.snapshotShadow.enabled, false, "an explicit off must disable the shadow lane");
+    await applyConfiguration(baseConfiguration);
+    // The watched turn advanced the parent revision; the fork below forks the
+    // live parent, so re-read it instead of comparing against a stale snapshot.
+    parentSnap = await snapshot(parentCid);
+  });
+
   await check("explicit fork inherits compression, refs and the actual parent cache key", async () => {
     forkRequest = { protocolVersion: parentSnap.protocolVersion, parentConversationId: parentCid, childConversationId: childCid, parentRevision: parentSnap.parentRevision, branchPoint: { messageCount: parentSnap.orderedMessages.length, orderHash: parentSnap.orderHash }, orderedMessages: parentSnap.orderedMessages, idempotencyKey: "e2e-fork-inheritance" };
     const fork = await json(active.port, "/__bili/plugin/fork", forkRequest); assert.equal(fork.status, 201, fork.text); assert.equal(fork.body.ok, true);

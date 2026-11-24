@@ -72,7 +72,7 @@
 ## 未覆盖项 / 待修复偏差
 
 1. 已补齐：PCK-02 三模式（e2e）、IMG-13 折叠失败回滚（e2e 断言 `stats.requests` 恢复、无残留 block、诊断日志）、IMG-12 的 96 片/64 MiB/64 会话/256 MiB 全局上限与开关（`check-image-restore.mjs`）、IMG-10a 的 `.corrupt-<时间戳>` 改名与"继续本轮"行为（`check-image-budget.mjs` 新增用例，25 项）。
-2. 仍未断言：B10 的 shadow lane 定向用例（需真实 DSH 宿主，见 MAINTENANCE 的 B2/B10 边界）。IMG-10a 的坏备份改名、写失败与删除失败已在 `check-image-budget.mjs`（27 项）覆盖。
+2. B10 的 shadow lane 已由 mock E2E 定向覆盖：`snapshotRender` 关闭时，带 active block 的会话下一次构建必须写入 shadow 记录（`/__bili/status` 的 `snapshotShadow` 显示 watching≥1、errors=0、无 `[snapshot-shadow]` 告警），配置改成 `snapshot.shadow=false` 后必须显示 enabled=false。IMG-10a 的坏备份改名、写失败与删除失败已在 `check-image-budget.mjs`（27 项）覆盖。
 3. `.github/workflows/check.yml` 已新增 `host` job：安装固定版本 `@deepseek-ai/dsh@0.2.2-rc.5` 后运行 `check-all.mjs --host`；`release.yml` 仍只跑 offline。`check-all.mjs` 每个子进程有 20 分钟硬超时并点名失败脚本。
 4. `check-views.mjs` 的默认 80k 仍以 4 条 `source.includes` 为主证据；`split(...).length-1` 式调用点计数仍在两处。
 5. 真实页面横幅、真实 DSH 退避、真实网关重试次数均需人工/集成验证。
