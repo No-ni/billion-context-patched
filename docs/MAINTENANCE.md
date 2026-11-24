@@ -39,7 +39,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮�
 | B14 | 已删除（0.7.5）：两处提示 seam 与 `imagePrompt` 移除 | 系统提示不再注入插件约定 |
 | B15 | 已删除（0.7.5）：回执、finalize 与工具/JSON 后续发送改写移除；保留 B1 的明文头所有权 | `check-outbound-encoding.mjs` 仍覆盖重试/辅助发送的明文头与重签 |
 | B16 | 代理步骤 16 与 `scripts/patch-bili-agent.mjs`；两个构建登记五项预算键与 IMG-12 的 `imageRestoreHostOffload` | `check-upstream-ux.mjs` 执行两端实际告警函数，验证这些键不告警、未知键仍告警且去重；代理/native 旧白名单迁移、幂等与坏锚点拒绝均在 installer 和 wrapper 检查 |
-| B17 | 步骤 17；IMG-10/IMG-10a 预算卡与 IMG-12 还原开关；`patches/image-card.*.block.js`、`lib/defaults.js` | `check-image-card.mjs` 页面解析与假 DOM、五项默认值/边界/重置、还原开关默认开启且只记录关闭、重置删除该键，并断言折叠/尺寸/约定控件不存在；`check-image-budget.mjs` 持久化到 API-key/account 与 PI provider 路由、卸载恢复、运行中新增 provider 自动写入、删除 provider 后清理失效备份、备份记录跨重启恢复、settings 已销毁时销毁不抛错不告警；真实页面保存/重载需浏览器 |
+| B17 | 步骤 17；IMG-10/IMG-10a 预算卡与 IMG-12 还原开关；`patches/image-card.*.block.js`、`lib/defaults.js` | `check-image-card.mjs` 页面解析与假 DOM、五项默认值/边界/重置、还原开关默认开启且只记录关闭、重置删除该键，并断言折叠/尺寸/约定控件不存在；`check-image-budget.mjs` 持久化到 API-key/account 与 PI provider 路由、卸载恢复、运行中新增 provider 自动写入、删除 provider 后清理失效备份、备份记录跨重启恢复、settings 已销毁时销毁不抛错不告警；`check-image-restore.mjs` 执行产物里的还原缓存：96 片/64 MiB 每会话/64 会话/256 MiB 全局上限、淘汰顺序与开关默认；真实页面保存/重载需浏览器 |
 | B18 | 步骤 18；内核默认、页面常量及中英文提示 | `check-views.mjs` 检查默认值及估算/真实用量的中断提醒处理 |
 | B19 | 步骤 19 删除本地熔断；步骤 22 补预检分支 | `check-upstream-ux.mjs`、`check-preflight.mjs`、mock E2E 的反复连接失败与健康重试；真实 DSH 退避与上限需集成验证 |
 | B20 | `scripts/patch-bili-client.mjs`；installer 合并客户端 | `check-upstream-ux.mjs`；实际 shell 无横幅需人工 |
@@ -48,7 +48,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮�
 | B23 | 步骤 18 的 nudge transient generation 与 `applyConfiguredCompression` 模型工具包装；只认领调用开始时仍有有效 credit 的提醒，成功/partial 消费该 generation | `check-e2e-mock.mjs` 真实 T1 注入、零 block 与异常重试、partial 成功后拒绝、跨轮锁、跨 generation 并发、新提醒重置及过期提醒隔离；`check-preflight.mjs` 保证自动预检路径不受模型工具 gate 限制 |
 | B24 | 步骤 25 在响应侧插入 `[stream-trace]` 三行轨迹（`end()`、`finish`、`close`），正常 debug、未结束关闭 warn | `check-e2e-mock.mjs` 在真实断流与正常结束的响应上读取 `bili.log` 的三行轨迹；只读响应对象、不改写字节、不新增计时器 |
 
-IMG-01–IMG-09、IMG-11 已随 B12–B15/B17 的行为删除（0.7.5）；保留 IMG-10/IMG-10a 的预算注入与卡片，以及 2026-11-22 按用户要求重新放开的 IMG-12（宿主退役占位还原）与 IMG-13（上传超限 413 兜底）。IMG-12/IMG-13 的实现位于 `patches/image-restore.block.js`，由 `scripts/patch-bili-build.mjs` 的步骤 22 插入，mock E2E 覆盖数组与合并字符串两种宿主形态、开关关闭保留占位、413 折叠一次重发（含泛化 `request_too_large` 与中文体积文案）；字符串比较忽略 accelerator 引用差异，只看可见文本与图片结构。旧检查 `check-image-retention.mjs`、`check-host-image-fallback.mjs` 已删除，历史审计仍可读。
+IMG-01–IMG-09、IMG-11 已随 B12–B15/B17 的行为删除（0.7.5）；保留 IMG-10/IMG-10a 的预算注入与卡片，以及 2026-11-22 按用户要求重新放开的 IMG-12（宿主退役占位还原）与 IMG-13（上传超限 413 兜底）。IMG-12/IMG-13 的实现位于 `patches/image-restore.block.js`，由 `scripts/patch-bili-build.mjs` 的步骤 22 插入；mock E2E 覆盖数组与合并字符串两种宿主形态、开关关闭保留占位、413 折叠一次重发（含泛化 `request_too_large` 与中文体积文案）、折叠失败时恢复请求计数与待发送视图，`check-image-restore.mjs` 覆盖还原缓存上限与开关；字符串比较忽略 accelerator 引用差异，只看可见文本与图片结构。旧检查 `check-image-retention.mjs`、`check-host-image-fallback.mjs` 已删除，历史审计仍可读。
 
 ### 包装包：W1–W7
 
@@ -78,7 +78,7 @@ IMG-01–IMG-09、IMG-11 已随 B12–B15/B17 的行为删除（0.7.5）；保�
 
 1. 按根 [AGENTS.md](../AGENTS.md) 和 SPEC 第 7 节完整读规范，记录工作树、当前来源、候选完整提交与全部稳定条款。选定两个来源各自的版本，不直接覆盖唯一 vendor。
 2. 在独立目录检出选定 bili 提交，按其流程执行 `npm ci`、`npm run build`，记录提交、Node/npm 和构建命令。先看上游差异，再对候选运行 `node scripts/patch-bili-build.mjs <新目录>/dist/index.js` 和 `node scripts/patch-bili-agent.mjs <新目录>/dist/agent/dsh-native.js`。保留干净来源以便块修改后重新应用，客户端由 installer 合并时修改。
-3. 逐项核对 B1–B23 和 IMG-01–IMG-13（B12–B15、B17 的行为与 IMG-01–IMG-09、IMG-11 已删除，只核对剩余项，含 IMG-12/IMG-13）。任何 skipped、缺锚点或行为变化均须判明，步骤 6/7 现在对不兼容锚点直接失败，B1 检查现有 helper 体是否与源一致；仍不能只看退出码。上游等价替代须记录对应提交及输入、配置、降级边界，保留稳定编号。
+3. 逐项核对 B1–B24 和 IMG-01–IMG-13（B12–B15、B17 的行为与 IMG-01–IMG-09、IMG-11 已删除，只核对剩余项，含 IMG-12/IMG-13）。任何 skipped、缺锚点或行为变化均须判明，步骤 6/7 现在对不兼容锚点直接失败，B1 检查现有 helper 体是否与源一致；仍不能只看退出码。上游等价替代须记录对应提交及输入、配置、降级边界，保留稳定编号。
 4. 若升级加速器，显式选定提交并传 `--accelerator <目录>`；省略优先本仓库 vendor，不等于自动升级。不得把来源功能记成本项目新增。
 5. 选定来源完整复制后构建候选：
 

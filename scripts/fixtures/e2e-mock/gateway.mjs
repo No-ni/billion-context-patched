@@ -4,7 +4,7 @@ import { acceptUpgrade, frame } from "./websocket.mjs";
 
 export async function startGateway() {
   const http = [], ws = [], upgrades = [], sockets = new Set(), errors = [], gates = new Map(), plans = new Map();
-  let sequence = 0;
+  let sequence = 0, failSummary = false;
   const server = createServer(async (req, res) => {
     try {
       if (req.method !== "POST") { res.setHeader("content-type", "application/json"); res.end('{"version":1,"entries":[]}'); return; }
@@ -22,6 +22,9 @@ export async function startGateway() {
       if (req.url.includes("fail-401")) { res.writeHead(401, { "content-type": "application/json" }); res.end('{"error":{"message":"mock upstream unauthorized","type":"authentication_error"}}'); return; }
       const number = ++sequence;
       const summarizer = !body.stream && Array.isArray(body.messages) && JSON.stringify(body.messages).includes("TASK: The conversation segment below");
+      // A summarizer that fails is how the forced fold in an upload-limit 413
+      // recovery ends up with nothing to re-send: the proxy has to roll back.
+      if (failSummary && summarizer) { res.writeHead(500, { "content-type": "application/json" }); res.end('{"error":{"message":"mock summarizer refused","type":"server_error"}}'); return; }
       const text = summarizer ? "MOCK_SUMMARY " + "condensed history chunk. ".repeat(24) : `MOCK_REPLY_${number}`;
       const tracksNudgeUsage = Array.isArray(body.messages) && body.messages.some(message => JSON.stringify(message).includes("NUDGE_GATE_USAGE_BASELINE"));
       const inputTokens = tracksNudgeUsage ? Math.max(256, Math.ceil(decoded.length / 4)) : 256;
@@ -65,5 +68,6 @@ export async function startGateway() {
   return { port, origin: `http://127.0.0.1:${port}`, http, ws, upgrades, errors,
     holdPath(path) { let release; const promise = new Promise(resolve => { release = resolve; }); const gate = { promise, release }; gates.set(path, gate); return { release() { gates.delete(path); release(); } }; },
     planPath(path, steps) { if (plans.has(path)) throw new Error("a local gateway plan already owns " + path); const queue = [...steps]; plans.set(path, queue); return { remaining: () => queue.length, cancel: () => plans.delete(path) }; },
+    failSummarizer(on) { failSummary = on === true; },
     async close() { for (const gate of gates.values()) gate.release(); gates.clear(); plans.clear(); for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)); } };
 }

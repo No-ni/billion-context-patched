@@ -301,6 +301,30 @@ async function imageRestoreChecks() {
     upload413Case("e2e-upload-413-generic", { error: { message: "request_too_large: the request body is too large for this endpoint", type: "request_too_large" } }));
   await check("a Chinese request-body-too-large 413 folds once", () =>
     upload413Case("e2e-upload-413-zh", { error: { message: "请求体过大，超过了上传限制", type: "upload_limit" } }));
+  await check("an upload-limit 413 whose forced fold fails restores the count and the pending view", async () => {
+    const cid = "e2e-upload-413-fail", path = "/v1/chat/completions", marker = "E2E_UPLOAD_413_FAIL_0", history = [];
+    for (let i = 0; i < 10; i++) history.push({ role: i % 2 === 0 ? "user" : "assistant", content: marker + "_" + i + ": " + "foldable local history body. ".repeat(80) });
+    history.push({ role: "user", content: marker + "_FINAL: request after the refused fold." });
+    const plan = gateway.planPath(path, [{ kind: "status", status: 413, body: JSON.stringify({ error: { message: "request_too_large: the request body is too large for this endpoint", type: "request_too_large" } }) }]);
+    const start = gateway.http.length;
+    let result;
+    gateway.failSummarizer(true);
+    try { result = await chat(cid, history, "off", randomUUID()); }
+    finally { gateway.failSummarizer(false); plan.cancel(); }
+    assert.equal(result.status, 413, result.text);
+    const sends = gateway.http.slice(start).filter(record => record.path === path);
+    assert.equal(sends[0].decoded.includes(marker), true, "the rejected attempt must carry the history");
+    const summaryAttempts = sends.filter(record => JSON.stringify(record.body).includes("TASK: The conversation segment below")).length;
+    assert(summaryAttempts >= 1, "the failed fold must actually have tried the summarizer");
+    const after = await snapshot(cid), saved = await detail(after.sessionId);
+    assert.equal(saved.requests, 1, "a failed forced fold must not leave request counts behind: " + saved.requests);
+    assert.equal(saved.blockDetails.filter(block => block.active).length, 0, "a fold that produced nothing must not leave an active block");
+    // The pending view has to be the original one, not the half-folded body: a
+    // small follow-up must still carry the marker that the rollback restored.
+    const followUp = await chat(cid, [{ role: "user", content: marker + "_FOLLOW_UP" }]);
+    assert.equal(followUp.status, 200, followUp.text);
+    assert.match(proxyLog(), /\[upload-413\].*(failed|produced no smaller body)/, "the refused fold must leave a diagnostic");
+  });
 }
 
 async function ingressChecks() {
@@ -690,6 +714,31 @@ try {
     assert.equal(typeof parentRequest.body.prompt_cache_key, "string", "default routing must emit a concrete cache key"); assert(parentRequest.body.prompt_cache_key.length > 0);
     parentSnap = await snapshot(parentCid); assert(parentSnap.orderedMessages.length >= 17); assert(parentSnap.orderedMessages.some(x => /^m\d{5,}$/.test(x.ref)));
     assert.equal(parentRequest.headers["x-accel-compress"], undefined); assert.equal(parentRequest.headers["x-accel-rid"], undefined);
+  });
+  await check("PCK-02 disabled and auto routing stop the proxy from adding a key it did not get", async () => {
+    // B11 keeps the default enabled; PCK-02 says an explicit choice wins. The
+    // promptCache routing is part of the startup options (the live reload only
+    // refreshes routes/providers/compress), so each mode gets its own process.
+    const previousContext = active.context; await stopProxy(active, true);
+    try {
+      for (const routing of ["disabled", "auto", "enabled"]) {
+        const context = isolatedContext("prompt-cache-" + routing, "full", "off");
+        writeFileSync(context.configFile, JSON.stringify({ ...baseConfiguration, promptCache: { routing } }, null, 2));
+        const run = await startProxy(context);
+        try {
+          const start = gateway.http.length;
+          const result = await chat("e2e-prompt-cache-" + routing, [{ role: "user", content: "PCK_ROUTING_MARKER_" + routing }]);
+          assert.equal(result.status, 200, result.text);
+          const send = gateway.http.slice(start).filter(record => record.path === "/v1/chat/completions").at(-1);
+          assert(send, "the request must reach the local gateway");
+          // On a bili plugin lane the relay-affinity rule is drop only when the
+          // operator says disabled: auto and enabled both stamp a key (the
+          // upstream OpenAI-hostname rule governs lanes without our header).
+          if (routing === "disabled") assert.equal(send.body.prompt_cache_key, undefined, "disabled routing must not add a key");
+          else assert.equal(typeof send.body.prompt_cache_key, "string", routing + " routing must stamp the key");
+        } finally { await stopProxy(run, true); }
+      }
+    } finally { await startProxy(previousContext); }
   });
   await check("real plugin compression creates a retrievable block", async () => {
     const refs = parentSnap.orderedMessages.filter(x => x.ref); firstRef = refs[0].ref; firstRaw = parentSnap.messages.find(x => x.ref === firstRef)?.text;

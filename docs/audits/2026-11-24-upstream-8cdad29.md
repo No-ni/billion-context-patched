@@ -50,7 +50,7 @@
 ## 缓存钥匙：PCK-01–PCK-05
 
 - PCK-01（默认开启及配置优先级）：`check-views.mjs` 与 `check-wrapper.mjs` 通过；本机未以显式 enabled 代替默认检查。
-- PCK-02（尊重显式选择）：**未补齐断言**——disabled/auto 分支仍只由 mock E2E 的默认路由断言间接覆盖，列入待修复偏差。
+- PCK-02（尊重显式选择）：mock E2E 的 `PCK-02 disabled and auto routing stop the proxy from adding a key it did not get` 为三种模式各自起进程：`disabled` 不注入 `prompt_cache_key`，`auto`/`enabled` 在本插件车道注入（relay-affinity 规则，只有 disabled 才 drop）。
 - PCK-03（设置页与运行时一致）：`check-image-card.mjs` 页面解析与假 DOM 通过。
 - PCK-04（可重复应用）：本次重打两次逐字节一致（见上）。
 - PCK-05（验收证据）：本文件即证据，未覆盖项见末尾。
@@ -65,14 +65,14 @@
 ## 验证与结果
 
 - `node scripts/install.mjs --build`：exit 0，smoke 全绿（views/preflight/storage/outbound-encoding/image-card/image-budget/upstream-ux/smoke）。
-- `node scripts/check-all.mjs --offline`：**offline checks passed (13 scripts)**；其中 mock E2E 29 项、skipped=0（把"跳过"改为断言后不再允许静默跳过）；gateway HTTP=62、WS=5。
+- `node scripts/check-all.mjs --offline`：**offline checks passed (14 scripts)**；其中 mock E2E 31 项、skipped=0（把"跳过"改为断言后不再允许静默跳过）；新增 `check-image-restore.mjs` 执行产物内的还原缓存上限。
 - 检查工具链改动：`check-views.mjs` 与 `check-preflight.mjs` 的 vm 上下文补齐上游新增 helper（`moduleKnobs`、`measuredOutbound`/`responsesPreflightMeter`、`NON_MODEL_TOP_LEVEL_KEYS`、SSE 行结束 helper）；缺 helper 时直接报错而不是"缺测试变量"。
 - 未运行：`check-runtime.mjs`、`check-ledger-runtime.mjs` 需要 `--host-modules`。本机尝试用 `/Applications/DSH NEXT.app/Contents/Resources/app.asar.unpacked/node_modules` 运行 `check-runtime.mjs --host-modules`，失败于 `ENOENT … @deepseek-ai/cordis/package.json`（该目录只有 native 附件，没有 DSH 包），因此这两项仍未运行；真实 DSH、真实模型与真实网关同样未验证。
 
 ## 未覆盖项 / 待修复偏差
 
-1. PCK-02 的 disabled/auto 两条分支仍无直接断言。
-2. IMG-13 失败回滚（恢复 `stats.requests`、撤销 `overflowRefold` 对 `pendingForward` 的替换）无断言；IMG-12 的 96 张/64 MiB/64 会话与 256 MiB 全局上限无断言；IMG-10a 的 `.corrupt-<时间戳>` 与写失败/删除失败无断言。
+1. 已补齐（本轮）：PCK-02 三模式（e2e）、IMG-13 折叠失败回滚（e2e 断言 `stats.requests` 恢复、无残留 block、诊断日志）、IMG-12 的 96 片/64 MiB/64 会话/256 MiB 全局上限与开关（`check-image-restore.mjs`）。
+2. 仍未断言：IMG-10a 的 `.corrupt-<时间戳>` 备份改名与写失败/删除失败分支；B10 的 shadow lane 定向用例。
 3. `.github/workflows/check.yml` 与 `release.yml` 只跑 `--offline`，host 检查在 CI 从不执行；`check-all.mjs` 只看退出码、子进程无 timeout。
 4. `check-views.mjs` 的默认 80k 仍以 4 条 `source.includes` 为主证据；`split(...).length-1` 式调用点计数仍在两处。
 5. 真实页面横幅、真实 DSH 退避、真实网关重试次数均需人工/集成验证。

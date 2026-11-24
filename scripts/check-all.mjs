@@ -16,12 +16,19 @@ if (args.some(arg => !allowed.has(arg)) || (host && args.includes("--offline")) 
 if (host && !modules) throw new Error("host checks NOT RUN: supply --host-modules or DSH_HOST_MODULES");
 const steps = host ? ["check-runtime", "check-ledger-runtime"] : [
   "check-maintenance", "check-release", "check-views",
-  "check-image-card", "check-image-budget", "check-upstream-ux", "check-preflight", "check-storage", "smoke", "check-outbound-encoding", "check-restart", "check-wrapper", "check-e2e-mock",
+  "check-image-card", "check-image-budget", "check-image-restore", "check-upstream-ux", "check-preflight", "check-storage", "smoke", "check-outbound-encoding", "check-restart", "check-wrapper", "check-e2e-mock",
 ];
 for (const step of steps) {
   console.log("\n> " + step);
-  execFileSync(process.execPath, [fileURLToPath(new URL(`./${step}.mjs`, import.meta.url)),
-    ...(host ? ["--host-modules", modules] : [])], { stdio: "inherit" });
+  // A hunt for a hung check must not become a silent CI hang: each step gets a
+  // hard ceiling and the failure names the step that exceeded it.
+  try {
+    execFileSync(process.execPath, [fileURLToPath(new URL(`./${step}.mjs`, import.meta.url)),
+      ...(host ? ["--host-modules", modules] : [])], { stdio: "inherit", timeout: 20 * 60 * 1000, killSignal: "SIGKILL" });
+  } catch (error) {
+    if (error?.killed || error?.signal) throw new Error(step + " exceeded its 20 minute ceiling (signal " + (error.signal ?? "?") + ")");
+    throw error;
+  }
 }
 console.log(`\n${host ? "host" : "offline"} checks passed (${steps.length} scripts)`);
 if (!host) console.log("Host integration and real DSH/model checks are not part of this run.");
