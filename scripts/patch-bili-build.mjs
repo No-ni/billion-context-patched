@@ -606,9 +606,9 @@ console.log("nudge growth default: " + (nudged > 0 ? "patched (" + nudged + "/" 
 // A nudge grants a time-limited model-tool opportunity, but one successful
 // fold must consume it. Keep completion and in-flight ownership by generation
 // so a later nudge cannot erase an older operation's lock or inherit its result.
-const NUDGE_GATE_STATE_OLD = "const credit=stamp2.nudgeInjected?NUDGE_CREDIT_ROUNDS:isModelRound?prevCredit-1:prevCredit;t.unpromptedGate={credit:Math.max(0,credit),requireNudge:stamp2.requireNudge===true,requireRecommendation:stamp2.requireRecommendation===true}";
+const NUDGE_GATE_STATE_OLD = "const credit=stamp2.nudgeInjected?NUDGE_CREDIT_ROUNDS:isModelRound?prevCredit-1:prevCredit;t.unpromptedGate={credit:Math.max(0,credit),requireNudge:stamp2.requireNudge===true,requireRecommendation:stamp2.requireRecommendation===true,postComPressTail:stamp2.postComPressTail===true}";
 const NUDGE_GATE_STATE_DRAFT = "const credit=stamp2.nudgeInjected?NUDGE_CREDIT_ROUNDS:isModelRound?prevCredit-1:prevCredit;const previousNudgeId=Number.isSafeInteger(prev?.nudgeId)?prev.nudgeId:0;const nudgeId=stamp2.nudgeInjected?previousNudgeId+1:previousNudgeId;const compressed=!stamp2.nudgeInjected&&prev?.compressed===true;const compressionInFlight=!stamp2.nudgeInjected&&prev?.compressionInFlight===true;t.unpromptedGate={credit:Math.max(0,credit),requireNudge:stamp2.requireNudge===true,requireRecommendation:stamp2.requireRecommendation===true,nudgeId,compressed,compressionInFlight}";
-const NUDGE_GATE_STATE = "const credit=stamp2.nudgeInjected?NUDGE_CREDIT_ROUNDS:isModelRound?prevCredit-1:prevCredit;const previousNudgeId=Number.isSafeInteger(prev?.nudgeId)?prev.nudgeId:0;const nudgeId=stamp2.nudgeInjected?previousNudgeId+1:previousNudgeId;const completedNudgeId=Number.isSafeInteger(prev?.completedNudgeId)&&prev.completedNudgeId>=0?prev.completedNudgeId:prev?.compressed===true&&previousNudgeId>0?previousNudgeId:0;const compressionInFlightNudgeId=Number.isSafeInteger(prev?.compressionInFlightNudgeId)&&prev.compressionInFlightNudgeId>0?prev.compressionInFlightNudgeId:prev?.compressionInFlight===true&&previousNudgeId>0?previousNudgeId:0;t.unpromptedGate={credit:Math.max(0,credit),requireNudge:stamp2.requireNudge===true,requireRecommendation:stamp2.requireRecommendation===true,nudgeId,completedNudgeId,compressionInFlightNudgeId}";
+const NUDGE_GATE_STATE = "const credit=stamp2.nudgeInjected?NUDGE_CREDIT_ROUNDS:isModelRound?prevCredit-1:prevCredit;const previousNudgeId=Number.isSafeInteger(prev?.nudgeId)?prev.nudgeId:0;const nudgeId=stamp2.nudgeInjected?previousNudgeId+1:previousNudgeId;const completedNudgeId=Number.isSafeInteger(prev?.completedNudgeId)&&prev.completedNudgeId>=0?prev.completedNudgeId:prev?.compressed===true&&previousNudgeId>0?previousNudgeId:0;const compressionInFlightNudgeId=Number.isSafeInteger(prev?.compressionInFlightNudgeId)&&prev.compressionInFlightNudgeId>0?prev.compressionInFlightNudgeId:prev?.compressionInFlight===true&&previousNudgeId>0?previousNudgeId:0;t.unpromptedGate={credit:Math.max(0,credit),requireNudge:stamp2.requireNudge===true,requireRecommendation:stamp2.requireRecommendation===true,postComPressTail:stamp2.postComPressTail===true,nudgeId,completedNudgeId,compressionInFlightNudgeId}";
 const replaceGateShape = (label, previous, replacement) => {
   if (text.includes(replacement)) {
     console.log(label + ": already patched");
@@ -620,9 +620,9 @@ const replaceGateShape = (label, previous, replacement) => {
   console.log(label + ": patched");
 };
 replaceGateShape("nudge compression state", [NUDGE_GATE_STATE_OLD, NUDGE_GATE_STATE_DRAFT], NUDGE_GATE_STATE);
-const NUDGE_GATE_READ_OLD = "return{armed:Number.isFinite(g2.credit)&&g2.credit>0,requireNudge:g2.requireNudge===true,requireRecommendation:g2.requireRecommendation===true}";
+const NUDGE_GATE_READ_OLD = "return{armed:Number.isFinite(g2.credit)&&g2.credit>0,requireNudge:g2.requireNudge===true,requireRecommendation:g2.requireRecommendation===true,postComPressTail:g2.postComPressTail===true}";
 const NUDGE_GATE_READ_DRAFT = "return{armed:Number.isFinite(g2.credit)&&g2.credit>0,requireNudge:g2.requireNudge===true,requireRecommendation:g2.requireRecommendation===true,nudgeId:Number.isSafeInteger(g2.nudgeId)?g2.nudgeId:0,compressed:g2.compressed===true,compressionInFlight:g2.compressionInFlight===true}";
-const NUDGE_GATE_READ = "return{armed:Number.isFinite(g2.credit)&&g2.credit>0,requireNudge:g2.requireNudge===true,requireRecommendation:g2.requireRecommendation===true,nudgeId:Number.isSafeInteger(g2.nudgeId)?g2.nudgeId:0,compressed:Number.isSafeInteger(g2.nudgeId)&&g2.nudgeId>0&&g2.completedNudgeId===g2.nudgeId,compressionInFlight:Number.isSafeInteger(g2.nudgeId)&&g2.nudgeId>0&&g2.compressionInFlightNudgeId===g2.nudgeId}";
+const NUDGE_GATE_READ = "return{armed:Number.isFinite(g2.credit)&&g2.credit>0,requireNudge:g2.requireNudge===true,requireRecommendation:g2.requireRecommendation===true,postComPressTail:g2.postComPressTail===true,nudgeId:Number.isSafeInteger(g2.nudgeId)?g2.nudgeId:0,compressed:Number.isSafeInteger(g2.nudgeId)&&g2.nudgeId>0&&g2.completedNudgeId===g2.nudgeId,compressionInFlight:Number.isSafeInteger(g2.nudgeId)&&g2.nudgeId>0&&g2.compressionInFlightNudgeId===g2.nudgeId}";
 replaceGateShape("nudge compression state read", [NUDGE_GATE_READ_OLD, NUDGE_GATE_READ_DRAFT], NUDGE_GATE_READ);
 const NUDGE_COMPRESS_WRAPPER_DRAFT = 'async function applyConfiguredCompression(input,ctx,callId,signal){const gate=unpromptedGateOf(ctx.session);if(gate.compressionInFlight||gate.armed&&gate.compressed){const reason=gate.armed&&gate.compressed?"this nudge already completed one successful compression":"a compression for this nudge is already in progress";ctx.log(`[acp-proxy: refused duplicate nudge compression: ${reason}]`);return compressResult(`[Compression REFUSED: ${reason}. Do not call compress again for this nudge; continue the task. A new compression nudge is required before another fold.]`,"refused",0,"nudge-compress-once")}const nudgeId=gate.nudgeId;const ownsNudge=gate.armed;const current=ownsNudge?ctx.session.transient?.unpromptedGate:void 0;if(ownsNudge&&current&&current.nudgeId===nudgeId)current.compressionInFlight=true;try{const result=await applyConfiguredCompressionCore(input,ctx,callId,signal);const latest=ctx.session.transient?.unpromptedGate;if(ownsNudge&&latest&&latest.nudgeId===nudgeId){latest.compressionInFlight=false;if(latest.credit>0&&result?.outcome==="applied"&&result.blocksCreated>0)latest.compressed=true}return result}finally{const latest=ctx.session.transient?.unpromptedGate;if(ownsNudge&&latest&&latest.nudgeId===nudgeId)latest.compressionInFlight=false}}\n';
 const NUDGE_COMPRESS_WRAPPER = readFileSync(join(here, "patches", "nudge-compress-wrapper.block.js"), "latin1").trimEnd() + "\n";
@@ -752,7 +752,7 @@ if (text.includes("__biliFailureTextZh")) {
 const PREFLIGHT_BLOCK = readFileSync(join(here, "patches", "preflight.block.js"), "utf8").trimEnd();
 cardUpsert("preflight helpers", "// <bili-preflight begin>", "// <bili-preflight end>",
   escapedCopy(PREFLIGHT_BLOCK).replace(/\\u000A/g, "\n"), "function emitPreflightError(", false);
-const PREFLIGHT_ENTRY = "async function preflightCompressIfNeeded(prepared,runPrepare,req,inboundBody,res,opts,core,config,configuredWindow,model,resolvedNativeWindow,windowShrinkReason,route,affinity,anonymous,log2,instanceId){";
+const PREFLIGHT_ENTRY = "async function preflightCompressIfNeeded(prepared,runPrepare,req,inboundBody,res,opts,core,config,configuredWindow,model,resolvedNativeWindow,windowShrinkReason,route,affinity,anonymous,log2,instanceId,v1Meta){";
 const PREFLIGHT_RECOVERED = PREFLIGHT_ENTRY + 'prepared=await __biliRecoverSnapshot(prepared,runPrepare,res,log2);if(prepared===null)return{failFast:true,status:0,message:"snapshot recovery aborted",retryable:false,respond:false};';
 const PREFLIGHT_HTTP_OLD = 'if(res.headersSent){if(prepared.stream){emitPreflightError(res,prepared.commandcode?"commandcode":prepared.protocol,{message:outcome.message,retryable:outcome.retryable},m2=>log2("warn",m2))}else{try{res.end(JSON.stringify({error:{type:"server_error",code:"preflight_compress_failed",message:outcome.message,retryable:outcome.retryable}}))}catch{}}}else{res.writeHead(outcome.status,{"content-type":"application/json",...outcome.status===503?{"retry-after":"30"}:{}});res.end(JSON.stringify({error:{type:"server_error",code:"preflight_compress_failed",message:outcome.message,retryable:outcome.retryable}}))}';
 const PREFLIGHT_HTTP_NEW = 'if(res.headersSent&&prepared.stream){emitPreflightError(res,prepared.commandcode?"commandcode":prepared.protocol,outcome,m2=>log2("warn",m2))}else{__biliReplyPreflight(res,outcome)}';
@@ -761,9 +761,13 @@ const PREFLIGHT_EDITS = [
   ["snapshot retry classification",
     "const ff=failFast(status,ffDetail,retryable,",
     'const ff=failFast(status,ffDetail,retryable||status===502&&imageTokens+overheadEstimate<limit&&(f2===void 0||f2.kind==="exhausted"&&!f2.deterministic)&&__biliSnapshotRetryable(prepared),'],
+  // The local 413 arm is upstream's now: 8cdad29 refuses only against a proven
+  // upstream wall (statedWall>0, "estimate-based refusals are gone") and forwards
+  // otherwise for the provider to arbitrate (#7537). B19/B21 still own the other
+  // half of this expression: a preflight 429 must not surface as 503 with retry-after.
   ["preflight status",
-    'const status=f2?.kind==="upstream"&&f2.status===429?503:f2?.kind==="exhausted"&&f2.deterministic&&!payloadFitsWindow?413:502;',
-    'const status=f2?.kind==="exhausted"&&f2.deterministic&&!payloadFitsWindow?413:502;'],
+    'const status=f2?.kind==="upstream"&&f2.status===429?503:502;',
+    'const status=502;'],
   ["preflight HTTP response", PREFLIGHT_HTTP_OLD, PREFLIGHT_HTTP_NEW],
   ["preflight stream error",
     'function emitPreflightError(res,protocol,error,log2){const err2={type:"server_error",code:"preflight_compress_failed",message:error.message,retryable:error.retryable};',
@@ -850,7 +854,7 @@ editFunction("completion diagnostic metadata", "legacyCompletionChunk", body => 
   body = editInside("completion detail parameter", body,
     "function legacyCompletionChunk(protocol,visible,state7){", "function legacyCompletionChunk(protocol,visible,state7,detail){");
   body = editInside("completion openai detail", body, '{choices:[{index:0,delta:{content:visible},finish_reason:null}]}', '{detail,choices:[{index:0,delta:{content:visible},finish_reason:null}]}');
-  body = editInside("completion responses detail", body, '{type:"response.output_text.delta",item_id:itemId,output_index:oi2,delta:visible}', '{type:"response.output_text.delta",item_id:itemId,output_index:oi2,delta:visible,detail}');
+  body = editInside("completion responses detail", body, '{type:"response.output_text.delta",item_id:itemId,output_index:oi2,content_index:0,delta:visible}', '{type:"response.output_text.delta",item_id:itemId,output_index:oi2,content_index:0,delta:visible,detail}');
   body = editInside("completion google detail", body, '{error:{code:500,message:visible,status:"INTERNAL"}}', '{error:{code:502,message:visible,status:"INTERNAL",detail}}');
   body = editInside("completion commandcode detail", body, '{type:"error",error:"acp_proxy_error",message:visible}', '{type:"error",error:"acp_proxy_error",message:visible,detail}');
   return editInside("completion anthropic detail", body, '{type:"content_block_delta",index:blockIndex,delta:{type:"text_delta",text:visible}}', '{type:"content_block_delta",index:blockIndex,delta:{type:"text_delta",text:visible},detail}');
@@ -962,7 +966,9 @@ console.log("auxiliary plaintext header ownership: patched");
 // separate from the model-visible Chinese message.
 editFunction("forward local errors", "forwardCaptured", body => {
   let next = body;
-  for (const [value, count] of [["err2.message", 1], ["countMessage", 1], ["fuseMessage", 2]]) {
+  // 8cdad29 dropped the fuseMessage arm (#7537: only evidence-based size refusals
+  // survived), so only the two remaining forward 413 sites take the Chinese text.
+  for (const [value, count] of [["err2.message", 1], ["countMessage", 1]]) {
     const old = 'stage:"forward",message:' + value;
     const replacement = 'stage:"forward",message:__biliPreflightError({status:413}).message,detail:' + value;
     if (next.includes(replacement)) continue;

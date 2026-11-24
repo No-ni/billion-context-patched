@@ -4,7 +4,7 @@
 
 ## 每次更新、修复、合并或升级前必读
 
-1. 完整阅读 [docs/SPEC.md](docs/SPEC.md)：这是独立修改与既定行为的唯一权威清单，包含 B1–B23、W1–W7、I1–I5 和 PCK-01–PCK-05。
+1. 完整阅读 [docs/SPEC.md](docs/SPEC.md)：这是独立修改与既定行为的唯一权威清单，包含 B1–B24、W1–W7、I1–I5 和 PCK-01–PCK-05。
 2. 阅读 [docs/MAINTENANCE.md](docs/MAINTENANCE.md)，再按改动范围阅读 [docs/PATCHES.md](docs/PATCHES.md) 和相关 `docs/audits/`。发布另读 [docs/RELEASING.md](docs/RELEASING.md)。
 3. 现场核对 `git status`、分支、远端、日志及标签，识别已有用户改动。不得擅自覆盖、回退、暂存隐藏或删除它们。
 

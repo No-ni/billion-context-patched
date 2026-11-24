@@ -14,7 +14,7 @@ export async function assertResponsesWsLocalErrors(source) {
   const names = [...predicates, "errorFrame", "unsupportedTransportOptions", "describeEventType",
     "connectionNamedHeaders", "bodyToText", "isHandshakeRefusal", "releaseUpstreamWatchdog",
     "finalizeResponsesWsUpstreamHeaders", "stripRemoteCompactionBetaFeature", "isAzureOpenAiHost", "canonical", "closeCode",
-    "__biliStreamErrorInfo"];
+    "__biliStreamErrorInfo", "normalizeSseLineEndings", "finalizeSseLineEndings", "sseEventData"];
   const upstreamSocketName = classes[1].match(/new ([\w$.]+)\(wsUrl,/)?.[1];
   const httpName = classes[2].match(/new ([\w$.]+)\.IncomingMessage\(/)?.[1];
   const peerSocketNames = [...new Set([...classes[2].matchAll(/peer\.readyState===([\w$.]+)\.OPEN/g)].map(match => match[1]))];

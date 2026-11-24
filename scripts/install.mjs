@@ -244,7 +244,10 @@ if (!dryRun && !argv.includes("--skip-smoke") && smokeTarget) {
       stdio: "inherit", timeout: 30000,
       env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
     });
-    execFileSync(process.execPath, [join(here, "check-upstream-ux.mjs"), smokeTarget], {
+    // The merged client and the patched agent are not built yet at this stage:
+    // this call validates the proxy alone, and the next one validates the staged
+    // native agent. check-wrapper covers all three once the package exists.
+    execFileSync(process.execPath, [join(here, "check-upstream-ux.mjs"), smokeTarget, "-", "-"], {
       stdio: "inherit", timeout: 30000,
       env: { ...process.env, ...(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: "1" }) },
     });

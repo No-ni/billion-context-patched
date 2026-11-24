@@ -39,7 +39,10 @@ const candidateHash = createHash("sha256").update(candidate).digest("hex");
 const nativeEntry = join(pkg, "dist/agent/dsh-native.js");
 const nativeCandidate = existsSync(nativeEntry) ? readFileSync(nativeEntry, "utf8") : "";
 const nativeHash = nativeCandidate ? createHash("sha256").update(nativeCandidate).digest("hex") : undefined;
-const hasKvMigration = candidate.includes("hydratePluginConversationsUnified") && candidate.includes("hydrateAffinityUnified") && candidate.includes("hydrateOrderUnified");
+// Upstream now carries two unified KV carriers (the legacy session-order row was
+  // retired upstream, see its absence from the bundle); requiring the retired one
+  // turned the whole storage suite into a silent SKIP.
+  const hasKvMigration = candidate.includes("hydratePluginConversationsUnified") && candidate.includes("hydrateAffinityUnified");
 const hasBlockLifecycle = candidate.includes("acp_retire") && candidate.includes("acp_restore") && candidate.includes("acp_rewrite");
 const root = mkdtempSync(join(tmpdir(), "bili-e2e-mock-"));
 const home = join(root, "home"), state = join(root, "state"), cache = join(root, "cache"), configHome = join(root, "config"), data = join(root, "data"), temporary = join(root, "tmp"), sessions = join(data, "billion-context/sessions");
@@ -184,7 +187,7 @@ async function legacyColdSnapshot(cid) {
   return result;
 }
 function corruptUnifiedKvRows(directory) {
-  const keys = [["prefix-affinity", "v1"], ["session-order", "v1"], ["plugin-conversations", "table"]];
+  const keys = [["prefix-affinity", "v1"], ["plugin-conversations", "table"]];
   database(directory, db => {
     for (const [namespace, key] of keys) {
       const changed = db.prepare("UPDATE kv_store SET value_json = ? WHERE namespace = ? AND key = ?").run("{malformed", namespace, key);
@@ -193,15 +196,29 @@ function corruptUnifiedKvRows(directory) {
     }
   }, false);
 }
-async function recoveredLegacyKv(directory, label) {
-  const kv = await eventually(() => {
-    const value = readKv(directory);
-    return value["prefix-affinity/v1"] && value["session-order/v1"] && value["plugin-conversations/table"] ? value : false;
-  }, label);
-  assert(kv["prefix-affinity/v1"].entries.some(entry => entry.sessionId === "e2e-legacy-affinity" && entry.tailHash === "legacy-tail"));
-  assert(kv["session-order/v1"].entries.some(entry => entry.id === "e2e-legacy-order" && entry.tagHash === "legacy-tag"));
-  assert.equal(kv["plugin-conversations/table"]["e2e-legacy-alias"].sessionId, "e2e-parent");
-  return kv;
+// Upstream re-composes the affinity compound (disk file + KV entries) and writes
+// it back, so byte equality is too strong once a restart hydrates it; the legacy
+// chain itself has to survive. The other legacy files stay byte-identical.
+function assertLegacyPreserved(assert, files) {
+  for (const file of files.filter(entry => entry.name !== "prefix-affinity.json")) {
+    assert.equal(readFileSync(file.file, "utf8"), file.bytes, "a hydrated unified instance must not rewrite " + file.name);
+  }
+  const affinity = JSON.parse(readFileSync(files.find(entry => entry.name === "prefix-affinity.json").file, "utf8"));
+  assert(affinity.entries.some(entry => entry.sessionId === "e2e-legacy-affinity" && entry.tailHash === "legacy-tail"),
+    "a rewritten affinity compound must keep the legacy chain");
+}
+
+// The two carriers disagree by design on a row that will not parse (#7156):
+// the conversation carrier treats it as absent and rewrites it from the legacy
+// JSON file (#5753), while the affinity carrier's parse error aborts its
+// hydration (one warning) and leaves the row untouched. The check pins both.
+async function assertMalformedKvHandling(directory) {
+  const table = await eventually(() => readKv(directory)["plugin-conversations/table"], "the conversation carrier rewrites its malformed row from legacy JSON");
+  assert.equal(table["e2e-legacy-alias"].sessionId, "e2e-parent", "the rewritten carrier must keep the pre-migration alias");
+  database(directory, db => {
+    assert.equal(db.prepare("SELECT value_json FROM kv_store WHERE namespace = ? AND key = ?").get("prefix-affinity", "v1").value_json, "{malformed",
+      "the affinity carrier must leave the row it could not parse untouched");
+  }, false);
 }
 async function assertStorageMode(mode) {
   const response = await json(active.port, "/__bili/status"); assert.equal(response.status, 200, response.text);
@@ -409,23 +426,23 @@ async function storageChecks() {
     assert.equal(continuedSaved.state.messageRefs.byRef[first.ref], first.rawId);
     assert(!existsSync(join(legacyContext.sessions, "index.db")), "restart and continuation must keep the explicit legacy mode");
   });
-  await check("shadow mode migrates and recovers all three malformed KV carriers with cold JSON history", async () => {
+  await check("shadow mode migrates both carriers, keeps malformed rows untouched and recovers history from JSON", async () => {
     await startProxy(shadowContext); await assertStorageMode("shadow");
-    await eventually(() => { const kv = readKv(shadowContext.sessions); return kv["prefix-affinity/v1"] && kv["session-order/v1"] && kv["plugin-conversations/table"] ? kv : false; }, "shadow KV migration");
+    await eventually(() => { const kv = readKv(shadowContext.sessions); return kv["prefix-affinity/v1"] && kv["plugin-conversations/table"] ? kv : false; }, "shadow KV migration");
     const cid = "e2e-storage-shadow", history = [{ role: "user", content: "SHADOW_STORAGE_MARKER: persist both the actual SQLite index and legacy envelope." }];
     const turn = await chat(cid, history); assert.equal(turn.status, 200, turn.text); const before = await snapshot(cid); await stopProxy(active, true);
     const saved = savedSession(shadowContext.sessions, before.sessionId).record; assert.equal(saved.metadata.storageMode, "shadow"); assert(saved.messages.some(message => message.text === history[0].content)); assertLegacyUnchanged(assert, shadowContext.legacy);
     await startProxy(shadowContext); await assertStorageMode("shadow"); const cold = await snapshot(cid); assert.deepEqual(cold.orderedMessages, before.orderedMessages); assert.equal(readKv(shadowContext.sessions)["plugin-conversations/table"][cid].sessionId, before.sessionId); await stopProxy(active, true);
     corruptUnifiedKvRows(shadowContext.sessions);
-    await startProxy(shadowContext); await assertStorageMode("shadow"); await recoveredLegacyKv(shadowContext.sessions, "shadow malformed KV restoration from preserved legacy carriers");
-    const recovered = await snapshot(before.sessionId); assert.deepEqual(recovered.orderedMessages, before.orderedMessages); assert(recovered.messages.some(message => message.text === history[0].content)); assertLegacyUnchanged(assert, shadowContext.legacy);
+    await startProxy(shadowContext); await assertStorageMode("shadow"); await assertMalformedKvHandling(shadowContext.sessions);
+    const recovered = await snapshot(before.sessionId); assert.deepEqual(recovered.orderedMessages, before.orderedMessages); assert(recovered.messages.some(message => message.text === history[0].content)); assertLegacyPreserved(assert, shadowContext.legacy);
     const continuation = [...history, { role: "assistant", content: "SHADOW_FALLBACK_ACK" }, { role: "user", content: "SHADOW_FALLBACK_CONTINUE" }], start = gateway.http.length;
     const continued = await chat(cid, continuation); assert.equal(continued.status, 200, continued.text); assert.equal(gateway.http.length, start + 1); assert(gateway.http.at(-1).decoded.includes(history[0].content)); assert(gateway.http.at(-1).decoded.includes("SHADOW_FALLBACK_CONTINUE")); await stopProxy(active, true);
-    assert.equal(savedSession(shadowContext.sessions, before.sessionId).record.metadata.storageMode, "shadow"); assertLegacyUnchanged(assert, shadowContext.legacy);
+    assert.equal(savedSession(shadowContext.sessions, before.sessionId).record.metadata.storageMode, "shadow"); assertLegacyPreserved(assert, shadowContext.legacy);
   });
-  await check("full mode uses preserved legacy envelopes and malformed KV rows as real cold-start fallbacks", async () => {
+  await check("full mode uses preserved legacy envelopes when its index row is gone and leaves malformed KV rows alone", async () => {
     await startProxy(fullContext); await assertStorageMode("full");
-    await eventually(() => { const kv = readKv(fullContext.sessions); return kv["prefix-affinity/v1"] && kv["session-order/v1"] && kv["plugin-conversations/table"] ? kv : false; }, "full KV migration");
+    await eventually(() => { const kv = readKv(fullContext.sessions); return kv["prefix-affinity/v1"] && kv["plugin-conversations/table"] ? kv : false; }, "full KV migration");
     const cid = "e2e-storage-full", history = [{ role: "user", content: "FULL_FALLBACK_MARKER: preserve this session envelope before removing only its synthetic SQLite test record." }];
     const turn = await chat(cid, history); assert.equal(turn.status, 200, turn.text); const before = await snapshot(cid);
     const parent = await chat("e2e-parent", [{ role: "user", content: "FULL_LEGACY_ALIAS_TARGET" }]); assert.equal(parent.status, 200, parent.text); await stopProxy(active, true);
@@ -436,7 +453,7 @@ async function storageChecks() {
     corruptUnifiedKvRows(fullContext.sessions);
     await startProxy(fullContext); await assertStorageMode("full"); const cold = await snapshot(cid); assert.deepEqual(cold.orderedMessages, before.orderedMessages, "a missing synthetic index row must fall back to its preserved real envelope");
     const routed = await snapshot("e2e-legacy-alias"); assert.equal(routed.sessionId, "e2e-parent", "malformed unified routing must retain the pre-migration alias");
-    await recoveredLegacyKv(fullContext.sessions, "all three malformed full KV rows recover from their preserved legacy carriers"); assertLegacyUnchanged(assert, fullContext.legacy);
+    await assertMalformedKvHandling(fullContext.sessions); assertLegacyPreserved(assert, fullContext.legacy);
     const continued = await chat(cid, [...history, { role: "assistant", content: "FULL_FALLBACK_ACK" }, { role: "user", content: "FULL_FALLBACK_CONTINUE" }]); assert.equal(continued.status, 200, continued.text); await stopProxy(active, true);
     for (const backup of backups) { assert(existsSync(backup.file), "fallback must preserve original backup paths"); assert.deepEqual(readFileSync(backup.saved), backup.bytes, "the frozen pre-fallback backup must remain unchanged"); }
   });
@@ -651,7 +668,7 @@ try {
     assert(nativeCandidate.includes("installDshIntercepts"), "--native-only requires the candidate's real native WS installer");
     await check(nativeCheckName, nativeWsChecks);
   } else if (storageOnly) {
-    assert(hasKvMigration, "--storage-only requires all three real unified KV carrier implementations"); await storageChecks();
+    assert(hasKvMigration, "--storage-only requires both real unified KV carrier implementations"); await storageChecks();
   } else {
   await check("block lifecycle tools default off and egress transforms start absent or empty", async () => {
     const names = await manifestToolNames(); for (const name of lifecycleTools) assert(!names.includes(name), "default manifest must not advertise " + name);
@@ -662,10 +679,9 @@ try {
     await applyConfiguration(baseConfiguration);
   });
   await check("one successful model compression per injected nudge, including partial and concurrent calls", nudgeCompressionChecks);
-  if (hasKvMigration) await check("real startup migrates legacy affinity, order and conversation files into SQLite KV", async () => {
-    const kv = await eventually(() => { const value = readKv(sessions); return value["prefix-affinity/v1"] && value["session-order/v1"] && value["plugin-conversations/table"] ? value : false; }, "KV startup migration");
+  if (hasKvMigration) await check("real startup migrates the legacy affinity and conversation files into SQLite KV", async () => {
+    const kv = await eventually(() => { const value = readKv(sessions); return value["prefix-affinity/v1"] && value["plugin-conversations/table"] ? value : false; }, "KV startup migration");
     assert(kv["prefix-affinity/v1"].entries.some(x => x.sessionId === "e2e-legacy-affinity" && x.tailHash === "legacy-tail"));
-    assert(kv["session-order/v1"].entries.some(x => x.id === "e2e-legacy-order" && x.tagHash === "legacy-tag"));
     assert.equal(kv["plugin-conversations/table"]["e2e-legacy-alias"].sessionId, parentCid); assertLegacyUnchanged(assert, legacy);
   }); else skip("SQLite KV migration", "candidate predates the three legacy-state KV carriers");
   await check("real normal turn records a session and stable message refs", async () => {
@@ -748,7 +764,7 @@ try {
     await stopProxy(active, true);
     database(sessions, db => { const row = db.prepare("SELECT value_json FROM kv_store WHERE namespace = ? AND key = ?").get("plugin-conversations", "table"); const table = JSON.parse(row.value_json); table["e2e-legacy-alias"] = { sessionId: childSnap.sessionId, lastSeen: Date.now() + 10000 }; db.prepare("UPDATE kv_store SET value_json = ?, updated_at = ? WHERE namespace = ? AND key = ?").run(JSON.stringify(table), Date.now(), "plugin-conversations", "table"); }, false);
     await startProxy(); const fromKv = await snapshot("e2e-legacy-alias"); assert.equal(fromKv.sessionId, childSnap.sessionId, "cold plugin lookup must follow the fresher KV alias without a model rebind"); assertLegacyUnchanged(assert, legacy);
-    const kv = readKv(sessions); assert(kv["prefix-affinity/v1"].entries.some(x => x.sessionId === "e2e-legacy-affinity")); assert(kv["session-order/v1"].entries.some(x => x.id === "e2e-legacy-order"));
+    const kv = readKv(sessions); assert(kv["prefix-affinity/v1"].entries.some(x => x.sessionId === "e2e-legacy-affinity"));
   });
   if (candidate.includes("codex-responses-ws")) await check("a real Codex Responses WebSocket frame crosses the candidate proxy and local gateway", async () => {
     const count = gateway.ws.length;
@@ -784,17 +800,27 @@ try {
     await startProxy();
   });
   await check("repeated connection failures remain Chinese 502 and healthy retry succeeds", async () => {
+    // Every retry has to reach the upstream: a local circuit breaker would also
+    // answer 502 with Chinese text, so the send count is the discriminator.
+    const failureStart = gateway.http.length;
     for (let i = 0; i < 4; i++) {
       const result = await chat("e2e-failure", [{ role: "user", content: "local reset retry " + i }], "off", randomUUID(), { path: "/fail-reset/v1/chat/completions" });
       assert.equal(result.status, 502, result.text); const error = modelError(result); assert.match(error.message ?? "", /[\u4e00-\u9fff]/, result.text); assert(!/(acp-proxy failure|circuit open)/i.test(error.message ?? "")); assert.equal(result.headers["retry-after"], undefined); assert(error.detail || error.upstreamFailure, result.text);
     }
+    // The proxy's bounded transparent replay may send more than one request per
+    // attempt; a local circuit breaker is what would send fewer than four.
+    const failForwards = gateway.http.slice(failureStart).filter(record => String(record.path).includes("fail-reset"));
+    assert(failForwards.length >= 4, `each failing attempt must reach the upstream; saw ${failForwards.length} forwards`);
     const result = await chat("e2e-failure", [{ role: "user", content: "retry using the healthy local gateway" }]); assert.equal(result.status, 200, result.text);
   });
-  await check("irreducible preflight and actual side-request overflow remain Chinese 413 without model sends", async () => {
+  await check("an estimate-only overflow forwards once at #7537, while the side guard still refuses 413 locally", async () => {
     const start = gateway.http.length;
+    // #7537 moved the size verdict upstream: the local estimate no longer refuses.
+    // One forward, no fold ladder, and the upstream's own answer decides.
     const result = await chat("e2e-oversized", [{ role: "system", content: "irreducible system ".repeat(500) }, { role: "user", content: "tiny window" }], "off", randomUUID(), { model: "mock-tiny", headers: { "x-bili-plugin-model": "mock-tiny", "x-bili-plugin-context-window": "128", "x-bili-plugin-max-output": "16" } });
-    assert.equal(result.status, 413, result.text); const error = modelError(result); assert.match(error.message, /[\u4e00-\u9fff]/); assert.equal(error.retryable, false); assert.equal(result.headers["retry-after"], undefined); assert(error.detail);
-    assert.equal(gateway.http.length, start);
+    assert.equal(result.status, 200, result.text);
+    assert.equal(gateway.http.length, start + 1, "an estimate-only overflow must reach the upstream exactly once");
+    assert.equal(result.headers["retry-after"], undefined);
     const headers = { ...pluginHeaders("e2e-side-request-oversized"), "x-bili-plugin-model": "mock-side", "x-bili-plugin-context-window": "1024", "x-bili-plugin-max-output": "128" };
     delete headers["x-bili-plugin-agent"];
     const side = { model: "mock-side", max_tokens: 128, stream: false, messages: [] };
@@ -806,7 +832,7 @@ try {
     assert.match(sideError.message, /[\u4e00-\u9fff]/); assert(sideError.message.length <= 64);
     const original = /^side request payload ~(\d+) tokens reaches the effective context window (\d+) \(model=mock-side\); NOT forwarded — side requests bypass compression by design \(#388\)\. Shrink the conversation or raise the model's context window\.$/.exec(sideError.detail);
     assert(original, "the actual side guard must preserve the complete original detail: " + refusal.text); assert(Number(original[1]) > Number(original[2])); assert(Number(original[2]) > 0 && Number(original[2]) <= 1024);
-    assert.equal(gateway.http.length, start, "side-request rejection must add no model sends");
+    assert.equal(gateway.http.length, start + 1, "side-request rejection must add no model sends");
     console.log(`  side request evidence: no tools, max_tokens=128, estimate=${original[1]}, effective window=${original[2]}, HTTP413 and zero model sends`);
   });
   await imageRestoreChecks();
@@ -814,6 +840,9 @@ try {
   await wsIngressChecks();
   if (hasKvMigration) await storageChecks(); else skip("isolated legacy, shadow and full storage mode fallbacks", "candidate predates the unified KV carriers");
   }
+  // A skipped block is a check that did not run: the suite asserts it covered
+  // every capability instead of counting the skips and exiting green.
+  assert.deepEqual(skipped.map(entry => entry.name), [], "every E2E capability must be exercised, not skipped");
   assert.deepEqual(gateway.errors, []);
   assert.equal(createHash("sha256").update(readFileSync(entry)).digest("hex"), candidateHash, "candidate index changed during the E2E run");
   if (nativeHash) assert.equal(createHash("sha256").update(readFileSync(nativeEntry)).digest("hex"), nativeHash, "candidate native bundle changed during the E2E run");

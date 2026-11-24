@@ -17,6 +17,14 @@ const span = (start, end) => {
   assert(a >= 0 && b > a, "missing build span: " + start);
   return source.slice(a, b);
 };
+// Read the shipped seam knobs instead of injecting literals: B10 forbids proving
+// image integrity by lowering the minimum seam run, so the harness has to judge
+// the value the build actually ships.
+const buildKnob = (name) => {
+  const text = source.match(new RegExp("(?<![\\w$])" + name + "=[^,;]*"));
+  assert(text, "missing build constant " + name);
+  return runInNewContext(source.slice(text.index + name.length + 1, text.index + text[0].length));
+};
 const helpers = span("// <bili-preflight begin>", "// <bili-preflight end>") + "// <bili-preflight end>";
 const block = readFileSync(new URL("../patches/preflight.block.js", import.meta.url), "utf8").trimEnd();
 const escaped = block.replace(/[^ -~\n]/g, ch => "\\u" + ch.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase());
@@ -28,7 +36,10 @@ const rendering = uniqueBlockSpan(source, "message identity", "function identity
   span("function parseRow(", "var SnapshotAnchorFallbackError=") +
   span("function buildAnchoredView(", "function __biliPluginLaneSnapshot(") +
   span("function maybeSnapshotView(", "function shadowLaneEnabled(");
-const preflight = span("async function preflightCompressIfNeeded(", "var CONTEXTUAL_USER_FRAGMENT_MARKERS=");
+// The preflight body measures the Responses wire directly; those two helpers
+// live just above it and are part of the same behaviour (#7537 wire meter).
+const preflight = span("function measuredOutbound(", "async function preflightCompressIfNeeded(") +
+  span("async function preflightCompressIfNeeded(", "var CONTEXTUAL_USER_FRAGMENT_MARKERS=");
 const compression = uniqueBlockSpan(source, "preflight compressor", "async function preflightCompress(", { expression: true }).block;
 const responses = span("function emitPreflightError(", "var reports=");
 class Response extends EventEmitter {
@@ -47,6 +58,9 @@ function fixture(options = {}) {
   const rows = () => db.map((m, seq) => ({ seq, msgId: m.id, content: JSON.stringify(m) }));
   const session = { id: "test", metadata: {}, stats: { requests: 0, lastInputTokens: options.anonymous ? 0 : 80, lastInputTokensSource: "usage" },
     state: { blocks: [{ ...old }] } };
+  // A stated wall is upstream evidence (an overflow arm already proved the
+  // window); without it the preflight forwards once instead of refusing (#7537).
+  if (options.arm > 0) session.stats.overflowArmTokens = options.arm;
   const store = {
     unifiedMessageIdRows: rows, unifiedMessageRows: rows,
     unifiedTailSeqs: () => db.map((_, seq) => seq),
@@ -59,10 +73,9 @@ function fixture(options = {}) {
     },
   };
   const estimate = messages => messages.some(m => m.id === "acp_summary_old") ? 30 : 300;
-  const api = runInNewContext(rendering + "\n" + helpers + "\n" + preflight + "\n" + responses +
-    "\n({maybeSnapshotView,__biliRecoverSnapshot,__biliReplyPreflight,emitPreflightError,preflightCompressIfNeeded,__biliSnapshotAwareTurn});", {
+  const context = {
     require: createRequire(import.meta.url), getStore: () => store, markDirty: current => options.onDirty?.(current),
-    MAX_CHAIN_WALK: 8192, MIN_SEAM_RUN: 2, __biliPinLog() {}, console: { warn() {} },
+    MAX_CHAIN_WALK: buildKnob("MAX_CHAIN_WALK"), MIN_SEAM_RUN: buildKnob("MIN_SEAM_RUN"), __biliPinLog() {}, console: { warn() {} },
     sha256Hex2: value => createHash("sha256").update(value).digest("hex"),
     featureEnabled: () => options.live !== false, shadowLaneEnabled: () => false,
     resolveStorageModeSafe: () => options.mode ?? "full",
@@ -106,7 +119,14 @@ function fixture(options = {}) {
     estimateRawBodyBreakdown: () => { options.onRawEstimate?.(); return { total: 300 }; },
     describeCoreTextDuplication: () => "mock text", measuredBreakdownClause: () => "mock text", outputBudgetField: () => null,
     buildWindowShrinkNote: () => "", noteLocalRefusal: () => { session.refused = true; },
-  });
+    // Helpers the shipped preflight body calls on these paths (#7537 log lines
+    // and the fold-epoch guard). Stubbed like the rest so the harness controls
+    // the branch instead of hitting the real I/O.
+    maskUrlForLog: () => "https://example.invalid/", epochConfirmPending: () => false,
+  };
+  const script = rendering + "\n" + helpers + "\n" + preflight + "\n" + responses +
+    "\n({maybeSnapshotView,__biliRecoverSnapshot,__biliReplyPreflight,emitPreflightError,preflightCompressIfNeeded,__biliSnapshotAwareTurn});";
+  const api = runInNewContext(script, context);
   const prepare = async () => {
     prepares++; session.stats.requests++;
     options.onPrepare?.(session, prepares);
@@ -333,16 +353,27 @@ await check("unsafe seams and skipped-block coverage still reject the view", asy
     assert.equal(f.counts().prepares, 2);
   }
 });
-await check("deterministic oversized input stays 413 and upstream auth is not retried", async () => {
+await check("a proven wall is the only local 413; upstream auth is not retried", async () => {
+  // #7537 removed estimate-based local refusals: a 413 now needs upstream
+  // evidence - an overflow arm that already stated this window.
+  const proven = fixture({ failure: { kind: "exhausted", deterministic: true, retryable: false }, arm: 100 });
+  const refused = await proven.run(await proven.prepare());
+  assert.equal(refused.status, 413); assert.equal(refused.retryable, false);
+  assert.equal(proven.session.refused, true);
+
+  const unproven = fixture({ failure: { kind: "exhausted", deterministic: true, retryable: false } });
+  const forwarded = await unproven.run(await unproven.prepare());
+  assert.equal(forwarded.status, undefined, "no local 413 without a stated upstream wall");
+  assert.equal(unproven.session.refused, undefined);
+
   for (const [failure, status, retryable] of [
-    [{ kind: "exhausted", deterministic: true, retryable: false }, 413, false],
     [{ kind: "upstream", status: 401, retryable: false }, 502, false],
     [{ kind: "upstream", status: 429, retryable: true }, 502, true],
   ]) {
     const f = fixture({ failure });
     const out = await f.run(await f.prepare());
     assert.equal(out.status, status); assert.equal(out.retryable, retryable);
-    assert.equal(f.session.refused === true, status === 413);
+    assert.equal(f.session.refused, undefined);
   }
   for (const options of [{ images: 120 }, { overhead: 120 }]) {
     const f = fixture(options);
@@ -509,13 +540,17 @@ await check("actual receive, gzip decode and ingest limits keep 413/stage with C
   assert.equal(closed.chunks.length, 0);
 });
 await check("actual side-request classification and window guard preserve short Chinese 413 with diagnostic detail", () => {
-  const names = ["defaultCountTokens", "estimateRawBodyTokens", "outputBudgetField", "readOutputBudget",
+  const names = ["defaultCountTokens", "isNonModelTopLevelKey", "estimateRawBodyTokens", "outputBudgetField", "readOutputBudget",
     "isServerToolUtilityCall", "isStructuredOutputCall", "isAudioOutputCall", "isSideRequest", "resolveSideLane", "sideRequestGuard"];
   const formats = source.match(/var STRUCTURED_FORMAT_TYPES=new Set\(\[[^\]]+\]\);/g);
   assert.equal(formats?.length, 1, "actual structured-output formats must be unique");
   const serverToolTypes = source.match(/var SERVER_EXECUTED_TOOL_TYPES=\/[^;]+;/g);
   assert.equal(serverToolTypes?.length, 1, "actual server-executed tool types must be unique");
-  const functions = formats[0] + serverToolTypes[0] + names.map(name => uniqueBlockSpan(source, name, "function " + name + "(", { expression: true }).block).join("\n");
+  // The body meter ignores provider bookkeeping keys; its set has to travel with
+  // the function, exactly like the other module-scope tables here.
+  const nonModelKeys = source.match(/var NON_MODEL_TOP_LEVEL_KEYS=new Set\(\[[^\]]+\]\);/g);
+  assert.equal(nonModelKeys?.length, 1, "actual non-model top-level keys must be unique");
+  const functions = formats[0] + serverToolTypes[0] + nonModelKeys[0] + names.map(name => uniqueBlockSpan(source, name, "function " + name + "(", { expression: true }).block).join("\n");
   const context = { NON_TEXT_BODY_KEYS: new Set(["data", "url", "b64_json", "file_data", "image_url"]),
     SIDE_REQUEST_AGENTS: new Set(["title"]), SIDE_REQUEST_MAX_TOKENS: 200, SIDE_REQUEST_GUARD_TOLERANCE: 1.15 };
   const api = runInNewContext(functions + "\n({isAudioOutputCall,isSideRequest,resolveSideLane,sideRequestGuard});", context);

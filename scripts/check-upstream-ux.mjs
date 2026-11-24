@@ -649,16 +649,30 @@ export const assertAgentUpstreamUx = (agentPath) => {
   console.log("  OK the shipped native helper replaces mixed-case/tuple stamps, preserves host init and rejects partial patches");
 };
 
+// B20 (shell) and the native half of B16 only exist in the merged client and the
+// patched agent. Skipping them when the caller omits a path is how a standalone
+// run used to print "passed" while covering the proxy alone, so the paths are
+// required: the CLI defaults them to this checkout, and callers pass the build.
 export const assertUpstreamUx = (distPath, clientPath, agentPath) => {
+  assert(distPath !== undefined, "the proxy bundle path is required");
+  assert(clientPath !== undefined, "the merged client path is required: pass lib/client.js");
+  assert(agentPath !== undefined, "the native agent path is required: pass dist/agent/dsh-native.js");
   assertDistUpstreamUx(distPath);
-  if (clientPath !== undefined) assertClientUpstreamUx(clientPath);
-  if (agentPath !== undefined) assertAgentUpstreamUx(agentPath);
+  assertClientUpstreamUx(clientPath);
+  assertAgentUpstreamUx(agentPath);
 };
 
 if (process.argv[1] !== void 0 && process.argv[1].endsWith("check-upstream-ux.mjs")) {
   const dist = process.argv[2] ?? join(here, "vendor", "billion-context", "dist", "index.js");
-  const client = process.argv[3];
-  const agent = process.argv[4];
-  assertUpstreamUx(dist, client, agent);
+  // "-" says the caller has not built that artifact yet and validates it
+  // elsewhere (install.mjs checks the staged native agent; check-wrapper checks
+  // the merged client once the package exists). Without it, all three run.
+  const client = process.argv[3] === "-" ? undefined : process.argv[3] ?? join(here, "lib", "client.js");
+  const agent = process.argv[4] === "-" ? undefined : process.argv[4] ?? join(here, "vendor", "billion-context", "dist", "agent", "dsh-native.js");
+  assertDistUpstreamUx(dist);
+  if (client === undefined) console.log("  note: client half not requested; check-wrapper validates the built lib/client.js");
+  else assertClientUpstreamUx(client);
+  if (agent === undefined) console.log("  note: native agent half not requested; install.mjs validates the staged agent");
+  else assertAgentUpstreamUx(agent);
   console.log("upstream ux checks passed");
 }

@@ -18,7 +18,18 @@ export function database(sessions, fn, readOnly = true) {
 }
 
 export function readKv(sessions) {
-  return database(sessions, db => Object.fromEntries(db.prepare("SELECT namespace, key, value_json FROM kv_store").all().map(row => [row.namespace + "/" + row.key, JSON.parse(row.value_json)])));
+  // A malformed unified row is a real, expected state (#7156: the proxy warns
+  // once and keeps the JSON envelope as the recovery source, never rewriting
+  // what it could not parse), so the reader reports it as undefined instead of
+  // throwing inside a poll predicate.
+  return database(sessions, db => {
+    const out = {};
+    for (const row of db.prepare("SELECT namespace, key, value_json FROM kv_store").all()) {
+      try { out[row.namespace + "/" + row.key] = JSON.parse(row.value_json); }
+      catch { out[row.namespace + "/" + row.key] = undefined; }
+    }
+    return out;
+  });
 }
 
 export function assertLegacyUnchanged(assert, files) {

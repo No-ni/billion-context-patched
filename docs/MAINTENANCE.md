@@ -8,18 +8,18 @@
 
 | 来源 | 当前版本 / 提交 | 本仓库的关系 |
 | --- | --- | --- |
-| [billion-context](https://github.com/ranxianglei/billion-context) | manifest 0.1.216，固定主线提交 `548e396022b9391e28a3c9061560be297779b8e8`，kernel 0.0.198 | 从固定干净源码重新构建，复制插件使用的七个上游产物；对代理 `dist/index.js` 重打 B1–B23 及 WAL 头修复，native agent 修正 WS 权威请求头并同步图片配置键，client 在合并前移除横幅；层和清单随同一基线复制。不是仅采用 v0.1.216 标签 |
+| [billion-context](https://github.com/ranxianglei/billion-context) | manifest 0.1.216，固定主线提交 `8cdad29529b625c7222554a482a65063a8dc525b`，kernel 0.0.208 | 从固定干净源码重新构建，复制插件使用的七个上游产物；对代理 `dist/index.js` 重打 B1–B24 及 WAL 头修复，native agent 修正 WS 权威请求头并同步图片配置键，client 在合并前移除横幅；层和清单随同一基线复制。不是仅采用 v0.1.216 标签 |
 | [dsh-plugin-model-request-accelerator](https://github.com/No-ni/dsh-plugin-model-request-accelerator) | 2.3.0，`e8c30af1f2b5cffa6749d032f0f296e17d4e26d0` | 来源未升级；2026-11-12 在 lib/index.js、lib/ledger.js 加本地账本生命周期与依赖寻址补丁，其余文件保留基线。补丁由 scripts/patch-accelerator.mjs 重打，客户端仍只改三个字面量 |
 | [yaml](https://github.com/eemeli/yaml) | 2.9.1，ISC | 从 2026-11-11 审计的 DSH settings 随附版本复制 Node runtime，仅清除 Document.js 一处行末空格；CLI 与运行期共用解析器，来源范围见 `vendor/yaml/SOURCE.md` |
 | [zod](https://github.com/colinhacks/zod) | 4.4.3，MIT | 原加速器清单里的嵌套依赖不会由根包装包自动安装。自带 Node ESM runtime，账本显式用相对路径导入，管理器与 CLI 均不依赖原版或 profile 残留；范围见 vendor/zod/SOURCE.md |
 
-bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮从干净固定源码执行 `npm ci` 和 `npm run build`，复制插件使用的七个上游产物；代理/native/client 的差异均通过对应补丁器产生，外部输入不被 installer 改写。当前来源、适配、检查与边界见 [0.7.0 上游整合审计](audits/2026-11-18-upstream-0.7.0.md)；上一来源证据保留在 [0.6.9 主线整合审计](audits/2026-11-15-upstream-integration.md)。不宣称跨机器二进制完全可复现；相同 manifest 版本可能对应不同主线提交，必须核对完整来源。
+bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮从干净固定源码执行 `npm ci` 和 `npm run build`，复制插件使用的七个上游产物；代理/native/client 的差异均通过对应补丁器产生，外部输入不被 installer 改写。当前来源、适配、检查与边界见 [8cdad29 合并审计](audits/2026-11-24-upstream-8cdad29.md)；上一来源证据保留在 [0.7.0 上游整合审计](audits/2026-11-18-upstream-0.7.0.md) 与 [0.6.9 主线整合审计](audits/2026-11-15-upstream-integration.md)。不宣称跨机器二进制完全可复现；相同 manifest 版本可能对应不同主线提交，必须核对完整来源。
 
 ## 2. 实现与检查映射
 
-行为、默认值和拒绝条件只在 SPEC 维护；下表按稳定 ID 定位实现和验证。B1–B23 的代理改动由 `scripts/patch-bili-build.mjs` 重打，B20 的客户端改动由 `scripts/patch-bili-client.mjs` 在构建时施加。`scripts/patch-bili-agent.mjs` 在完整 native factory 中修正 B7/W5 所需的 WS 会话身份请求头，并补齐 B16 的五项图片预算键与 IMG-12 的 `imageRestoreHostOffload` 开关登记。
+行为、默认值和拒绝条件只在 SPEC 维护；下表按稳定 ID 定位实现和验证。B1–B24 的代理改动由 `scripts/patch-bili-build.mjs` 重打，B20 的客户端改动由 `scripts/patch-bili-client.mjs` 在构建时施加。`scripts/patch-bili-agent.mjs` 在完整 native factory 中修正 B7/W5 所需的 WS 会话身份请求头，并补齐 B16 的五项图片预算键与 IMG-12 的 `imageRestoreHostOffload` 开关登记。
 
-### bili：B1–B23
+### bili：B1–B24
 
 | ID | 实现位置 | 检查与覆盖边界 |
 | --- | --- | --- |
@@ -46,6 +46,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮�
 | B21 | 步骤 21 的中文构造器、`stream-errors.block.js`；步骤 22 的预检、入口/出站大小限制、辅助请求超窗、WS 本地错误与模型隧道 DNS 拒绝 | `check-upstream-ux.mjs`、`check-preflight.mjs` 执行真实编译 HTTP/四协议/loop/completion/WS sink、reader/decoder/ingest/side guard、完整 WS session/history/upstream 和隧道响应；mock E2E 检查实际 HTTP/WS 拒绝及健康续接；receive socket reset 与 WS prewarm 边界见审计 |
 | B22 | 步骤 22；`patches/preflight.block.js`；当前渲染 attempt、四协议 kernel/post-processing guard、共用预检入口及零新增范围的已有块 fit 重建 | `check-preflight.mjs` 的 fresh miss、持续降级、完整性、超时/取消、实际内层 fit、二次校正 probe 的四种结束状态与持久化计数、重建图片预算；mock E2E 一次真实 SQLite 读失败后保存/重渲染、块/原文/ref 保留及 gateway 只发送一次；DSH 冷加载/切模型未由自动检查证明 |
 | B23 | 步骤 18 的 nudge transient generation 与 `applyConfiguredCompression` 模型工具包装；只认领调用开始时仍有有效 credit 的提醒，成功/partial 消费该 generation | `check-e2e-mock.mjs` 真实 T1 注入、零 block 与异常重试、partial 成功后拒绝、跨轮锁、跨 generation 并发、新提醒重置及过期提醒隔离；`check-preflight.mjs` 保证自动预检路径不受模型工具 gate 限制 |
+| B24 | 步骤 25 在响应侧插入 `[stream-trace]` 三行轨迹（`end()`、`finish`、`close`），正常 debug、未结束关闭 warn | `check-e2e-mock.mjs` 在真实断流与正常结束的响应上读取 `bili.log` 的三行轨迹；只读响应对象、不改写字节、不新增计时器 |
 
 IMG-01–IMG-09、IMG-11 已随 B12–B15/B17 的行为删除（0.7.5）；保留 IMG-10/IMG-10a 的预算注入与卡片，以及 2026-11-22 按用户要求重新放开的 IMG-12（宿主退役占位还原）与 IMG-13（上传超限 413 兜底）。IMG-12/IMG-13 的实现位于 `patches/image-restore.block.js`，由 `scripts/patch-bili-build.mjs` 的步骤 22 插入，mock E2E 覆盖数组与合并字符串两种宿主形态、开关关闭保留占位、413 折叠一次重发（含泛化 `request_too_large` 与中文体积文案）；字符串比较忽略 accelerator 引用差异，只看可见文本与图片结构。旧检查 `check-image-retention.mjs`、`check-host-image-fallback.mjs` 已删除，历史审计仍可读。
 

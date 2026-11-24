@@ -14,6 +14,34 @@ const span = (start, end) => {
   assert(a >= 0 && b > a, "missing build span: " + start);
   return source.slice(a, b);
 };
+// Functions lifted out of the bundle still read module-scope knobs. Pull those
+// constants out of the build instead of copying their literals here: an upstream
+// retune should change what the check exercises, not break it with a
+// ReferenceError, and a literal copied here would silently stop matching.
+const moduleKnobs = (code, provided = {}) => {
+  const knobs = {};
+  for (const name of new Set(Array.from(code.matchAll(/(?<![\w$.])([A-Z][A-Z0-9_]{2,})(?![\w$])/g), (hit) => hit[1]))) {
+    if (Object.hasOwn(provided, name) || Object.hasOwn(knobs, name)) continue;
+    const at = source.indexOf(name + "=");
+    if (at < 0 || (at > 0 && /[\w$.]/.test(source[at - 1]))) continue;
+    const start = at + name.length + 1;
+    const end = source.slice(start).search(/[,;]/);
+    if (end < 0) continue;
+    knobs[name] = runInNewContext(source.slice(start, start + end));
+  }
+  return knobs;
+};
+// The seam knobs belong to the build, not to the harness: injecting a literal
+// here would keep "the minimum seam length is 2" green even if the shipped value
+// dropped (B10 forbids proving integrity by lowering that minimum).
+const buildKnob = (name) => {
+  const match = source.match(new RegExp("(?<![\\w$])" + name + "=[^,;]*"));
+  assert(match, "missing build constant " + name);
+  const value = source.slice(match.index + name.length + 1, match.index + match[0].length);
+  return runInNewContext(value);
+};
+const MIN_SEAM_RUN = buildKnob("MIN_SEAM_RUN"), MAX_CHAIN_WALK = buildKnob("MAX_CHAIN_WALK");
+assert.equal(MIN_SEAM_RUN, 2, "B10: the shipped minimum seam run must stay 2");
 const msg = (id, text = id) => ({id, role:"user", contentType:"text", text});
 const block = (id, ids) => ({blockId:id, effectiveMessageIds:ids, active:true});
 const a = msg("a"), b = msg("b"), c = msg("c"), x = msg("x");
@@ -33,7 +61,7 @@ const api = runInNewContext(
   span("function buildAnchoredView(", "function __biliPluginLaneSnapshot(") +
   "\n({identitySig,buildView,buildAnchoredView,__biliPinViewRecord,__biliStickyView,__biliForkPinView,__biliPinnedViews});",
   {require:createRequire(import.meta.url), getStore:()=>store,
-   MAX_CHAIN_WALK:8192, MIN_SEAM_RUN:2, __biliPinLog:()=>{},
+   MAX_CHAIN_WALK:MAX_CHAIN_WALK, MIN_SEAM_RUN:MIN_SEAM_RUN, __biliPinLog:()=>{},
    sha256Hex2:value=>createHash("sha256").update(value).digest("hex"), console:{warn:()=>{}}}
 );
 const session = {id:"test", metadata:{}, state:{blocks:[block("old",["a","b"]),block("new",["x"])]}};
@@ -390,16 +418,17 @@ check("nudge growth default is 80k", () => {
 check("aborted-turn growth only consumes a trusted usage anchor", () => {
   const effective = uniqueBlockSpan(source, "effective token count", "function effectiveTokenCount(", {expression:true}).block;
   const absorb = uniqueBlockSpan(source, "aborted-turn growth", "function absorbAbortedTurnGrowth(", {expression:true}).block;
+  const knobs = {
+    usageAnchorCycleStale: () => false,
+    estimateCoreMessagesUpper: () => 120,
+    SIDE_LANE_ANCHOR_IMPOSSIBLE_RATIO: 8,
+    SIDE_LANE_ANCHOR_MIN_ABS_DELTA: 25000,
+    staleSmallAnchorFallback: () => null,
+    postRebuildAnchorTokens: () => 0,
+  };
   const meter = runInNewContext(
     effective + "\n({effectiveTokenCount});",
-    {
-      usageAnchorCycleStale: () => false,
-      estimateCoreMessagesUpper: () => 120,
-      SIDE_LANE_ANCHOR_IMPOSSIBLE_RATIO: 8,
-      SIDE_LANE_ANCHOR_MIN_ABS_DELTA: 25000,
-      staleSmallAnchorFallback: () => null,
-      postRebuildAnchorTokens: () => 0,
-    }
+    {...knobs, ...moduleKnobs(effective, knobs)}
   ).effectiveTokenCount;
   const realUsage = meter(
     {stats:{lastInputTokens:75,lastInputTokensSource:"usage",compressCreditTokens:1}},
@@ -408,6 +437,18 @@ check("aborted-turn growth only consumes a trusted usage anchor", () => {
   const estimate = meter({stats:{},metadata:{anonymousPrefixAffinity:true}}, []);
   assert.equal(realUsage.source, "usage");
   assert.equal(estimate.source, "estimate");
+  // A local report far above the model's own count means the client clipped the
+  // tail: the usage anchor cannot be trusted on its own any more.
+  const clipped = meter(
+    {stats:{lastInputTokens:1e5,lastInputTokensSource:"usage",localInputEstimate:2e6}, metadata:{}},
+    []
+  );
+  assert.equal(clipped.source, "estimate");
+  const unclipped = meter(
+    {stats:{lastInputTokens:1e5,lastInputTokensSource:"usage"}, metadata:{}},
+    []
+  );
+  assert.equal(unclipped.source, "usage");
 
   const api = runInNewContext(
     absorb + "\n({absorbAbortedTurnGrowth});",

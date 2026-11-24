@@ -30,9 +30,22 @@ const patchedConfigKeys = ',"autoModeForge","imageRescale","maxRequestImages","i
 // draft rather than writing defaults from loadConfigFile's empty fallback. The
 // proxy's budget installer reads the same file, so the export is not image
 // behavior; it only reports whether the user authored a budget by hand.
-const configReader = `export { configFile as biliConfigPath };
+// The minifier renumbers local fs aliases between builds (readFileSync2 became
+// readFileSync3 in the 8cdad29 build), so the appended reader must borrow the
+// alias loadConfigFile actually uses instead of pinning one name. Only the shape
+// of that call is contractual: function loadConfigFile() reading configFile()
+// through readFileSyncN(pathN,"utf8") and parsing it with parseBiliConfig(raw).
+const configReaderAlias = (source) => {
+  const matches = [...source.matchAll(/(?<![\w$])function\s+loadConfigFile\s*\(\s*\)\s*\{/g)];
+  if (matches.length !== 1) throw new Error("native config reader: expected one loadConfigFile declaration, found " + matches.length + " — re-derive the patch");
+  const body = source.slice(matches[0].index, matches[0].index + 400);
+  const call = body.match(/readFileSync[\d]*\(path[\d]*,"utf8"\)/);
+  if (!call) throw new Error("native config reader: loadConfigFile no longer reads its file through readFileSync(path,\"utf8\") — re-derive the patch");
+  return call[0].slice(0, call[0].indexOf("("));
+};
+const configReaderFor = alias => `export { configFile as biliConfigPath };
 export function readBiliConfig(path) {
-  try { return parseBiliConfig(readFileSync2(path,"utf8").replace(/^\\uFEFF/,"")); }
+  try { return parseBiliConfig(${alias}(path,"utf8").replace(/^\\uFEFF/,"")); }
   catch (error) { if (error?.code === "ENOENT") return {}; throw error; }
 }`;
 
@@ -57,12 +70,12 @@ export function patchBiliAgentBundle(source) {
   const configStep = "native image budget config keys: " +
     (configIndex === 2 ? "already patched" : configIndex === 1 ? "migrated from the previous patch" : "patched");
   source = source.replace(configAnchors[configIndex], patchedConfigKeys);
-  if (!source.includes(configReader)) {
+  if (!source.includes("function readBiliConfig(path) {")) {
     if (source.includes("readBiliConfig") || !/function configFile\(\)\{|function loadConfigFile\(\)/.test(source) ||
-        !source.includes('readFileSync2(path31,"utf8")') || !source.includes("parseBiliConfig(raw)")) {
+        !source.includes("parseBiliConfig(raw)")) {
       throw new Error("native config reader: upstream changed");
     }
-    source += "\n" + configReader + "\n";
+    source += "\n" + configReaderFor(configReaderAlias(source)) + "\n";
   }
   const span = helperSpan(source);
   const block = source.includes("\r\n") ? replacement.replaceAll("\n", "\r\n") : replacement;
