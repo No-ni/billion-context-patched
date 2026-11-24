@@ -1090,6 +1090,30 @@ if (text.includes(UPLOAD_413_BRANCH)) {
   replaceOnce("upload-limit 413 refold", UPLOAD_413_ANCHOR, UPLOAD_413_BRANCH + UPLOAD_413_ANCHOR);
   console.log("upload-limit 413 refold: patched");
 }
+// 23. stream-writer trace (diagnostics only). The 2026-11-23 cache-seam
+// investigation showed DSH giving up on a response that the gateway, new-api and
+// Caddy had all finished in about 8s; the only trace was "client disconnected
+// mid-stream", which cannot tell a stalled body from a missing terminal event.
+// One line per request now records end()/finish/close with byte and idle totals,
+// so a stream that never closes leaves its own evidence.
+const STREAM_TRACE_MARK = "const __biliStreamT0=Date.now();";
+const STREAM_TRACE_ANCHOR = 'res.on("close",()=>{if(!res.writableEnded){const ageMs=Date.now()-forwardStartedAt;';
+const STREAM_TRACE_HELPER = [
+  'const __biliStreamId=(prepared?.session?.id??"passthrough")+"#"+String(Date.now()).slice(-6);',
+  'const __biliStreamT0=Date.now();',
+  'let __biliStreamWrites=0,__biliStreamBytes=0,__biliStreamLast=__biliStreamT0,__biliStreamEnded=false;',
+  'const __biliResWrite=res.write.bind(res),__biliResEnd=res.end.bind(res);',
+  'res.write=function(c,...r){try{__biliStreamWrites++;__biliStreamBytes+=typeof c==="string"?Buffer.byteLength(c):(c&&c.length||0);__biliStreamLast=Date.now()}catch(e){}return __biliResWrite(c,...r)};',
+  'res.end=function(...a){try{if(!__biliStreamEnded){__biliStreamEnded=true;log2("debug","[stream-trace] "+__biliStreamId+" end() after "+(Date.now()-__biliStreamT0)+"ms writes="+__biliStreamWrites+" bytes="+__biliStreamBytes)}}catch(e){}return __biliResEnd(...a)};',
+  'res.on("finish",()=>{try{log2("debug","[stream-trace] "+__biliStreamId+" finished after "+(Date.now()-__biliStreamT0)+"ms writes="+__biliStreamWrites+" bytes="+__biliStreamBytes)}catch(e){}});',
+  'res.on("close",()=>{try{const ok=__biliStreamEnded||res.writableFinished;log2(ok?"debug":"warn","[stream-trace] "+__biliStreamId+" closed after "+(Date.now()-__biliStreamT0)+"ms ended="+ok+" writes="+__biliStreamWrites+" bytes="+__biliStreamBytes+" idle="+(Date.now()-__biliStreamLast)+"ms")}catch(e){}});',
+].join("");
+if (text.includes(STREAM_TRACE_MARK)) {
+  console.log("stream-trace: already patched");
+} else {
+  replaceOnce("stream-trace", STREAM_TRACE_ANCHOR, STREAM_TRACE_HELPER + STREAM_TRACE_ANCHOR);
+  console.log("stream-trace: patched");
+}
 if (changed) {
   // The harness loads this build as a module, and a script-mode check is not the
   // same grammar: an anchor that leaves an extra brace can pass one and fail the
