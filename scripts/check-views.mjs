@@ -482,4 +482,40 @@ check("aborted-turn growth only consumes a trusted usage anchor", () => {
 
   assert.equal((source.match(/absorbAbortedTurnGrowth\(session,tokenCount,tokenCountSource\);/g) ?? []).length,4);
 });
+// B27: a fold commit rewrites the ref/ledger tables, so the new block's ids can miss
+// every persisted row for a turn while its covered messages are demonstrably on the wire
+// (the drift log reports them present in the resent history). The interval the block was
+// created with is the stable anchor; ids alone must not sink the render, and an interval
+// that cannot be corroborated must keep the refusal.
+check("a freshly folded block anchors on its coverage interval", () => {
+  const prevDb = db, prevState = session.state;
+  db = [a,b,c,msg("d"),msg("e")];
+  session.state = {blocks:[{blockId:"b1",active:true,
+    effectiveMessageIds:["h_stale1#1","h_stale2#1","h_stale3#1"],startSeq:1,endSeq:3}]};
+  const r = api.buildView(session,[a,b,c,msg("d"),msg("e"),x]);
+  assert(r.ok, "expected the interval to anchor the fold, got " + r.reason);
+  assert(r.view.some(m => m.id === "acp_summary_b1"), "summary anchor missing");
+  assert(!r.view.some(m => m.id === "a" || m.id === "b" || m.id === "c"), "covered messages leaked");
+  db = prevDb;
+  session.state = prevState;
+});
+check("an uncorroborated coverage interval keeps the refusal", () => {
+  const prevDb = db, prevState = session.state;
+  db = Array.from({length:40},(_,i) => msg("m" + i));
+  session.state = {blocks:[{blockId:"b1",active:true,
+    effectiveMessageIds:["h_one"],startSeq:1,endSeq:40}]};
+  assert.equal(api.buildView(session,[...db,x]).reason, "block-unanchored");
+  db = prevDb;
+  session.state = prevState;
+});
+check("a ref suffix on the block ids does not break the id anchor", () => {
+  const prevDb = db, prevState = session.state;
+  db = [a,b,c,msg("d")];
+  session.state = {blocks:[{blockId:"b1",active:true,effectiveMessageIds:["a#1","b#1"]}]};
+  const r = api.buildView(session,[a,b,c,msg("d"),x]);
+  assert(r.ok, "expected base-id matching to anchor, got " + r.reason);
+  assert(r.view.some(m => m.id === "acp_summary_b1"), "summary anchor missing");
+  db = prevDb;
+  session.state = prevState;
+});
 console.log("views: " + checks + " checks passed");

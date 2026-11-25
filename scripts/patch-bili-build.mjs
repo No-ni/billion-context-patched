@@ -358,6 +358,63 @@ if (text.includes(UNANCHORED_MARK)) {
   replaceOnce("unanchored-newest", UNANCHORED_ANCHOR, UNANCHORED_REPL);
   console.log("unanchored-newest: patched");
 }
+// 9b. A freshly folded block must anchor on its coverage interval -------------------
+// The fold is committed from the client's message list, and the same commit rewrites the
+// ref/ledger tables (ledger-aligned refs, reminted covered ids). For the next one or two
+// requests the block's effectiveMessageIds can therefore miss every persisted row while
+// its covered messages are demonstrably on the wire — the drift log reports the covered
+// ids as present in the resent history. loadTranscriptBase only compared ids, so it threw
+// block-unanchored, the render degraded to the client's raw history, and the session paid
+// a full prefix re-pay for a fold that was not even applied.
+// The block already carries the coverage interval it was created with (resolveCoverageInterval
+// over the covered messages' ledgerSeq, which parseRow derives as row.seq + 1). Anchor on
+// that interval when ids fail, accept the offset that matches, corroborate against the
+// recorded covered count, and give up (keep the old behaviour) when it does not corroborate.
+const SEQ_MARK = "function __biliSeqAnchor(";
+const SEQ_HELPER =
+  'function __biliBaseOfId(id){const s=String(id);const h=s.indexOf("#");return h>0?s.slice(0,h):s}' +
+  'function __biliSeqAnchor(block,rows,blockSeqs){' +
+  'const s=block&&block.startSeq,e=block&&block.endSeq;' +
+  'if(typeof s!=="number"||typeof e!=="number"||s%1!==0||e%1!==0||s<0||e<s)return 0;' +
+  'const expected=Array.isArray(block.effectiveMessageIds)?block.effectiveMessageIds.length:0;' +
+  'const pick=off=>{const set=new Set();for(let i=0;i<rows.length;i++){const q=rows[i].seq+off;if(q>=s&&q<=e)set.add(rows[i].seq)}return set};' +
+  'const score=set=>{if(set.size===0)return Number.POSITIVE_INFINITY;const arr=[...set].sort((x,y)=>x-y);let gaps=0;' +
+  'for(let i=1;i<arr.length;i++)if(arr[i]!==arr[i-1]+1)gaps++;' +
+  'const gap=expected>0?Math.abs(set.size-expected):0;return gap+gaps*(expected>0?expected:1)};' +
+  'let off=1,best=pick(1);const alt=pick(0);' +
+  'if(score(alt)<score(best)){best=alt;off=0}' +
+  'if(best.size===0)return 0;' +
+  'if(expected>0&&(best.size<Math.max(1,Math.floor(expected/2))||best.size>expected*2+16))return 0;' +
+  'for(const q of best)blockSeqs.add(q);' +
+  'try{console.warn("[snapshot-render] seq-anchor "+block.blockId+" rows="+best.size+" expected="+expected+" offset="+off)}catch(e){}' +
+  'return best.size};';
+const SEQ_WANTED_OLD = 'const wanted=new Set(block.effectiveMessageIds);';
+const SEQ_WANTED_NEW = SEQ_WANTED_OLD + 'const __wantedBase=new Set([...wanted].map(__biliBaseOfId));';
+const SEQ_MATCH_OLD = 'if(wanted.has(rows[i].msgId))blockSeqs.add(rows[i].seq)';
+const SEQ_MATCH_NEW = 'if(wanted.has(rows[i].msgId)||__wantedBase.has(__biliBaseOfId(rows[i].msgId)))blockSeqs.add(rows[i].seq)';
+const SEQ_ANCHORED_OLD = UNANCHORED_REPL;
+const SEQ_ANCHORED_NEW =
+  'if(blockSeqs.size===0&&__biliSeqAnchor(block,rows,blockSeqs)===0){if(block!==activeBlocks2[activeBlocks2.length-1]||blockSeeds.length===0)return{reason:"block-unanchored"};try{console.warn("[snapshot-render] newest block "+block.blockId+" is not in the transcript yet, rendered raw this turn")}catch{}continue}';
+
+if (text.includes(SEQ_MARK)) {
+  // Helper landed but the call site may not: keep both halves reachable on re-runs.
+  if (!text.includes("__biliSeqAnchor(block,rows,blockSeqs)")) {
+    replaceOnce("seq-anchor call", SEQ_ANCHORED_OLD, SEQ_ANCHORED_NEW);
+  }
+  if (!text.includes(SEQ_WANTED_NEW)) replaceOnce("seq-anchor wanted", SEQ_WANTED_OLD, SEQ_WANTED_NEW);
+  if (!text.includes(SEQ_MATCH_NEW)) replaceOnce("seq-anchor match", SEQ_MATCH_OLD, SEQ_MATCH_NEW);
+  console.log("seq-anchor: already patched");
+} else {
+  if (!text.includes(UNANCHORED_MARK)) {
+    console.error("seq-anchor: needs step 9 applied first — run it, then re-run this script");
+    process.exit(1);
+  }
+  replaceOnce("seq-anchor helper", "function loadTranscriptBase(", SEQ_HELPER + "function loadTranscriptBase(");
+  replaceOnce("seq-anchor call", SEQ_ANCHORED_OLD, SEQ_ANCHORED_NEW);
+  replaceOnce("seq-anchor wanted", SEQ_WANTED_OLD, SEQ_WANTED_NEW);
+  replaceOnce("seq-anchor match", SEQ_MATCH_OLD, SEQ_MATCH_NEW);
+  console.log("seq-anchor: patched");
+}
 // 10. Verify complete prefixes and prove skipped-block raw coverage.
 // Upgrade existing patched builds as well as fresh upstream builds.
 const safety = readFileSync(join(here, "patches", "view-safety.block.js"), "utf8").trimEnd() + "\n";

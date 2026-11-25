@@ -1004,3 +1004,13 @@ if (res.destroyed || res.writableEnded) {
 `scripts/fixtures/e2e-mock/gateway.mjs` 新增 `hold` plan（在终止帧或非终止 delta 之后保持连接），`scripts/check-e2e-mock.mjs` 新增 `clientCloseChecks()` 三项：终止帧后关闭不记 abort、不触发 growth 吸收且轨迹仍在；终止帧前关闭仍记 abort 且不记终止；连续 500 的失败 arm 日志落在 token 空间（实测 171,017 字符 → 60,092 tokens）。补丁产物与干净产物重打的字节一致（md5 `24457ebf…` → `eb848331…`），二次运行幂等；`check-e2e-mock.mjs` 35 项全部通过。
 
 未覆盖：真实 DSH 客户端的挂断时序只用本地 mock 复现；native/WS 路径未改；`/3` 是保守上界而非精确 tokenizer。
+
+## 40. 2026-11-25：折叠后首轮锚不住（B27）
+
+真实会话 `session-f88c1e89`（114 次请求）暴露：一次成功折叠（77,066 tok，`postCtx≈88053`）之后，接下来两条请求的出站仍是未折叠的原始历史（`outbound=756.3KiB` / `766.6KiB`），直到 76 秒后的第三条才降到 `475.4KiB`。三条请求的缓存命中分别是 9.1%、98.5%、15.6%：第一次折叠白付了 213K token 的全量前缀重建，上下文也晚了两轮才降。
+
+日志证据：折叠提交的同一毫秒写了 `[persist] ledger-aligned refs … kept=1 restamped=150 rehomed=86 blocked=3 superseded=236 (#4316 PR3/3)` 与 `[persist] remapped 8 token-snapshot entries onto ledger-aligned refs (#4599)`；随后两条请求都是 `[snapshot-render] legacy fallback (block-unanchored)` 与 `[snapshot-recovery] re-prepared once after block-unanchored; rendered=false`，而同一轮的 `[acp-drift]` 报告 `82/83 covered message id(s) present in resent history`——被覆盖的消息就在客户端重发的历史里，只是统一记录行上的 id 与新块对不上。`remintCoveredLiveIds` 要以上一轮的 `lastPassIds` 为前提才重铸被覆盖消息的编号，提交当轮必然空集；第二条请求仍未对齐，第三条才成。整场会话没有 `slow-ingest`，所以这不是"行还没落盘"，而是 id 空间在该回合内不一致。
+
+修法（步骤 9b）：`loadTranscriptBase` 在 id 匹配为空时改用块自带的覆盖区间匹配行。区间由 `resolveCoverageInterval` 在折叠时写入（`startSeq`/`endSeq`，`ledgerSeq` 口径；`parseRow` 令 `msg.ledgerSeq = seq + 1`），因此同时试 `seq+1` 与 `seq` 两种偏移，取与被覆盖消息数最接近且连续的一组；命中数低于 `max(1, expected/2)` 或高于 `expected*2+16` 时判定不可信，原样返回 `block-unanchored`。id 比较同时补上 `baseIdOf`（剥 `#` 后缀），与 `syncBlocks`/`isCovered` 的口径一致。
+
+边界：只在 id 判据已经失败时生效；`assembleView` 的装配不变（被覆盖行仍按 `coveredSeqUnion` 从视图剔除，摘要仍放在区间之后）；B9 的最新块跳过、B10 的完整性证明、B23 的每条提醒一次折叠都不变。退化路径丢 ACP 标签是同一根因的第二个症状——折叠渲染失败时出站走的是客户端原始消息，引用表里没有它们的 id，标签整体消失，前缀从头改写；锚定成功后该轮回到统一记录视图，标签随之恢复。通用退化（存储不可用、记录为空）仍会丢标签，本轮不改变那条路径，避免送出与当前引用表不一致的旧标签。

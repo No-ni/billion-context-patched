@@ -17,9 +17,9 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮�
 
 ## 2. 实现与检查映射
 
-行为、默认值和拒绝条件只在 SPEC 维护；下表按稳定 ID 定位实现和验证。B1–B26 的代理改动由 `scripts/patch-bili-build.mjs` 重打；其中 B25/B26 是上游主线未修的自修复，上游状态与合并复核方法见 [SELF-FIXES.md](SELF-FIXES.md)，B20 的客户端改动由 `scripts/patch-bili-client.mjs` 在构建时施加。`scripts/patch-bili-agent.mjs` 在完整 native factory 中修正 B7/W5 所需的 WS 会话身份请求头，并补齐 B16 的五项图片预算键与 IMG-12 的 `imageRestoreHostOffload` 开关登记。
+行为、默认值和拒绝条件只在 SPEC 维护；下表按稳定 ID 定位实现和验证。B1–B27 的代理改动由 `scripts/patch-bili-build.mjs` 重打；其中 B25/B26 是上游主线未修的自修复，上游状态与合并复核方法见 [SELF-FIXES.md](SELF-FIXES.md)，B20 的客户端改动由 `scripts/patch-bili-client.mjs` 在构建时施加。`scripts/patch-bili-agent.mjs` 在完整 native factory 中修正 B7/W5 所需的 WS 会话身份请求头，并补齐 B16 的五项图片预算键与 IMG-12 的 `imageRestoreHostOffload` 开关登记。
 
-### bili：B1–B26
+### bili：B1–B27
 
 | ID | 实现位置 | 检查与覆盖边界 |
 | --- | --- | --- |
@@ -49,6 +49,7 @@ bili 的短提交记在 `vendor/billion-context/dist/build-info.json`。本轮�
 | B24 | 步骤 23 在响应侧插入 `[stream-trace]` 三行轨迹（`end()`、`finish`、`close`），正常 debug、未结束关闭 warn | `check-e2e-mock.mjs` 在真实断流与正常结束的响应上读取 `bili.log` 的三行轨迹；只读响应对象、不改写字节、不新增计时器 |
 | B25 | 步骤 24 的 catch 终止判定 + 步骤 26 的 OpenAI `finish_reason` 终止证据；真 abort 仍调用 `noteAbortedTurn` | `check-e2e-mock.mjs` 的 `clientCloseChecks()`：终止帧后关闭不记 abort、不触发 growth 吸收且 `[stream-trace]` 仍在；终止帧前关闭仍记 abort；上游 `issue5293`/`issue5415` 覆盖真 abort 路径不变 |
 | B26 | 步骤 25：失败 arm 的字符上界换算为 token（`Math.ceil(chars/3)`）后再与 `textEstimate` 比较 | `check-e2e-mock.mjs` 连续 500 的失败 arm 日志：N < 核心字符数/2 且 N ≥ `ceil(chars/3)`；真实 usage 到达后清除临时基线 |
+| B27 | 步骤 9b：`loadTranscriptBase` 的覆盖区间第二判据与 base id 比较；数量不可自洽时保持原降级 | `check-views.mjs` 区间锚定成功、不可自洽拒绝、`#` 后缀按 base 口径；mock E2E 的真实压缩续轮断言首条请求已折叠；真实网关缓存命中需真机 |
 
 IMG-01–IMG-09、IMG-11 已随 B12–B15/B17 的行为删除（0.7.5）；保留 IMG-10/IMG-10a 的预算注入与卡片，以及 2026-11-22 按用户要求重新放开的 IMG-12（宿主退役占位还原）与 IMG-13（上传超限 413 兜底）。IMG-12/IMG-13 的实现位于 `patches/image-restore.block.js`，由 `scripts/patch-bili-build.mjs` 的步骤 22 插入；mock E2E 覆盖数组与合并字符串两种宿主形态、开关关闭保留占位、413 折叠一次重发（含泛化 `request_too_large` 与中文体积文案）、折叠失败时恢复请求计数与待发送视图，`check-image-restore.mjs` 覆盖还原缓存上限与开关；字符串比较忽略 accelerator 引用差异，只看可见文本与图片结构。旧检查 `check-image-retention.mjs`、`check-host-image-fallback.mjs` 已删除，历史审计仍可读。
 
