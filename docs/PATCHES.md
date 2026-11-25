@@ -8,7 +8,7 @@
 - 当前固定基线：上游 `0d94a8a2`（上游版本号仍是 0.1.213，kernel 0.0.196）；从旧 `406193b2` 的迁移见第 28 节，第 15 节保存当时的来源历史。
 - 我们的改动不是一份 diff：bili 构建上的二十六组补丁由 `scripts/patch-bili-build.mjs`（B20 在 `scripts/patch-bili-client.mjs`）按锚点重打（第 0.2 节），其余改动都在我们自己的文件里（第 0.1 节）
 
-项目需求及验收以 [SPEC.md](SPEC.md) 为准。当前维护分为 bili 构建 B1–B26、包装包 W1–W7、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
+项目需求及验收以 [SPEC.md](SPEC.md) 为准。当前维护分为 bili 构建 B1–B27、包装包 W1–W7、安装与运维 I1–I5 三组，见 MAINTENANCE；第 0 节保留实现索引。
 
 ## 0. 一页看完（改了什么、下次怎么核对）
 
