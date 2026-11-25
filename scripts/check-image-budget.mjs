@@ -655,13 +655,28 @@ try {
   } finally {
     rmSync(home7, { recursive: true, force: true });
   }
-  // IMG-10a: a backup that cannot be written must not stop the budget pass. A
-  // read-only directory makes the atomic temp+rename fail; the fields still land
-  // on the provider and the failure is reported once.
+  // IMG-10a: a backup that cannot be written must not stop the budget pass. Each
+  // platform blocks the atomic temp+rename its own way — a read-only parent
+  // directory on POSIX, a read-only target file on Windows, where directory
+  // modes are ignored — and either way the fields still land on the provider,
+  // the failure is reported once, the previous backup stays and no temporary
+  // file is left behind.
   const home8 = mkdtempSync(join(tmpdir(), "bili-image-budget-writefail-"));
   try {
     const configPath8 = join(home8, "billion-context.json");
     writeFileSync(configPath8, "{}");
+    const backupPath8 = configPath8 + ".image-budget-backup.json";
+    const emptyBackup8 = JSON.stringify({ version: 1, entries: [] }) + "\n";
+    writeFileSync(backupPath8, emptyBackup8);
+    const previousMode8 = statSync(home8).mode & 0o777;
+    const blockWrite = () => {
+      if (process.platform === "win32") chmodSync(backupPath8, 0o444);
+      else chmodSync(home8, 0o555);
+    };
+    const allowWrite = () => {
+      if (process.platform === "win32") chmodSync(backupPath8, 0o644);
+      else chmodSync(home8, previousMode8);
+    };
     const declared8 = () => ({ readonly: { api: "openai-completions", baseURL: "https://readonly.test/v1" } });
     const rows8 = [row("llm-pi-ai", { providers: declared8() }, { providers: declared8() })];
     const services8 = {
@@ -684,20 +699,20 @@ try {
     };
     const warnings = [], warn = console.warn;
     console.warn = message => warnings.push(String(message));
-    const previousMode = statSync(home8).mode & 0o777;
     let dispose8;
     try {
-      chmodSync(home8, 0o555);
+      blockWrite();
       installImageBudgetDefaults({
         inject: (dependencies, callback) => callback({ get: name => services8[name], effect: effect => { dispose8 = effect(); }, on: () => {} }),
       }, { ready: Promise.resolve(true), configPath: () => configPath8, readConfig: path => JSON.parse(readFileSync(path, "utf8")) });
       await eventually(() => rows8[0].user.providers.readonly.requestImageMaxBytes === 153600);
       assert(warnings.some(message => message.includes("could not write the image budget backup at " + configPath8)), "a failed backup write must be reported");
-      assert(!existsSync(configPath8 + ".image-budget-backup.json"), "a failed backup write must not leave a partial file");
-      console.log("  OK a read-only profile still gets its budget and a failed backup write is reported");
+      assert.equal(readFileSync(backupPath8, "utf8"), emptyBackup8, "a failed backup write must leave the previous backup untouched");
+      assert(!readdirSync(home8).some(name => name.includes(".tmp")), "a failed backup write must not leave a temporary file");
+      console.log("  OK a blocked backup write still applies the budget, is reported once and leaves no temp file");
       checks++;
     } finally {
-      chmodSync(home8, previousMode);
+      allowWrite();
       console.warn = warn;
     }
     await pause(20);
@@ -705,8 +720,10 @@ try {
   } finally {
     rmSync(home8, { recursive: true, force: true });
   }
-  // IMG-10a: a failed delete ("no records left" against a read-only directory)
-  // must not become an unhandled rejection — the pass simply keeps the file.
+  // IMG-10a: a failed delete ("no records left") must not become an unhandled
+  // rejection — the pass simply keeps the file. POSIX blocks the unlink with a
+  // read-only parent directory; Windows ignores directory modes, so there the
+  // backup file itself is read-only (DeleteFile refuses it).
   const home9 = mkdtempSync(join(tmpdir(), "bili-image-budget-delfail-"));
   try {
     const configPath9 = join(home9, "billion-context.json");
@@ -723,9 +740,17 @@ try {
     const rejections = [], onRejection = reason => rejections.push(reason);
     process.on("unhandledRejection", onRejection);
     const previousMode9 = statSync(home9).mode & 0o777;
+    const blockDelete = () => {
+      if (process.platform === "win32") chmodSync(backupPath9, 0o444);
+      else chmodSync(home9, 0o555);
+    };
+    const allowDelete = () => {
+      if (process.platform === "win32") chmodSync(backupPath9, 0o644);
+      else chmodSync(home9, previousMode9);
+    };
     let dispose9;
     try {
-      chmodSync(home9, 0o555);
+      blockDelete();
       installImageBudgetDefaults({
         inject: (dependencies, callback) => callback({ get: name => services9[name], effect: effect => { dispose9 = effect(); }, on: () => {} }),
       }, { ready: Promise.resolve(true), configPath: () => configPath9, readConfig: path => JSON.parse(readFileSync(path, "utf8")) });
@@ -735,7 +760,7 @@ try {
       console.log("  OK a failed backup delete is swallowed, not an unhandled rejection");
       checks++;
     } finally {
-      chmodSync(home9, previousMode9);
+      allowDelete();
       process.removeListener("unhandledRejection", onRejection);
     }
     await pause(20);

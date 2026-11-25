@@ -10,6 +10,7 @@
 | [发布流程](RELEASING.md) | 本地准备、提交审阅、CI 核验与失败重跑 |
 | [实现历史](PATCHES.md) | 补丁细节、历史方案与测量记录 |
 | [自修复记录](SELF-FIXES.md) | 上游尚未修复、由本仓库自行修复的行为，以及合并上游时的复核方法 |
+| [Windows 检查夹具修正](audits/2026-11-25-windows-check-fixture.md) | 0.8.0 发布前：IMG-10a 的写/删失败注入按平台改法，Windows 上不再依赖被忽略的目录模式 |
 | [客户端关闭语义与失败 arm 估算](audits/2026-11-24-self-fix-abort-arm.md) | B25/B26：终止帧后关闭不再记 abort、OpenAI `finish_reason` 视为终止；失败 arm 估算改为 token 口径 |
 | [失效图片预算备份清理与卸载保护](audits/2026-11-22-image-budget-backup-cleanup.md) | IMG-10a 补两项收尾：删除 provider 后清理失效备份条目；宿主已销毁 settings 服务时卸载钩子不再抛错 |
 | [宿主退役占位还原与上传超限兜底](audits/2026-11-22-host-offload-restore.md) | IMG-12 把宿主退役占位换回本会话已发出的字节以保住缓存前缀；IMG-13 对上传类 413 强制折叠一次再重发 |
