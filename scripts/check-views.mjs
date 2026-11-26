@@ -46,10 +46,11 @@ const msg = (id, text = id) => ({id, role:"user", contentType:"text", text});
 const block = (id, ids) => ({blockId:id, effectiveMessageIds:ids, active:true});
 const a = msg("a"), b = msg("b"), c = msg("c"), x = msg("x");
 let db = [a,b];
+let tail = null;
 const rows = () => db.map((m, seq) => ({seq, msgId:m.id, content:JSON.stringify(m)}));
 const store = {
   unifiedMessageIdRows: rows,
-  unifiedTailSeqs: () => db.map((_, seq) => seq),
+  unifiedTailSeqs: () => tail ?? db.map((_, seq) => seq),
   unifiedMessageRows: rows,
   unifiedUncoveredRows: (_, intervals) => rows().filter(r => !intervals.some(([a,b]) => r.seq >= a && r.seq <= b)),
 };
@@ -482,31 +483,37 @@ check("aborted-turn growth only consumes a trusted usage anchor", () => {
 
   assert.equal((source.match(/absorbAbortedTurnGrowth\(session,tokenCount,tokenCountSource\);/g) ?? []).length,4);
 });
-// B27: a fold commit rewrites the ref/ledger tables, so the new block's ids can miss
-// every persisted row for a turn while its covered messages are demonstrably on the wire
-// (the drift log reports them present in the resent history). The interval the block was
-// created with is the stable anchor; ids alone must not sink the render, and an interval
-// that cannot be corroborated must keep the refusal.
-check("a freshly folded block anchors on its coverage interval", () => {
-  const prevDb = db, prevState = session.state;
-  db = [a,b,c,msg("d"),msg("e")];
-  session.state = {blocks:[{blockId:"b1",active:true,
-    effectiveMessageIds:["h_stale1#1","h_stale2#1","h_stale3#1"],startSeq:1,endSeq:3}]};
-  const r = api.buildView(session,[a,b,c,msg("d"),msg("e"),x]);
-  assert(r.ok, "expected the interval to anchor the fold, got " + r.reason);
+// B27: a fold commit replaces the resident tail with a bounded folded snapshot and
+// marks lastMessagesFolded. That snapshot is a memory bound, not the render source: the
+// covered span is no longer in the tail pointer, so anchoring blocks against the pointer
+// alone found nothing and the render fell back to the client's raw history. The ids are
+// still valid against the full transcript (measured 259/260 on a trimmed session), so the
+// render must read that transcript whenever the resident tail is folded or trimmed.
+check("a folded resident tail renders the whole transcript", () => {
+  const prevDb = db, prevState = session.state, prevTail = tail;
+  db = [a,b,c];
+  tail = [2];
+  session.state = {blocks:[block("b1",["a","b"])]};
+  session.lastMessagesFolded = true;
+  const r = api.buildView(session,[a,b,c,x]);
+  assert(r.ok, "expected the folded tail to render, got " + r.reason);
   assert(r.view.some(m => m.id === "acp_summary_b1"), "summary anchor missing");
-  assert(!r.view.some(m => m.id === "a" || m.id === "b" || m.id === "c"), "covered messages leaked");
-  db = prevDb;
-  session.state = prevState;
+  assert(!r.view.some(m => m.id === "a" || m.id === "b"), "covered messages leaked");
+  assert(r.view.some(m => m.id === "c"), "uncovered tail message missing");
+  db = prevDb; tail = prevTail; session.state = prevState;
+  delete session.lastMessagesFolded;
 });
-check("an uncorroborated coverage interval keeps the refusal", () => {
-  const prevDb = db, prevState = session.state;
-  db = Array.from({length:40},(_,i) => msg("m" + i));
-  session.state = {blocks:[{blockId:"b1",active:true,
-    effectiveMessageIds:["h_one"],startSeq:1,endSeq:40}]};
-  assert.equal(api.buildView(session,[...db,x]).reason, "block-unanchored");
-  db = prevDb;
-  session.state = prevState;
+check("a trimmed tail without the folded flag renders the whole transcript", () => {
+  const prevDb = db, prevState = session.state, prevTail = tail;
+  db = [a,b,c];
+  tail = [2];
+  session.state = {blocks:[block("b1",["a","b"])]};
+  delete session.lastMessagesFolded;
+  const r = api.buildView(session,[a,b,c,x]);
+  assert(r.ok, "expected the trimmed tail to render, got " + r.reason);
+  assert(r.view.some(m => m.id === "acp_summary_b1"), "summary anchor missing");
+  assert(r.view.some(m => m.id === "c"), "uncovered tail message missing");
+  db = prevDb; tail = prevTail; session.state = prevState;
 });
 check("a ref suffix on the block ids does not break the id anchor", () => {
   const prevDb = db, prevState = session.state;

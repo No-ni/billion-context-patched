@@ -30,7 +30,7 @@ if (host) {
   }
 }
 const steps = host ? ["check-runtime", "check-ledger-runtime"] : [
-  "check-maintenance", "check-release", "check-views",
+  "check-maintenance", "check-release", "check-views", "check-fold-seam",
   "check-compaction-gate",
   "check-image-card", "check-image-budget", "check-image-restore", "check-upstream-ux", "check-preflight", "check-storage", "smoke", "check-outbound-encoding", "check-restart", "check-wrapper", "check-e2e-mock",
 ];

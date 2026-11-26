@@ -1005,7 +1005,7 @@ if (res.destroyed || res.writableEnded) {
 
 未覆盖：真实 DSH 客户端的挂断时序只用本地 mock 复现；native/WS 路径未改；`/3` 是保守上界而非精确 tokenizer。
 
-## 40. 2026-11-25：折叠后首轮锚不住（B27）
+## 40. 2026-11-25：折叠后首轮锚不住（B27，已被第 41 节取代）
 
 真实会话 `session-f88c1e89`（114 次请求）暴露：一次成功折叠（77,066 tok，`postCtx≈88053`）之后，接下来两条请求的出站仍是未折叠的原始历史（`outbound=756.3KiB` / `766.6KiB`），直到 76 秒后的第三条才降到 `475.4KiB`。三条请求的缓存命中分别是 9.1%、98.5%、15.6%：第一次折叠白付了 213K token 的全量前缀重建，上下文也晚了两轮才降。
 
@@ -1014,3 +1014,29 @@ if (res.destroyed || res.writableEnded) {
 修法（步骤 9b）：`loadTranscriptBase` 在 id 匹配为空时改用块自带的覆盖区间匹配行。区间由 `resolveCoverageInterval` 在折叠时写入（`startSeq`/`endSeq`，`ledgerSeq` 口径；`parseRow` 令 `msg.ledgerSeq = seq + 1`），因此同时试 `seq+1` 与 `seq` 两种偏移，取与被覆盖消息数最接近且连续的一组；命中数低于 `max(1, expected/2)` 或高于 `expected*2+16` 时判定不可信，原样返回 `block-unanchored`。id 比较同时补上 `baseIdOf`（剥 `#` 后缀），与 `syncBlocks`/`isCovered` 的口径一致。
 
 边界：只在 id 判据已经失败时生效；`assembleView` 的装配不变（被覆盖行仍按 `coveredSeqUnion` 从视图剔除，摘要仍放在区间之后）；B9 的最新块跳过、B10 的完整性证明、B23 的每条提醒一次折叠都不变。退化路径丢 ACP 标签是同一根因的第二个症状——折叠渲染失败时出站走的是客户端原始消息，引用表里没有它们的 id，标签整体消失，前缀从头改写；锚定成功后该轮回到统一记录视图，标签随之恢复。通用退化（存储不可用、记录为空）仍会丢标签，本轮不改变那条路径，避免送出与当前引用表不一致的旧标签。
+
+## 41. 2026-11-26：折叠后被裁剪的常驻尾巴（B27 重写）
+
+第 40 节的结论不完整。它把故障归为「提交当轮 id 空间不一致」，但真机日志的另一半证据被忽略了：每次折叠后失败的都是**同一类块**，即覆盖会话开头的块（`startSeq` 接近 0），而且下一次请求往往不需要任何 id 修复就恢复正常。按 id 空间不一致解释，无法说明为什么失败恰好卡在「首块 + 首轮」。
+
+重新测量（2026-11-26，`session-343a545a`，折叠后读数）：
+
+| 对象 | 数值 |
+| --- | --- |
+| 块 b1 覆盖 | seq 5–272，260 个 id |
+| 在全量 transcript（`messages` 表）中命中 | **259 / 260**（1 个 `retired_at` 非空） |
+| 在渲染行集合（`tailSeqs` 指针）中命中 | **0 / 260** |
+| 该会话尾巴状态 | `tailFolded=true`，`tail_json.tailSeqs = [268, 372, 373, 374]`，共 4 条 |
+| 对照：从未裁剪的会话 | `tailFolded=false`，指针 1563 条，块命中 1331/1332，渲染正常 |
+
+机理：折叠提交调用 `foldResidentTail`，把 `lastMessages` 换成 `boundedFoldedSnapshot`（按 `persistTailTokens` 预算从尾部反向保留）并置 `lastMessagesFolded=true`。该快照是内存边界，不是渲染数据源。`loadTranscriptBase` 先取 `unifiedMessageIdRows`（全量行），再与 `unifiedTailSeqs`（指针）取交集作为 `rows`。指针被裁到 4 条后，块覆盖区间内的行全部不在 `rows` 里，`wanted.has(rows[i].msgId)` 一个也命中不了，`blockSeqs.size === 0`，于是返回 `block-unanchored`。
+
+第 40 节的区间判据为什么不触发：`__biliSeqAnchor(block, rows, blockSeqs)` 读的是同一份 4 行；最多捞到 seq 268 一条，而闸门要求 `>= max(1, floor(260/2)) = 130`，直接返回 0。真机日志里 `seq-anchor` 全程 0 次，与其说「兜底没生效」，不如说「兜底看错了对象」。
+
+日志规模：整份 `bili.log` 中 `block-unanchored` 526 次、`sticky view` 498 次、`legacy fallback` 18 次、真正走 `active`（渲染成功）4 次。也就是说渲染长期靠 sticky 视图维持，进程重启（内存 pin 丢失）或首折无 pin 时就退到原文——正是 10:55、11:21、11:52 三次尖峰的来源。
+
+修法（步骤 9b 重写）：渲染行集合在「会话标记 `lastMessagesFolded === true`」或「`tailSeqs.length * 2 < 全量行数`」时改用全量 `unifiedMessageIdRows`；块锚定、未覆盖尾巴、区间计算都从同一行集合得出。健康会话（指针等于全量）行为不变。base id 比较（`#` 后缀）保留；旧的 `__biliSeqAnchor` 及其闸门删除，脚本对旧构建提供迁移分支（检测到助手函数即剥离并恢复调用点）。
+
+验证：`check-views.mjs` 新增两项——带折叠标记的会话与仅指针被裁剪的会话都必须渲染全量、保留未覆盖尾巴并剔除被覆盖消息；base 口径用例保留。`check-fold-seam.mjs` 在隔离临时家目录里起真实候选代理与回环 mock 网关：先让一轮请求自然折叠，再把持久化的 `tail_json.tailSeqs` 裁到两条、`tailFolded` 置真，重启代理后驱动下一轮——修复后的构建转发 16.1 KB（原文 38.2 KB）、摘要在场、`block-unanchored` 0 次；同一场景喂 0.8.1 构建则稳定留下 `block-unanchored` 2 次与 `legacy fallback` 1 次。脚本对 HEAD 旧构建重打后与仓库产物逐字节一致（sha256 `db0d2424…`），二次运行幂等，均无 `seq-anchor` 残留。
+
+未覆盖：真实网关的缓存命中恢复（需真机下一轮折叠）；`pluginSnapshot` 非空时的 pin 路径未改；未测 MySQL 后端的 `tail_json` 形态。

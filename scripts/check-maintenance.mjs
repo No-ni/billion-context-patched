@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { dirname, join, resolve, extname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,6 +29,26 @@ for (let n = 1; n <= Number(imageRange[1]); n++) {
 const mapped = [...maintenance.matchAll(/^\| ((?:B|W|I)\d+) \|/gm)].map(match => match[1]);
 assert.equal(new Set(mapped).size, mapped.length, "duplicate implementation mappings");
 assert.deepEqual(mapped.toSorted(), expectedMapped.toSorted(), "SPEC and implementation/check mappings differ");
+const rolloutBuild = read("vendor/billion-context/dist/index.js");
+assert.match(rolloutBuild, /pluginMsgIdIncremental:\{percent:0\}/, "R1 incremental message IDs must default to 0%");
+const rolloutPlan = rolloutBuild.match(/ROLLOUT_FEATURES=\{[^;]+;/)?.[0];
+const rolloutFunctions = rolloutBuild.slice(
+  rolloutBuild.indexOf("function rolloutEnvName("),
+  rolloutBuild.indexOf("function rolloutDecisions("),
+);
+assert(rolloutPlan && rolloutFunctions.startsWith("function rolloutEnvName("), "R1 rollout resolver must be present");
+const resolveRollout = new Function(
+  "createHash10",
+  "BP_MAX",
+  "const " + rolloutPlan + rolloutFunctions + "return resolveRollout;",
+)(createHash, 10000);
+const rolloutFeature = "pluginMsgIdIncremental";
+const rolloutId = "maintenance-check";
+assert.equal(resolveRollout(rolloutFeature, { id: rolloutId, file: {}, env: {} }).enabled, false, "R1 default must disable incremental IDs");
+const explicitlyEnabled = { features: { [rolloutFeature]: true } };
+assert.equal(resolveRollout(rolloutFeature, { id: rolloutId, file: explicitlyEnabled, env: {} }).enabled, true, "R1 must preserve explicit config on");
+assert.equal(resolveRollout(rolloutFeature, { id: rolloutId, file: explicitlyEnabled, env: { BILI_ROLLOUT_PLUGIN_MSG_ID_INCREMENTAL: "false" } }).enabled, false, "R1 environment override must take precedence");
+assert(spec.includes("### R1：") && maintenance.includes("| R1 |"), "R1 must be documented and mapped");
 assert(maintenance.includes("IMG-10") && maintenance.includes("check-image-budget.mjs"), "IMG-10 must map to its budget check");
 assert(/IMG-11[^\n]*已删除/.test(maintenance), "IMG-11 must be marked deleted");
 assert(!maintenance.includes("check-image-retention.mjs") || maintenance.includes("已删除"), "deleted image checks must not be required");
